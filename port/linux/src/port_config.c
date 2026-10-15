@@ -94,7 +94,8 @@ static const struct config_setting config_settings[] =
 		_platform_desktop,
 		"\"native\" draws at the window's resolution (fullscreen, the display's or\n"
 		"display.resolution); \"original\" draws the Xbox's 640x480 and scales it\n"
-		"up." },
+		"up; a height (\"720\", \"900\", \"1080\", \"1440\", \"2160\") draws that many lines\n"
+		"in the window's shape and scales it to the window (lower is faster)." },
 	{ "display.window_size", _config_string, "\"\"", "HALO_WINDOW_SIZE", _environment_value, _platform_desktop,
 		"The window's size, \"<width>x<height>\" (\"1920x1080\"), 640x480 or more (it\n"
 		"can be resized). Empty: display.window_scale's." },

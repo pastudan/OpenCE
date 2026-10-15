@@ -65,6 +65,8 @@ lines, and as many columns as the display's shape gives. On Android that is
 display.screen_width (port_config.c; 640 keeps 4:3); on the desktop, the
 shape of the window (of the display while the game is fullscreen, or of
 display.resolution), and 640 where display.resolution_scaling is "original".
+A height in display.resolution_scaling ("720" to "2160") draws that many
+pixel rows whatever the window's, which the display blit scales.
 The game's camera derives its horizontal field of view from the viewport, so
 the 3D view simply widens. The menus and full-screen overlays are laid out
 for 640 columns; while they draw (halo_screen_ui_offset), everything shifts
@@ -202,6 +204,19 @@ static void screen_mode_choose(long *width, float scale[2])
 		keeps its shape and the display blit letterboxes it */
 		if (*width != wanted && *width != (wanted & ~1L))
 			scale[0] = scale[1] = scale[0] < scale[1] ? scale[0] : scale[1];
+		/* a height in display.resolution_scaling above what the GPU's
+		largest target holds ("2160" on a wide window): as many as it has */
+		if (maximum_target_size > 0)
+		{
+			float factor = 1.0f;
+
+			if (*width * scale[0] > (float)maximum_target_size)
+				factor = (float)maximum_target_size / (*width * scale[0]);
+			if (SCREEN_HEIGHT * scale[1] * factor > (float)maximum_target_size)
+				factor = (float)maximum_target_size / (SCREEN_HEIGHT * scale[1]);
+			scale[0] *= factor;
+			scale[1] *= factor;
+		}
 		/* supersampling: twice the pixels each way, or as many as the GPU's
 		largest target has (once it is known), which the display blit
 		scales down; not with "original" resolution scaling, which draws
