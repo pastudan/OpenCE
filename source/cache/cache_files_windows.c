@@ -1218,7 +1218,7 @@ static void cache_file_windows_thread_proc(
 	return;
 }
 
-#ifdef HALO_WEB
+#ifdef __wasm32__
 /* port: WebAssembly calls a function only through a pointer of its own type,
 so the thread starts here, with the type CreateThread calls */
 static DWORD WINAPI cache_file_windows_thread_start(
@@ -1240,7 +1240,7 @@ static void cache_file_windows_thread_create(
 	cache_file_globals.thread = CreateThread(
 		NULL,
 		CACHE_FILE_THREAD_STACK_SIZE,
-#ifdef HALO_WEB
+#ifdef __wasm32__
 		cache_file_windows_thread_start,
 #else
 		(LPTHREAD_START_ROUTINE)cache_file_windows_thread_proc,

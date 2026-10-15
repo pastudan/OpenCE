@@ -991,6 +991,11 @@ int msvc_wremove(const wchar_t *path)
 	return halo_linux_remove(narrow_path);
 }
 
+#ifndef L_tmpnam
+/* (wasi-libc has no temporary files, and no L_tmpnam: the macOS build) */
+#define L_tmpnam 20
+#endif
+
 wchar_t *msvc_wtmpnam(wchar_t *string)
 {
 	static wchar_t buffer[L_tmpnam];

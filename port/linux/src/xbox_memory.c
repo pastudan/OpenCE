@@ -17,9 +17,11 @@ Halo Custom Edition maps need the window their tag data is linked to,
 0x40440000, reserved the same way when the game.custom_edition setting is on
 (port/linux/game/custom_edition_cache.c).
 
-The web build (HALO_WEB) has no pages to map or protect: WebAssembly's
-memory is one block, made large enough that the window is its top 128 MB
-(tools/web_build.py), and the C heap stays below it (port/web/src/web_main.c).
+The WebAssembly builds (the web's, and macOS's, whose WebAssembly is
+translated to native code: port/macos/README.md) have no pages to map or
+protect: WebAssembly's memory is one block, made large enough to hold the
+window (tools/web_build.py, tools/macos_build.py), and the C heap stays below
+it (port/web/src/web_main.c; on macOS the link's initial memory ends there).
 A block is cleared when it is allocated, as fresh pages would be, and
 protection is only remembered. Custom Edition maps, whose window lies in the
 C heap there, do not run.
@@ -34,7 +36,7 @@ C heap there, do not run.
 #include <sys/mman.h>
 #include <unistd.h>
 
-#ifdef HALO_WEB
+#ifdef __wasm32__
 /* the memory's size: whether it covers the window */
 #define web_memory_bytes() ((unsigned long long)__builtin_wasm_memory_size(0) << 16)
 #endif
@@ -67,7 +69,7 @@ static int protection_to_host(DWORD protect)
 __attribute__((constructor(101)))
 static void contiguous_arena_reserve(void)
 {
-#ifdef HALO_WEB
+#ifdef __wasm32__
 	if (web_memory_bytes() >= (unsigned long long)PLATFORM_CONTIGUOUS_BASE + PLATFORM_CONTIGUOUS_SIZE)
 		arena_reserved = TRUE;
 	else
@@ -101,7 +103,7 @@ static void custom_edition_tag_cache_reserve(void)
 	void *wanted = (void *)CUSTOM_EDITION_TAG_CACHE_ADDRESS;
 	void *result;
 
-#ifdef HALO_WEB
+#ifdef __wasm32__
 	/* (and the settings are not read before the page's are in place:
 	port/web/src/web_main.c) */
 	(void)wanted;
@@ -205,7 +207,7 @@ void *platform_contiguous_alloc(unsigned long size, unsigned long alignment,
 
 	address = (void *)(PLATFORM_CONTIGUOUS_BASE + first * PAGE_SIZE_BYTES);
 	memory_watch_forget(address, count * PAGE_SIZE_BYTES);
-#ifdef HALO_WEB
+#ifdef __wasm32__
 	memset(address, 0, count * PAGE_SIZE_BYTES);
 #else
 	/* map fresh zeroed pages over the reservation */
@@ -235,7 +237,7 @@ void platform_contiguous_free(void *address)
 	if (count)
 	{
 		memory_watch_forget(address, count * PAGE_SIZE_BYTES);
-#ifndef HALO_WEB
+#ifndef __wasm32__
 		mmap(address, count * PAGE_SIZE_BYTES, PROT_NONE,
 			MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE | MAP_FIXED, -1, 0);
 #endif
@@ -280,7 +282,7 @@ BOOL WINAPI VirtualProtect(LPVOID address, SIZE_T size, DWORD new_protect, PDWOR
 		*old_protect = platform_is_contiguous(address) ?
 			page_protection[(start - PLATFORM_CONTIGUOUS_BASE) / PAGE_SIZE_BYTES] : PAGE_READWRITE;
 	memory_watch_forget((void *)start, end - start);
-#ifndef HALO_WEB
+#ifndef __wasm32__
 	if (mprotect((void *)start, end - start, protection_to_host(new_protect)) != 0)
 	{
 		platform_set_last_error_from_errno(errno);
