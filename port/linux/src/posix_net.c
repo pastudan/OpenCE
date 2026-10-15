@@ -20,7 +20,9 @@ with the host ABI.
 #include <stdlib.h>
 #include <string.h>
 #include <sys/ioctl.h>
+#ifndef __APPLE__
 #include <sys/random.h>
+#endif
 #include <sys/socket.h>
 #include <sys/stat.h>
 #include <time.h>
@@ -29,6 +31,7 @@ with the host ABI.
 #include <unistd.h>
 
 #include "posix.h"
+#include "posix_darwin.h"
 
 /* Winsock error codes (winsockx.h) */
 #define WSAEINTR 10004

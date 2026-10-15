@@ -98,6 +98,13 @@ Game code sees the XDK's Winsock under private names (see the header). The
 platform layer includes the XDK headers itself, via platform.h. */
 
 #ifndef HALO_LINUX_PLATFORM_LAYER
+#if defined(__wasm32__) && !defined(__EMSCRIPTEN__)
+/* wasi-libc's time.h declares struct timeval (POSIX's, which its
+__struct_timeval.h always defines): it is included first, under its own
+name, so that the Winsock one below is the game's halo_ws_timeval rather
+than a second struct timeval (the macOS build, port/macos/README.md) */
+#include <time.h>
+#endif
 #include "halo_linux_winsock_names.h"
 #include "halo_linux_source_fixups.h"
 #endif

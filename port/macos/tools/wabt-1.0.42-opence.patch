@@ -1,0 +1,261 @@
+diff --git a/src/c-writer.cc b/src/c-writer.cc
+index ef4a2bd..dfc876d 100644
+--- a/src/c-writer.cc
++++ b/src/c-writer.cc
+@@ -4407,8 +4407,38 @@ void CWriter::Write(const ExprList& exprs) {
+         return;
+       }
+ 
+-      case ExprType::AtomicWait:
+-      case ExprType::AtomicNotify:
++      case ExprType::AtomicWait: {
++        // (OpenCE: memory.atomic.wait32/64 as a call to the embedder's
++        // wasm_rt_atomic_wait32/64(host address, expected, timeout ns))
++        const auto& wait = *cast<AtomicWaitExpr>(&expr);
++        Memory* memory =
++            module_->memories[module_->GetMemoryIndex(wait.memidx)];
++        bool is64 = wait.opcode == Opcode::MemoryAtomicWait64;
++        Write(StackVar(2, Type::I32), " = ",
++              is64 ? "wasm_rt_atomic_wait64" : "wasm_rt_atomic_wait32", "(",
++              "MEM_ADDR(", ExternalInstancePtr(ModuleFieldType::Memory,
++                                                memory->name),
++              ", ");
++        WriteMemoryAddress(2, memory, wait.offset);
++        Write(", ", is64 ? "8" : "4", "), ", StackVar(1), ", (s64)",
++              StackVar(0), ");", Newline());
++        DropTypes(3);
++        PushType(Type::I32);
++      } break;
++
++      case ExprType::AtomicNotify: {
++        const auto& notify = *cast<AtomicNotifyExpr>(&expr);
++        Memory* memory =
++            module_->memories[module_->GetMemoryIndex(notify.memidx)];
++        Write(StackVar(1, Type::I32), " = wasm_rt_atomic_notify(MEM_ADDR(",
++              ExternalInstancePtr(ModuleFieldType::Memory, memory->name),
++              ", ");
++        WriteMemoryAddress(1, memory, notify.offset);
++        Write(", 4), ", StackVar(0), ");", Newline());
++        DropTypes(2);
++        PushType(Type::I32);
++      } break;
++
+       case ExprType::CallRef:
+       case ExprType::ReturnCallRef:
+       case ExprType::Quaternary:
+diff --git a/src/template/wasm2c_atomicops.declarations.c b/src/template/wasm2c_atomicops.declarations.c
+index d3ea511..12a2b58 100644
+--- a/src/template/wasm2c_atomicops.declarations.c
++++ b/src/template/wasm2c_atomicops.declarations.c
+@@ -62,9 +62,8 @@ DEFINE_SHARED_STORE(i64_store32_shared, u32, u64)
+   static inline t3 name##_unchecked(uint8_t* const wasm_rt_local_memory_base, \
+                                     wasm_rt_memory_t* mem, u64 addr) {        \
+     ATOMIC_ALIGNMENT_CHECK(addr, t1);                                         \
+-    t1 result;                                                                \
+-    wasm_rt_memcpy(&result, MEM_ADDR_MEMOP(mem, addr, sizeof(t1)),            \
+-                   sizeof(t1));                                               \
++    t1 result = __atomic_load_n((t1*)MEM_ADDR_MEMOP(mem, addr, sizeof(t1)),    \
++                                __ATOMIC_SEQ_CST);                            \
+     t3 ret = (t3)(t2)result;                                                  \
+     force_read(ret);                                                          \
+     return ret;                                                               \
+@@ -97,8 +96,8 @@ DEFINE_ATOMIC_LOAD(i64_atomic_load32_u, u32, u64, u64, FORCE_READ_INT)
+       u64 addr, t2 value) {                                                   \
+     ATOMIC_ALIGNMENT_CHECK(addr, t1);                                         \
+     t1 wrapped = (t1)value;                                                   \
+-    wasm_rt_memcpy(MEM_ADDR_MEMOP(mem, addr, sizeof(t1)), &wrapped,           \
+-                   sizeof(t1));                                               \
++    __atomic_store_n((t1*)MEM_ADDR_MEMOP(mem, addr, sizeof(t1)), wrapped,     \
++                     __ATOMIC_SEQ_CST);                                       \
+   }                                                                           \
+   DEF_MEM_CHECKS1(name, _, t1, , void, t2)                                    \
+   static inline void name##_shared_unchecked(                                 \
+@@ -125,11 +124,8 @@ DEFINE_ATOMIC_STORE(i64_atomic_store32, u32, u64)
+                                     t2 value) {                               \
+     ATOMIC_ALIGNMENT_CHECK(addr, t1);                                         \
+     t1 wrapped = (t1)value;                                                   \
+-    t1 ret;                                                                   \
+-    wasm_rt_memcpy(&ret, MEM_ADDR_MEMOP(mem, addr, sizeof(t1)), sizeof(t1));  \
+-    t1 newval = ret op wrapped;                                               \
+-    wasm_rt_memcpy(MEM_ADDR_MEMOP(mem, addr, sizeof(t1)), &newval,            \
+-                   sizeof(t1));                                               \
++    t1 ret = __atomic_##opname((t1*)MEM_ADDR_MEMOP(mem, addr, sizeof(t1)),     \
++                               wrapped, __ATOMIC_SEQ_CST);                    \
+     return (t2)ret;                                                           \
+   }                                                                           \
+   DEF_MEM_CHECKS1(name, _, t1, return, t2, t2)                                \
+@@ -190,10 +186,8 @@ DEFINE_ATOMIC_RMW(i64_atomic_rmw_xor, fetch_xor, ^, u64, u64)
+                                     t2 value) {                               \
+     ATOMIC_ALIGNMENT_CHECK(addr, t1);                                         \
+     t1 wrapped = (t1)value;                                                   \
+-    t1 ret;                                                                   \
+-    wasm_rt_memcpy(&ret, MEM_ADDR_MEMOP(mem, addr, sizeof(t1)), sizeof(t1));  \
+-    wasm_rt_memcpy(MEM_ADDR_MEMOP(mem, addr, sizeof(t1)), &wrapped,           \
+-                   sizeof(t1));                                               \
++    t1 ret = __atomic_exchange_n((t1*)MEM_ADDR_MEMOP(mem, addr, sizeof(t1)),   \
++                                 wrapped, __ATOMIC_SEQ_CST);                  \
+     return (t2)ret;                                                           \
+   }                                                                           \
+   DEF_MEM_CHECKS1(name, _, t1, return, t2, t2)                                \
+@@ -223,13 +217,10 @@ DEFINE_ATOMIC_XCHG(i64_atomic_rmw_xchg, exchange, u64, u64)
+     ATOMIC_ALIGNMENT_CHECK(addr, t2);                                         \
+     t2 expected_wrapped = (t2)expected;                                       \
+     t2 replacement_wrapped = (t2)replacement;                                 \
+-    t2 ret;                                                                   \
+-    wasm_rt_memcpy(&ret, MEM_ADDR_MEMOP(mem, addr, sizeof(t2)), sizeof(t2));  \
+-    if (ret == expected_wrapped) {                                            \
+-      wasm_rt_memcpy(MEM_ADDR_MEMOP(mem, addr, sizeof(t2)),                   \
+-                     &replacement_wrapped, sizeof(t2));                       \
+-    }                                                                         \
+-    return (t1)ret;                                                           \
++    __atomic_compare_exchange_n((t2*)MEM_ADDR_MEMOP(mem, addr, sizeof(t2)),     \
++                                &expected_wrapped, replacement_wrapped, 0,    \
++                                __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST);          \
++    return (t1)expected_wrapped;                                                           \
+   }                                                                           \
+   DEF_MEM_CHECKS2(name, _, t2, return, t1, t1, t1)                            \
+   static inline t1 name##_shared_unchecked(                                   \
+@@ -254,3 +245,10 @@ DEFINE_ATOMIC_CMP_XCHG(i64_atomic_rmw32_cmpxchg_u, u64, u32);
+ DEFINE_ATOMIC_CMP_XCHG(i64_atomic_rmw_cmpxchg, u64, u64);
+ 
+ #define atomic_fence() atomic_thread_fence(memory_order_seq_cst)
++
++/* (OpenCE) memory.atomic.wait32/64 and memory.atomic.notify: the embedder's.
++The wait returns 0 ("ok": woken), 1 ("not-equal") or 2 ("timed-out"); a
++timeout below 0 waits for ever. */
++u32 wasm_rt_atomic_wait32(void* address, u32 expected, s64 timeout);
++u32 wasm_rt_atomic_wait64(void* address, u64 expected, s64 timeout);
++u32 wasm_rt_atomic_notify(void* address, u32 count);
+diff --git a/src/template/wasm2c_simd.declarations.c b/src/template/wasm2c_simd.declarations.c
+index 0de5500..49f770f 100644
+--- a/src/template/wasm2c_simd.declarations.c
++++ b/src/template/wasm2c_simd.declarations.c
+@@ -23,9 +23,9 @@
+ // MEM_ADDR_MEMOP maybe segment pointers if WASM_RT_USE_SEGUE_FOR_THIS_MODULE is
+ // defined and regular pointers otherwse. memcpy into the local works correctly
+ // in both cases.
+-#define DEFINE_SIMD_LOAD_FUNC(name, func, t)                              \
++#define DEFINE_SIMD_LOAD_FUNC_BASE(name, func, t, memt, kind)                              \
+   static inline v128 name##_unchecked(                                    \
+-      uint8_t* const wasm_rt_local_memory_base, wasm_rt_memory_t* mem,    \
++      uint8_t* const wasm_rt_local_memory_base, memt* mem,    \
+       u64 addr) {                                                         \
+     t simd_mem_value;                                                     \
+     wasm_rt_memcpy(&simd_mem_value, MEM_ADDR_MEMOP(mem, addr, sizeof(t)), \
+@@ -34,11 +34,11 @@
+     SIMD_FORCE_READ(result);                                              \
+     return result;                                                        \
+   }                                                                       \
+-  DEF_MEM_CHECKS0(name, _, t, return, v128);
++  DEF_MEM_CHECKS0(name, kind, t, return, v128);
+ 
+-#define DEFINE_SIMD_LOAD_LANE(name, func, t, lane)                        \
++#define DEFINE_SIMD_LOAD_LANE_BASE(name, func, t, lane, memt, kind)                        \
+   static inline v128 name##_unchecked(                                    \
+-      uint8_t* const wasm_rt_local_memory_base, wasm_rt_memory_t* mem,    \
++      uint8_t* const wasm_rt_local_memory_base, memt* mem,    \
+       u64 addr, v128 vec) {                                               \
+     t simd_mem_value;                                                     \
+     wasm_rt_memcpy(&simd_mem_value, MEM_ADDR_MEMOP(mem, addr, sizeof(t)), \
+@@ -47,29 +47,51 @@
+     SIMD_FORCE_READ(result);                                              \
+     return result;                                                        \
+   }                                                                       \
+-  DEF_MEM_CHECKS1(name, _, t, return, v128, v128);
++  DEF_MEM_CHECKS1(name, kind, t, return, v128, v128);
+ 
+-#define DEFINE_SIMD_STORE(name, t)                                        \
++#define DEFINE_SIMD_STORE_BASE(name, t, memt, kind)                                        \
+   static inline void name##_unchecked(                                    \
+-      uint8_t* const wasm_rt_local_memory_base, wasm_rt_memory_t* mem,    \
++      uint8_t* const wasm_rt_local_memory_base, memt* mem,    \
+       u64 addr, v128 value) {                                             \
+     t simd_mem_value;                                                     \
+     simde_wasm_v128_store(&simd_mem_value, value);                        \
+     wasm_rt_memcpy(MEM_ADDR_MEMOP(mem, addr, sizeof(t)), &simd_mem_value, \
+                    sizeof(t));                                            \
+   }                                                                       \
+-  DEF_MEM_CHECKS1(name, _, t, , void, v128);
++  DEF_MEM_CHECKS1(name, kind, t, , void, v128);
+ 
+-#define DEFINE_SIMD_STORE_LANE(name, func, t, lane)                       \
++#define DEFINE_SIMD_STORE_LANE_BASE(name, func, t, lane, memt, kind)                       \
+   static inline void name##_unchecked(                                    \
+-      uint8_t* const wasm_rt_local_memory_base, wasm_rt_memory_t* mem,    \
++      uint8_t* const wasm_rt_local_memory_base, memt* mem,    \
+       u64 addr, v128 value) {                                             \
+     t simd_mem_value;                                                     \
+     func(&simd_mem_value, value, lane);                                   \
+     wasm_rt_memcpy(MEM_ADDR_MEMOP(mem, addr, sizeof(t)), &simd_mem_value, \
+                    sizeof(t));                                            \
+   }                                                                       \
+-  DEF_MEM_CHECKS1(name, _, t, , void, v128);
++  DEF_MEM_CHECKS1(name, kind, t, , void, v128);
++
++#ifdef WASM_RT_C11_AVAILABLE
++#define DEFINE_SIMD_SHARED(x) x
++#else
++#define DEFINE_SIMD_SHARED(x)
++#endif
++#define DEFINE_SIMD_LOAD_FUNC(name, func, t)                                 \
++  DEFINE_SIMD_LOAD_FUNC_BASE(name, func, t, wasm_rt_memory_t, _)             \
++  DEFINE_SIMD_SHARED(DEFINE_SIMD_LOAD_FUNC_BASE(name##_shared, func, t,      \
++                                                wasm_rt_shared_memory_t, _shared_))
++#define DEFINE_SIMD_LOAD_LANE(name, func, t, lane)                           \
++  DEFINE_SIMD_LOAD_LANE_BASE(name, func, t, lane, wasm_rt_memory_t, _)       \
++  DEFINE_SIMD_SHARED(DEFINE_SIMD_LOAD_LANE_BASE(name##_shared, func, t, lane, \
++                                                wasm_rt_shared_memory_t, _shared_))
++#define DEFINE_SIMD_STORE(name, t)                                           \
++  DEFINE_SIMD_STORE_BASE(name, t, wasm_rt_memory_t, _)                       \
++  DEFINE_SIMD_SHARED(DEFINE_SIMD_STORE_BASE(name##_shared, t,                \
++                                            wasm_rt_shared_memory_t, _shared_))
++#define DEFINE_SIMD_STORE_LANE(name, func, t, lane)                          \
++  DEFINE_SIMD_STORE_LANE_BASE(name, func, t, lane, wasm_rt_memory_t, _)      \
++  DEFINE_SIMD_SHARED(DEFINE_SIMD_STORE_LANE_BASE(name##_shared, func, t, lane, \
++                                                 wasm_rt_shared_memory_t, _shared_))
+ 
+ // clang-format off
+ #if WABT_BIG_ENDIAN
+diff --git a/src/tools/wasm2c.cc b/src/tools/wasm2c.cc
+index b59f2cc..3de758e 100644
+--- a/src/tools/wasm2c.cc
++++ b/src/tools/wasm2c.cc
+@@ -69,6 +69,11 @@ static bool IsFeatureSupported(const std::string& feature) {
+                    feature) != std::end(supported_features);
+ };
+ 
++// (OpenCE) a shared memory compiled as an unshared one: plain loads and
++// stores, as native C makes them; the atomic operations stay atomic
++// (wasm2c_atomicops.declarations.c) and wait/notify are the embedder's
++static bool s_unshared_memory = false;
++
+ static void ParseOptions(int argc, char** argv) {
+   OptionParser parser("wasm2c", s_description);
+ 
+@@ -92,6 +97,9 @@ static void ParseOptions(int argc, char** argv) {
+       "file is used as the default.\n",
+       [](const char* argument) { s_write_c_options.module_name = argument; });
+   s_write_c_options.features.AddOptions(&parser);
++  parser.AddOption("unshared-memory",
++                   "Compile shared memories as unshared ones (plain accesses)",
++                   []() { s_unshared_memory = true; });
+   parser.AddOption("no-debug-names", "Ignore debug names in the binary file",
+                    []() { s_read_debug_names = false; });
+   parser.AddArgument("filename", OptionParser::ArgumentCount::One,
+@@ -136,6 +144,16 @@ Result Wasm2cMain(Errors& errors) {
+       ReadBinaryIr(s_infile.c_str(), file_data, options, &errors, &module));
+   CHECK_RESULT(ValidateModule(&module, &errors, s_write_c_options.features));
+   CHECK_RESULT(GenerateNames(&module));
++  if (s_unshared_memory) {
++    for (Memory* memory : module.memories) {
++      memory->page_limits.is_shared = false;
++    }
++    for (Import* import : module.imports) {
++      if (import->kind() == ExternalKind::Memory) { auto* memory_import = static_cast<MemoryImport*>(import);
++        memory_import->memory.page_limits.is_shared = false;
++      }
++    }
++  }
+   /* TODO(binji): This shouldn't fail; if a name can't be applied
+    * (because the index is invalid, say) it should just be skipped. */
+   (void)ApplyNames(&module);

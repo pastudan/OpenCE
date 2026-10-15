@@ -626,7 +626,14 @@ DWORD WINAPI SleepEx(DWORD milliseconds, BOOL alertable)
 	if (milliseconds == INFINITE)
 	{
 		for (;;)
+		{
+#if defined(__wasm32__) && !defined(__EMSCRIPTEN__)
+			/* (wasi-libc has no pause: the macOS build) */
+			sleep(3600);
+#else
 			pause();
+#endif
+		}
 	}
 	duration.tv_sec = milliseconds / 1000;
 	duration.tv_nsec = (long)(milliseconds % 1000) * 1000000L;
