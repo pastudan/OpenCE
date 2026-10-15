@@ -57,8 +57,11 @@ SCREENS = {
             # in place of this one)
             ("WINDOW SIZE:", "display.window_size", [("1280 x 960", "1280x960")],
              "The window's size: 4:3, then 16:10, 16:9 and 21:9\n(its edges can also be dragged).", "desktop"),
-            ("RESOLUTION SCALING:", "display.resolution_scaling", [("NATIVE", "native"), ("ORIGINAL", "original")],
-             "Native draws at the resolution; Original draws\nthe Xbox's 640x480 and scales it up.", "desktop web"),
+            ("RESOLUTION SCALING:", "display.resolution_scaling",
+             [("ORIGINAL", "original"), ("720P", "720"), ("900P", "900"), ("1080P", "1080"),
+              ("1440P", "1440"), ("2160P", "2160"), ("NATIVE", "native")],
+             "Native: the resolution. Original: the Xbox's 480.\n720P to 2160P: that many lines (lower is faster).",
+             "desktop web"),
             ("V-SYNC:", "display.vsync", ON_OFF,
              "Wait for the display between frames, so that the\npicture never tears.", None),
             ("FRAME RATE LIMIT:", "display.max_fps",

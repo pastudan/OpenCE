@@ -510,16 +510,33 @@ static BOOL platform_window_fullscreen(void)
 		height >= (int)(mode->h * mode->pixel_density + 0.5f);
 }
 
+/* display.resolution_scaling as a height in pixels: "720", "900", "1080",
+"1440", "2160" (any number from 480 to 4320), else 0: "native", the
+window's own, or "original", which platform_screen_mode tests first */
+static long platform_resolution_scaling_height(void)
+{
+	const char *text = config_string("display.resolution_scaling");
+	char *end;
+	long height = strtol(text, &end, 10);
+
+	if (end == text || (*end && *end != 'p' && *end != 'P') || (*end && end[1]))
+		return 0;
+	return height >= 480 && height <= 4320 ? height : 0;
+}
+
 /* the size in pixels the game draws its picture at (d3d8_gl.c): the
 window's, the display's while fullscreen, or display.resolution's while
 fullscreen (either kind) where the display has room for it; before the
-window opens, what it will be. FALSE where display.resolution_scaling is
-"original": the Xbox's 640x480, scaled to the window. */
+window opens, what it will be. A height in display.resolution_scaling
+("1080") then draws that many lines, with the width of the same shape, and
+the display blit scales the picture to the window (down, where the window
+has fewer). FALSE where display.resolution_scaling is "original": the
+Xbox's 640x480, scaled to the window. */
 BOOL platform_screen_mode(long *width, long *height)
 {
 	/* (the size last given, for a window that has none: minimized) */
 	static long last_width, last_height;
-	long resolution_width, resolution_height;
+	long resolution_width, resolution_height, scaling_height;
 	BOOL fullscreen;
 
 	if (!strcmp(config_string("display.resolution_scaling"), "original"))
@@ -555,6 +572,12 @@ BOOL platform_screen_mode(long *width, long *height)
 	{
 		*width = resolution_width;
 		*height = resolution_height;
+	}
+	scaling_height = platform_resolution_scaling_height();
+	if (scaling_height && *height > 0)
+	{
+		*width = (*width * scaling_height + *height / 2) / *height;
+		*height = scaling_height;
 	}
 	last_width = *width;
 	last_height = *height;
