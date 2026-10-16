@@ -1966,10 +1966,18 @@ HRESULT WINAPI Direct3D_CreateDevice(UINT adapter, D3DDEVTYPE device_type, void 
 		}
 		viewport_update_constants();
 
+#ifdef HALO_METAL
+		/* (the macOS build, while its device moves to Metal: the window,
+		which Metal presents into, and no GL: the device draws nothing, as
+		debug.null_renderer's, port/macos/README.md) */
+		if (config_boolean("debug.null_renderer") || !platform_video_initialize(width, height))
+			platform_log("Direct3D: running without a window (nothing is displayed)");
+#else
 		if (!config_boolean("debug.null_renderer") && platform_video_initialize(width, height))
 			gl_initialize();
 		else
 			platform_log("Direct3D: running without a window (nothing is displayed)");
+#endif
 		device.created = TRUE;
 	}
 	*returned_device = device_pointer();
@@ -5945,6 +5953,13 @@ void WINAPI D3DDevice_Present(CONST RECT *source_rectangle, CONST RECT *destinat
 		device.index_offset = INDEX_BUFFER_SIZE;
 #endif
 	}
+#ifdef HALO_METAL
+	if (!device.gl_ready)
+	{
+		platform_video_swap();
+		memory_watch_begin_frame();
+	}
+#endif
 	device.frame++;
 	stats.presents++;
 	if (debug_settings.statistics && device.frame % 60 == 0)

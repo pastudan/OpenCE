@@ -166,6 +166,12 @@ const char *platform_save_root(void)
 		else if (getenv("APPDATA") && *getenv("APPDATA"))
 			snprintf(root, sizeof(root), "%s/halo", getenv("APPDATA"));
 #endif
+#ifdef HALO_MACOS
+		/* the macOS build (port/macos) keeps them where Mac applications
+		keep theirs */
+		else if (home && *home)
+			snprintf(root, sizeof(root), "%s/Library/Application Support/Halo", home);
+#endif
 		else if (data_home && *data_home)
 			snprintf(root, sizeof(root), "%s/halo-linux", data_home);
 		else if (home && *home)

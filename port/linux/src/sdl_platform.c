@@ -11,7 +11,11 @@ and the debug keyboard that the game's console reads.
 
 #include "platform.h"
 #include "sdl_platform.h"
+#ifdef HALO_METAL
+#include "metal_device.h"
+#else
 #include "gl.h"
+#endif
 #include "port_config.h"
 #include "p2p.h"
 #include "xiso.h"
@@ -26,7 +30,9 @@ and the debug keyboard that the game's console reads.
 #endif
 
 static SDL_Window *platform_window;
+#ifndef HALO_METAL
 static SDL_GLContext platform_gl_context;
+#endif
 static SDL_ThreadID platform_event_thread;
 static BOOL platform_sdl_started = FALSE;
 
@@ -792,7 +798,9 @@ BOOL platform_video_initialize(unsigned long width, unsigned long height)
 	if (!platform_sdl_initialize())
 		return FALSE;
 
-#ifdef HALO_GLES
+#ifdef HALO_METAL
+	/* (the Metal device draws into the window: port/macos/host/host_metal.m) */
+#elif defined(HALO_GLES)
 	SDL_GL_SetAttribute(SDL_GL_CONTEXT_PROFILE_MASK, SDL_GL_CONTEXT_PROFILE_ES);
 	SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, 3);
 	SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, 2);
@@ -801,18 +809,22 @@ BOOL platform_video_initialize(unsigned long width, unsigned long height)
 	SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, 4);
 	SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, 5);
 #endif
+#ifndef HALO_METAL
 	SDL_GL_SetAttribute(SDL_GL_DOUBLEBUFFER, 1);
 	SDL_GL_SetAttribute(SDL_GL_DEPTH_SIZE, 0);
 	SDL_GL_SetAttribute(SDL_GL_STENCIL_SIZE, 0);
+#endif
 #ifdef HALO_WEB
 	/* an opaque canvas: the game keeps scratch values in destination alpha,
 	which a page would otherwise blend the picture by (black, or the page's
 	colours through it) */
 	SDL_GL_SetAttribute(SDL_GL_ALPHA_SIZE, 0);
 #endif
+#ifndef HALO_METAL
 	if (config_boolean("debug.gl_debug"))
 		SDL_GL_SetAttribute(SDL_GL_CONTEXT_FLAGS, SDL_GL_CONTEXT_DEBUG_FLAG);
-#if !defined(HALO_ANDROID) && !defined(_WIN32)
+#endif
+#if !defined(HALO_ANDROID) && !defined(_WIN32) && !defined(HALO_METAL)
 	/* Mesa's GL thread: the renderer makes thousands of GL calls a frame
 	and never waits for their results, so handing them to a thread of
 	their own takes a fifth of the main thread's time off it. It leaves an
@@ -838,7 +850,12 @@ BOOL platform_video_initialize(unsigned long width, unsigned long height)
 	(void)height;
 	platform_window_size_setting(&platform_window_width, &platform_window_height);
 	platform_window = SDL_CreateWindow("Halo", (int)platform_window_width, (int)platform_window_height,
-		SDL_WINDOW_OPENGL | SDL_WINDOW_RESIZABLE | SDL_WINDOW_HIGH_PIXEL_DENSITY |
+#ifdef HALO_METAL
+		SDL_WINDOW_METAL |
+#else
+		SDL_WINDOW_OPENGL |
+#endif
+		SDL_WINDOW_RESIZABLE | SDL_WINDOW_HIGH_PIXEL_DENSITY |
 		(config_boolean("debug.hidden_window") ? SDL_WINDOW_HIDDEN : 0) |
 		(platform_fullscreen_setting() ? SDL_WINDOW_FULLSCREEN : 0));
 #endif
@@ -863,6 +880,15 @@ BOOL platform_video_initialize(unsigned long width, unsigned long height)
 	platform_fullscreen_requested = platform_fullscreen_setting();
 	platform_fullscreen_kind_apply();
 #endif
+#ifdef HALO_METAL
+	if (!metal_device_attach(platform_window))
+	{
+		platform_log("cannot draw with Metal: %s", SDL_GetError());
+		return FALSE;
+	}
+	metal_device_set_vsync(config_boolean("display.vsync"));
+	platform_event_thread = SDL_GetCurrentThreadID();
+#else
 	platform_gl_context = SDL_GL_CreateContext(platform_window);
 #ifdef HALO_GLES
 	/* ES 3.2 where the driver has it, otherwise the renderer makes do with
@@ -885,6 +911,7 @@ BOOL platform_video_initialize(unsigned long width, unsigned long height)
 	(void)version;
 	platform_event_thread = SDL_GetCurrentThreadID();
 	platform_log("OpenGL %s on %s", (const char *)glGetString(GL_VERSION), (const char *)glGetString(GL_RENDERER));
+#endif
 #ifndef HALO_ANDROID
 	platform_mouse_capture(TRUE);
 #endif
@@ -918,7 +945,11 @@ void platform_display_apply(void)
 	if (!platform_window)
 		return;
 #endif
+#ifdef HALO_METAL
+	metal_device_set_vsync(config_boolean("display.vsync"));
+#else
 	SDL_GL_SetSwapInterval(config_boolean("display.vsync") ? 1 : 0);
+#endif
 }
 
 void platform_video_drawable_size(int *width, int *height)
@@ -974,7 +1005,11 @@ void platform_video_swap(void)
 	Uint64 interval, now;
 
 #endif
+#ifdef HALO_METAL
+	metal_device_present();
+#else
 	SDL_GL_SwapWindow(platform_window);
+#endif
 #ifdef HALO_WEB
 	web_frame_shown();
 #endif
