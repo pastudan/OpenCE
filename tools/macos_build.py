@@ -122,9 +122,11 @@ PROTOTYPE_FILES = {
 
 # platform units the guest does without: what the host does natively
 # (posix_*.c; memory_watch.c, page protection: web_memory_watch.c's hashing
-# instead) and, for now, the OpenGL renderer's GL calls (gl_functions.c,
-# xgpu_post.c: the device draws nothing until it is Metal's)
+# instead) and the OpenGL renderer (d3d8_gl.c, gl_functions.c and
+# xgpu_post.c: the device is port/macos/guest/d3d8_metal.c, drawing with the
+# host's Metal)
 GUEST_EXCLUDE = {
+    "d3d8_gl.c",
     "memory_watch.c",
     "posix_files.c",
     "posix_net.c",
@@ -379,7 +381,7 @@ def generate_macos_build(n: Writer, sln: Any) -> None:
         "-DWASM_RT_NONCONFORMING_UNCHECKED_STACK_EXHAUSTION=1",
         "-DWASM_RT_TRAP_HANDLER=host_trap",
     ]
-    host_include = [f"-I{PORT_DIR}/host", f"-I{platform_dir}", f"-I{_quote(sdl_include)}"]
+    host_include = [f"-I{PORT_DIR}/host", f"-I{PORT_DIR}/guest", f"-I{platform_dir}", f"-I{_quote(sdl_include)}"]
     host_objects: List[Path] = []
 
     def add_host(source: Path, cflags: List[str], implicit: Optional[List[Path]] = None) -> None:

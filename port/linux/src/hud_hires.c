@@ -337,6 +337,14 @@ unsigned int hud_hires_png_texture(const void *png, unsigned long size, unsigned
 	*levels = 1;
 	for (largest = width > height ? width : height; largest > 1; largest >>= 1)
 		(*levels)++;
+#ifdef HALO_METAL
+	texture = host_metal_texture_new();
+	host_metal_texture_define(texture, _metal_texture_2d, METAL_FORMAT_RGBA8, (unsigned int)width,
+		(unsigned int)height, 1, (unsigned int)*levels, _metal_usage_sampled, METAL_SWIZZLE_IDENTITY);
+	host_metal_texture_upload(texture, 0, 0, 0, 0, 0, (unsigned int)width, (unsigned int)height, 1, pixels,
+		(unsigned int)(width * 4), (unsigned int)(width * height * 4));
+	host_metal_texture_generate_mipmaps(texture, 0);
+#else
 	glGenTextures(1, &texture);
 	glBindTexture(GL_TEXTURE_2D, texture);
 	xgpu_gl_state_invalidate();
@@ -346,6 +354,7 @@ unsigned int hud_hires_png_texture(const void *png, unsigned long size, unsigned
 	glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, (GLsizei)width, (GLsizei)height, 0, GL_RGBA, GL_UNSIGNED_BYTE, pixels);
 	glGenerateMipmap(GL_TEXTURE_2D);
 	xgpu_gl_state_invalidate();
+#endif
 	free(pixels);
 	return texture;
 }

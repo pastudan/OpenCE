@@ -608,10 +608,10 @@ char *nv2a_vertex_shader_to_glsl(const DWORD *instructions, unsigned long instru
 		"\tif (!(abs(position.w) > 0.0))\n"
 		"\t\tposition = vec4(0.0, 0.0, 0.0, -1.0);\n"
 #ifdef HALO_METAL
-		/* Metal's clip space has depth 0..1, as D3D's, and y up, as GL's:
-		flipped, rows count from the top (what glClipControl's upper-left
-		origin does on the desktop) */
-		"\tout.position = vec4(position.x, -position.y, position.z, position.w);\n"
+		/* Metal's clip space is what glClipControl(GL_UPPER_LEFT,
+		GL_ZERO_TO_ONE) gives the desktop: depth 0..1, and y = +1 at row 0
+		of the target, the top of the picture */
+		"\tout.position = position;\n"
 		"\tout.point_size = oPts.x;\n"
 		"\tout.xD0 = clamp(oD0, 0.0, 1.0);\n"
 		"\tout.xD1 = clamp(oD1, 0.0, 1.0);\n"
