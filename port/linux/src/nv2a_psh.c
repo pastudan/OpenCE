@@ -13,6 +13,12 @@ A pixel shader runs in three parts:
 - the final combiner (PSFinalCombinerInputsABCD/EFG):
   rgb = A*B + (1-A)*C + D, alpha = G.
 Register values are clamped to [-1, 1] between stages, as on the hardware.
+
+With HALO_METAL (the macOS build) the text is Metal Shading Language
+(xgpu.h XGPU_METAL_PROLOGUE): the inputs are the vertex shader's varyings
+(nv2a_varyings_declaration), the uniforms a buffer, and each texture stage a
+texture and a sampler of its own; a texture lookup adds the stage's LOD
+bias, which Metal's samplers do not have.
 */
 
 #include "xgpu.h"
@@ -276,12 +282,21 @@ static void combiner_stage(struct xgpu_text *text, const DWORD *state, int stage
 
 static const char *sampler_declaration(unsigned char type)
 {
+#ifdef HALO_METAL
+	switch (type)
+	{
+	case _xgpu_sampler_3d: return "texture3d<float>";
+	case _xgpu_sampler_cube: return "texturecube<float>";
+	default: return "texture2d<float>";
+	}
+#else
 	switch (type)
 	{
 	case _xgpu_sampler_3d: return "sampler3D";
 	case _xgpu_sampler_cube: return "samplerCube";
 	default: return "sampler2D";
 	}
+#endif
 }
 
 static unsigned long stage_mode(const struct nv2a_pixel_shader_key *key, int stage)
@@ -330,6 +345,21 @@ static void dot_input(struct xgpu_text *text, const DWORD *state, int stage)
 
 static void sample(struct xgpu_text *text, const struct nv2a_pixel_shader_key *key, int stage, const char *coordinates)
 {
+#ifdef HALO_METAL
+	switch (key->sampler_type[stage])
+	{
+	case _xgpu_sampler_3d:
+	case _xgpu_sampler_cube:
+		xgpu_text_append(text, "tex%d.sample(smp%d, (%s).xyz, bias(u.texture_lod_bias[%d]))", stage, stage, coordinates,
+			stage);
+		break;
+	default:
+		xgpu_text_append(text, "tex%d.sample(smp%d, (%s).xy * texture_scale[%d].xy, bias(u.texture_lod_bias[%d]))", stage,
+			stage, coordinates, stage, stage);
+		break;
+	}
+	return;
+#endif
 	switch (key->sampler_type[stage])
 	{
 	case _xgpu_sampler_3d:
@@ -380,12 +410,21 @@ static void texture_stage(struct xgpu_text *text, const struct nv2a_pixel_shader
 		{
 			/* IDs must not be averaged with another segment or corrupted by
 			low-alpha artwork. Zero marks the atlas's continuous meters. */
+#ifdef HALO_METAL
+			xgpu_text_append(text,
+				"\t{\n\t\tvec2 uv = (%s).xy * texture_scale[0].xy;\n"
+				"\t\tivec2 size = ivec2(tex0.get_width(0), tex0.get_height(0));\n"
+				"\t\tivec2 pixel = clamp(ivec2(floor(uv * vec2(size))), ivec2(0), size - 1);\n"
+				"\t\tfloat threshold = tex0.read(uint2(pixel), 0).r;\n"
+				"\t\tif (threshold > 0.0) t0.rb = vec2(threshold);\n\t}\n", coordinates);
+#else
 			xgpu_text_append(text,
 				"\t{\n\t\tvec2 uv = (%s).xy * texture_scale[0].xy;\n"
 				"\t\tivec2 size = textureSize(tex0, 0);\n"
 				"\t\tivec2 pixel = clamp(ivec2(floor(uv * vec2(size))), ivec2(0), size - 1);\n"
 				"\t\tfloat threshold = texelFetch(tex0, pixel, 0).r;\n"
 				"\t\tif (threshold > 0.0) t0.rb = vec2(threshold);\n\t}\n", coordinates);
+#endif
 		}
 		break;
 	case _mode_cubemap:
@@ -512,6 +551,39 @@ static void texture_stage(struct xgpu_text *text, const struct nv2a_pixel_shader
 		xgpu_text_append(text, "\tif (t%d.a == 0.0) discard;\n", stage);
 }
 
+/* ---------- the varyings (Metal: the vertex shader's outputs) */
+
+const char *nv2a_varyings_declaration(int lights)
+{
+	/* (invariant: the same position from every program, as GLSL's
+	invariant gl_Position, for the passes that draw a surface again) */
+	static const char *const declarations[3] =
+	{
+#define NV2A_VARYINGS(extra) \
+		"struct nv2a_varyings\n" \
+		"{\n" \
+		"\tvec4 position [[position, invariant]];\n" \
+		"\tfloat point_size [[point_size]];\n" \
+		"\tvec4 xD0;\n" \
+		"\tvec4 xD1;\n" \
+		"\tvec4 xB0;\n" \
+		"\tvec4 xB1;\n" \
+		"\tvec4 xT0;\n" \
+		"\tvec4 xT1;\n" \
+		"\tvec4 xT2;\n" \
+		"\tvec4 xT3;\n" \
+		"\tfloat xFog;\n" \
+		extra \
+		"};\n"
+		NV2A_VARYINGS(""),
+		NV2A_VARYINGS("\tvec4 xWorldNormal;\n"),
+		NV2A_VARYINGS("\tvec4 xWorldNormal;\n\tvec3 xWorldPosition;\n"),
+#undef NV2A_VARYINGS
+	};
+
+	return declarations[lights < 0 ? 0 : lights > 2 ? 2 : lights];
+}
+
 /* ---------- the whole shader */
 
 static const char *comparison_operator(unsigned long function)
@@ -546,6 +618,16 @@ static void model_lighting(struct xgpu_text *text, BOOL point_lights)
 {
 	int light;
 
+#ifdef HALO_METAL
+	(void)point_lights;
+	xgpu_text_append(text,
+		"#define model_lighting() model_lighting_of(in, u.model_lights)\n"
+		"vec3 model_lighting_of(nv2a_varyings in, constant vec4 *model_lights)\n"
+		"{\n"
+		"\tvec4 xWorldNormal = in.xWorldNormal;\n"
+		"%s",
+		point_lights ? "\tvec3 xWorldPosition = in.xWorldPosition;\n" : "");
+#else
 	xgpu_text_append(text,
 		"uniform vec4 model_lights[%d];\n"
 		"in vec4 xWorldNormal;\n"
@@ -562,6 +644,14 @@ static void model_lighting(struct xgpu_text *text, BOOL point_lights)
 		"\tvec3 light = model_lights[11].xyz + max(max(facing, -facing * model_lights[0].z), 0.0) * model_lights[8].xyz +\n"
 		"\t\tmax(dot(n, -model_lights[9].xyz), 0.0) * model_lights[10].xyz;\n",
 		XGPU_MODEL_LIGHT_COUNT, point_lights ? "in vec3 xWorldPosition;\n" : "");
+#endif
+#ifdef HALO_METAL
+	xgpu_text_append(text,
+		"\tvec3 n = xWorldNormal.xyz * (xWorldNormal.w * inversesqrt(max(dot(xWorldNormal.xyz, xWorldNormal.xyz), 1.0e-24)));\n"
+		"\tfloat facing = dot(n, -model_lights[7].xyz);\n"
+		"\tvec3 light = model_lights[11].xyz + max(max(facing, -facing * model_lights[0].z), 0.0) * model_lights[8].xyz +\n"
+		"\t\tmax(dot(n, -model_lights[9].xyz), 0.0) * model_lights[10].xyz;\n");
+#endif
 	/* each point light: its position and 1 / radius squared, its cone's axis
 	and falloff scale, its color and falloff offset */
 	for (light = 0; point_lights && light < 2; light++)
@@ -605,6 +695,11 @@ char *nv2a_pixel_shader_to_glsl(const struct nv2a_pixel_shader_key *key)
 			"layout(binding = 0, offset = 0) uniform atomic_uint visible_samples;\n");
 	}
 #endif
+#ifdef HALO_METAL
+	xgpu_text_append(&text, "%s%s", XGPU_METAL_PROLOGUE, nv2a_varyings_declaration(key->per_pixel_lighting));
+	if (key->per_pixel_lighting)
+		model_lighting(&text, key->per_pixel_lighting == 2);
+#else
 	xgpu_text_append(&text,
 		SHADER_VERSION
 		"in vec4 xD0;\n"
@@ -624,6 +719,7 @@ char *nv2a_pixel_shader_to_glsl(const struct nv2a_pixel_shader_key *key)
 		xgpu_text_append(&text, "uniform vec4 blend_constant;\n");
 	if (key->per_pixel_lighting)
 		model_lighting(&text, key->per_pixel_lighting == 2);
+#endif
 	xgpu_text_append(&text,
 		"float signed_byte(float x)\n"
 		"{\n"
@@ -633,9 +729,34 @@ char *nv2a_pixel_shader_to_glsl(const struct nv2a_pixel_shader_key *key)
 		"vec3 signed_bytes(vec3 x)\n"
 		"{\n"
 		"	return vec3(signed_byte(x.r), signed_byte(x.g), signed_byte(x.b));\n"
-		"}\n"
-		"void main()\n"
-		"{\n"
+		"}\n");
+#ifdef HALO_METAL
+	/* the entry point: the varyings, the uniforms (their names as GLSL's
+	for the text below) and each stage's texture and sampler */
+	xgpu_text_append(&text, "fragment vec4 fragment_main(nv2a_varyings in [[stage_in]],\n"
+		"\tconstant xgpu_pixel_uniforms &u [[buffer(%d)]]", XGPU_METAL_PIXEL_UNIFORMS_BUFFER);
+	for (stage = 0; stage < 4; stage++)
+	{
+		xgpu_text_append(&text, ",\n\t%s tex%d [[texture(%d)]], sampler smp%d [[sampler(%d)]]",
+			sampler_declaration(key->sampler_type[stage]), stage, stage, stage, stage);
+	}
+	xgpu_text_append(&text, ")\n{\n"
+		"\tvec4 xD0 = in.xD0, xD1 = in.xD1, xT0 = in.xT0, xT1 = in.xT1, xT2 = in.xT2, xT3 = in.xT3;\n"
+		"\tfloat xFog = in.xFog;\n"
+		"\tconstant vec4 *ps_c0 = u.ps_c0;\n"
+		"\tconstant vec4 *ps_c1 = u.ps_c1;\n"
+		"\tvec4 ps_final_c0 = u.ps_final_c0, ps_final_c1 = u.ps_final_c1;\n"
+		"\tvec4 fog_color = u.fog_color, fog_parameters = u.fog_parameters;\n"
+		"\tconstant vec4 *bump_matrix = u.bump_matrix;\n"
+		"\tconstant vec4 *bump_luminance = u.bump_luminance;\n"
+		"\tconstant vec4 *texture_scale = u.texture_scale;\n"
+		"\tvec4 blend_constant = u.blend_constant;\n"
+		"\tfloat alpha_reference = u.alpha_reference;\n"
+		"\t(void)xT0; (void)xT1; (void)xT2; (void)xT3; (void)xFog; (void)xD1; (void)blend_constant;\n");
+#else
+	xgpu_text_append(&text, "void main()\n{\n");
+#endif
+	xgpu_text_append(&text,
 		"\tvec4 v0 = xD0;\n"
 		"\tvec4 v1 = xD1;\n"
 		"\tvec4 t0 = vec4(0.0), t1 = vec4(0.0), t2 = vec4(0.0), t3 = vec4(0.0);\n"
@@ -718,6 +839,7 @@ char *nv2a_pixel_shader_to_glsl(const struct nv2a_pixel_shader_key *key)
 		{
 			xgpu_text_append(&text, "\tdiscard;\n");
 		}
+#ifndef HALO_METAL
 		else if (*comparison && key->alpha_test_samples && comparison[0] != '=' && comparison[0] != '!')
 		{
 			/* multisampled: the samples covered as alpha passes the reference
@@ -732,6 +854,7 @@ char *nv2a_pixel_shader_to_glsl(const struct nv2a_pixel_shader_key *key)
 				"\tgl_SampleMask[0] = (1 << test_samples) - 1;\n",
 				comparison[0] == '<' ? "-" : "", (int)key->alpha_test_samples);
 		}
+#endif
 		else if (*comparison)
 		{
 			xgpu_text_append(&text, "\tif (!(floor(clamp(result.a, 0.0, 1.0) * 255.0 + 0.5) %s alpha_reference)) discard;\n", comparison);
@@ -754,10 +877,18 @@ char *nv2a_pixel_shader_to_glsl(const struct nv2a_pixel_shader_key *key)
 			"blend_constant", "(1.0 - blend_constant)", "vec4(blend_constant.a)", "vec4(1.0 - blend_constant.a)"
 		};
 
+#ifdef HALO_METAL
+		xgpu_text_append(&text, "\treturn clamp(result, 0.0, 1.0) * %s;\n}\n", factors[(key->source_blend - 1) & 3]);
+#else
 		xgpu_text_append(&text, "\tfragment_color = clamp(result, 0.0, 1.0) * %s;\n}\n",
 			factors[(key->source_blend - 1) & 3]);
+#endif
 		return text.buffer;
 	}
+#ifdef HALO_METAL
+	xgpu_text_append(&text, "\treturn clamp(result, 0.0, 1.0);\n}\n");
+#else
 	xgpu_text_append(&text, "\tfragment_color = clamp(result, 0.0, 1.0);\n}\n");
+#endif
 	return text.buffer;
 }

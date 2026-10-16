@@ -15,6 +15,13 @@ Xbox vertex programs finish by converting their clip-space position to
 screen space with the viewport constants c[-38] and c[-37], which Direct3D
 maintains. The generated shader inverts that transform to hand OpenGL a
 clip-space position again.
+
+The macOS build (HALO_METAL) draws with Metal, and the same program text is
+Metal Shading Language there: its prologue (XGPU_METAL_PROLOGUE, xgpu.h)
+maps GLSL's names (vec4, inversesqrt, lessThan) onto Metal's, and only the
+declarations differ. The attributes are a [[stage_in]] struct, the uniforms
+and the constants buffers (XGPU_METAL_VERTEX_*_BUFFER), and the outputs a
+struct the pixel shader takes (nv2a_varyings_declaration).
 */
 
 #include "xgpu.h"
@@ -329,13 +336,16 @@ BOOL nv2a_vertex_shader_lighting(const DWORD *instructions, unsigned long instru
 /* ---------- translation */
 
 static const char shader_prologue[] =
-#ifdef HALO_GLES
+#ifdef HALO_METAL
+	XGPU_METAL_PROLOGUE
+#elif defined(HALO_GLES)
 	/* the #version line comes first, from the context's capabilities */
 	"precision highp float;\n"
 	"precision highp int;\n"
 #else
 	"#version 450 core\n"
 #endif
+#ifndef HALO_METAL
 	"uniform vec4 c[192];\n"
 	"uniform vec4 viewport_scale;\n"
 	"uniform vec4 viewport_offset;\n"
@@ -352,6 +362,7 @@ static const char shader_prologue[] =
 	"out vec4 xT3;\n"
 	"out float xFog;\n"
 	"invariant gl_Position;\n"
+#endif
 	"vec4 unpack_normpacked3(uint p)\n"
 	"{\n"
 	"	int x = int(p << 21) >> 21;\n"
@@ -393,6 +404,37 @@ char *nv2a_vertex_shader_to_glsl(const DWORD *instructions, unsigned long instru
 	xgpu_text_append(&text, "#version %s\n", xgpu_capabilities.shading_language);
 #endif
 	xgpu_text_append(&text, "%s", shader_prologue);
+#ifdef HALO_METAL
+	/* the varyings (the pixel shader declares the same: lighting's too),
+	the attributes, and the entry point with its buffers */
+	xgpu_text_append(&text, "%s", nv2a_varyings_declaration(lighting ? lighting->lights : 0));
+	xgpu_text_append(&text, "struct nv2a_attributes\n{\n");
+	for (index = 0; index < XGPU_VERTEX_ATTRIBUTE_COUNT; index++)
+	{
+		if (packed_attribute_mask & (1UL << index))
+			xgpu_text_append(&text, "\tuint v%lu_packed [[attribute(%lu)]];\n", index, index);
+		else
+			xgpu_text_append(&text, "\tvec4 v%lu_in [[attribute(%lu)]];\n", index, index);
+	}
+	xgpu_text_append(&text, "};\n"
+		"vertex nv2a_varyings vertex_main(nv2a_attributes attributes [[stage_in]],\n"
+		"\tconstant xgpu_vertex_uniforms &uniforms [[buffer(%d)]],\n"
+		"\tconstant vec4 *c [[buffer(%d)]])\n"
+		"{\n"
+		"\tnv2a_varyings out;\n"
+		"\tvec4 viewport_scale = uniforms.viewport_scale;\n"
+		"\tvec4 viewport_offset = uniforms.viewport_offset;\n"
+		"\tfloat point_size = uniforms.point_size;\n"
+		"\tfloat screen_offset = uniforms.screen_offset;\n",
+		XGPU_METAL_VERTEX_UNIFORMS_BUFFER, XGPU_METAL_VERTEX_CONSTANTS_BUFFER);
+	for (index = 0; index < XGPU_VERTEX_ATTRIBUTE_COUNT; index++)
+	{
+		if (packed_attribute_mask & (1UL << index))
+			xgpu_text_append(&text, "\tvec4 v%lu = unpack_normpacked3(attributes.v%lu_packed);\n", index, index);
+		else
+			xgpu_text_append(&text, "\tvec4 v%lu = attributes.v%lu_in;\n", index, index);
+	}
+#else
 	/* (the pixel shader's model_lighting; the normal's length in w) */
 	if (lighting)
 		xgpu_text_append(&text, "out vec4 xWorldNormal;\n");
@@ -414,6 +456,7 @@ char *nv2a_vertex_shader_to_glsl(const DWORD *instructions, unsigned long instru
 		else
 			xgpu_text_append(&text, "\tvec4 v%lu = v%lu_in;\n", index, index);
 	}
+#endif
 	xgpu_text_append(&text,
 		"\tvec4 r0 = vec4(0.0), r1 = vec4(0.0), r2 = vec4(0.0), r3 = vec4(0.0);\n"
 		"\tvec4 r4 = vec4(0.0), r5 = vec4(0.0), r6 = vec4(0.0), r7 = vec4(0.0);\n"
@@ -447,11 +490,11 @@ char *nv2a_vertex_shader_to_glsl(const DWORD *instructions, unsigned long instru
 		/* the lighting's normal and position, before the program reuses them */
 		if (lighting && index == lighting->normal_instruction)
 		{
-			xgpu_text_append(&text, "\txWorldNormal = vec4(r%lu.xyz, length(r%lu.xyz));\n",
+			xgpu_text_append(&text, "\t" XGPU_VARYING "xWorldNormal = vec4(r%lu.xyz, length(r%lu.xyz));\n",
 				lighting->normal_register, lighting->normal_register);
 		}
 		if (lighting && lighting->lights == 2 && index == lighting->position_instruction)
-			xgpu_text_append(&text, "\txWorldPosition = r%lu.xyz;\n", lighting->position_register);
+			xgpu_text_append(&text, "\t" XGPU_VARYING "xWorldPosition = r%lu.xyz;\n", lighting->position_register);
 		xgpu_text_append(&text, "\tA = "); operand(&text, instruction, 'A', relative); xgpu_text_append(&text, ";\n");
 		xgpu_text_append(&text, "\tB = "); operand(&text, instruction, 'B', relative); xgpu_text_append(&text, ";\n");
 		xgpu_text_append(&text, "\tC = "); operand(&text, instruction, 'C', relative); xgpu_text_append(&text, ";\n");
@@ -564,6 +607,24 @@ char *nv2a_vertex_shader_to_glsl(const DWORD *instructions, unsigned long instru
 		which the clipper also takes. */
 		"\tif (!(abs(position.w) > 0.0))\n"
 		"\t\tposition = vec4(0.0, 0.0, 0.0, -1.0);\n"
+#ifdef HALO_METAL
+		/* Metal's clip space has depth 0..1, as D3D's, and y up, as GL's:
+		flipped, rows count from the top (what glClipControl's upper-left
+		origin does on the desktop) */
+		"\tout.position = vec4(position.x, -position.y, position.z, position.w);\n"
+		"\tout.point_size = oPts.x;\n"
+		"\tout.xD0 = clamp(oD0, 0.0, 1.0);\n"
+		"\tout.xD1 = clamp(oD1, 0.0, 1.0);\n"
+		"\tout.xB0 = clamp(oB0, 0.0, 1.0);\n"
+		"\tout.xB1 = clamp(oB1, 0.0, 1.0);\n"
+		"\tout.xT0 = oT0;\n"
+		"\tout.xT1 = oT1;\n"
+		"\tout.xT2 = oT2;\n"
+		"\tout.xT3 = oT3;\n"
+		"\tout.xFog = oFog.x;\n"
+		"\treturn out;\n"
+		"}\n",
+#else
 		"\tgl_Position = position;\n"
 #ifdef HALO_GLES
 		/* what glClipControl(GL_UPPER_LEFT, GL_ZERO_TO_ONE) does on desktop
@@ -582,6 +643,7 @@ char *nv2a_vertex_shader_to_glsl(const DWORD *instructions, unsigned long instru
 		"\txT3 = oT3;\n"
 		"\txFog = oFog.x;\n"
 		"}\n",
+#endif
 		XGPU_VERTEX_CONSTANT_BIAS - 38, XGPU_VERTEX_CONSTANT_BIAS - 37
 		);
 	return text.buffer;
