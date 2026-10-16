@@ -66,6 +66,100 @@ struct xgpu_text
 
 void xgpu_text_append(struct xgpu_text *text, const char *format, ...) __attribute__((format(printf, 2, 3)));
 
+/* ---------- Metal (the macOS build: HALO_METAL)
+
+The translators' program text is GLSL; with HALO_METAL it is Metal Shading
+Language, the same text after this prologue, which gives GLSL's names
+Metal's meanings. The declarations are Metal's own: the vertex shader's
+outputs and the pixel shader's inputs are one struct
+(nv2a_varyings_declaration), and the uniforms are structs in buffers, whose
+layout the device (d3d8_metal.c) fills the same way: float4s first, then
+floats, as Metal lays them out. */
+
+#define XGPU_METAL_PROLOGUE \
+	"#include <metal_stdlib>\n" \
+	"using namespace metal;\n" \
+	"#define vec2 float2\n" \
+	"#define vec3 float3\n" \
+	"#define vec4 float4\n" \
+	"#define ivec2 int2\n" \
+	"#define inversesqrt rsqrt\n" \
+	"#define lessThan(a, b) ((a) < (b))\n" \
+	"#define greaterThanEqual(a, b) ((a) >= (b))\n" \
+	"#define discard discard_fragment()\n" \
+	"struct xgpu_vertex_uniforms\n" \
+	"{\n" \
+	"\tvec4 viewport_scale;\n" \
+	"\tvec4 viewport_offset;\n" \
+	"\tfloat point_size;\n" \
+	"\tfloat screen_offset;\n" \
+	"};\n" \
+	"struct xgpu_pixel_uniforms\n" \
+	"{\n" \
+	"\tvec4 ps_c0[8];\n" \
+	"\tvec4 ps_c1[8];\n" \
+	"\tvec4 ps_final_c0;\n" \
+	"\tvec4 ps_final_c1;\n" \
+	"\tvec4 fog_color;\n" \
+	"\tvec4 fog_parameters;\n" \
+	"\tvec4 bump_matrix[4];\n" \
+	"\tvec4 bump_luminance[4];\n" \
+	"\tvec4 texture_scale[4];\n" \
+	"\tvec4 blend_constant;\n" \
+	"\tvec4 texture_lod_bias;\n" \
+	"\tvec4 model_lights[12];\n" \
+	"\tfloat alpha_reference;\n" \
+	"};\n"
+
+/* the buffers of a draw: the vertex streams take the first sixteen, and the
+attributes no stream gives read the constant one (their values) */
+#define XGPU_METAL_VERTEX_STREAM_BUFFERS 16
+#define XGPU_METAL_VERTEX_CONSTANT_ATTRIBUTES_BUFFER 16
+#define XGPU_METAL_VERTEX_UNIFORMS_BUFFER 17
+#define XGPU_METAL_VERTEX_CONSTANTS_BUFFER 18
+#define XGPU_METAL_PIXEL_UNIFORMS_BUFFER 0
+
+/* the layouts the prologue's structs have, as the device fills them */
+struct xgpu_vertex_uniforms
+{
+	float viewport_scale[4];
+	float viewport_offset[4];
+	float point_size;
+	float screen_offset;
+	float padding[2];
+};
+
+struct xgpu_pixel_uniforms
+{
+	float ps_c0[8][4];
+	float ps_c1[8][4];
+	float ps_final_c0[4];
+	float ps_final_c1[4];
+	float fog_color[4];
+	float fog_parameters[4];
+	float bump_matrix[4][4];
+	float bump_luminance[4][4];
+	float texture_scale[4][4];
+	float blend_constant[4];
+	/* (Metal's samplers have no LOD bias: the pixel shader adds it) */
+	float texture_lod_bias[4];
+	float model_lights[12][4];
+	float alpha_reference;
+	float padding[3];
+};
+
+#ifdef HALO_METAL
+/* a varying's name where the program text writes one: a member of the
+vertex shader's output, or the pixel shader's input */
+#define XGPU_VARYING "out."
+#else
+#define XGPU_VARYING ""
+#endif
+
+/* the struct of the varyings, with the per-pixel lighting's (1: the normal,
+2: and the world position) */
+const char *nv2a_varyings_declaration(int lights);
+
 /* ---------- vertex shaders */
 
 #define XGPU_VERTEX_ATTRIBUTE_COUNT 16
