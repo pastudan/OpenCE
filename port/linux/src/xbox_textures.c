@@ -563,7 +563,7 @@ static GLenum compressed_format(unsigned char kind)
 /* debug.texture_dump_directory writes level 0 of every upload as a TGA, read back from GL */
 static void texture_dump(GLenum target, const struct xgpu_texture_description *description)
 {
-#ifdef HALO_GLES
+#if defined(HALO_GLES) || defined(HALO_METAL)
 	/* ES cannot read textures back */
 	(void)target;
 	(void)description;
@@ -695,6 +695,77 @@ void halo_custom_edition_texels_forget(void)
 	custom_edition_texel_capacity = 0;
 }
 
+#ifdef HALO_METAL
+/* The macOS build's textures are the host's Metal ones (handles), made
+again at each upload (a frame on the GPU keeps drawing with the old one):
+DXT as Metal's BC formats, the rest decoded into BGRA, each with its
+channels as the Custom Edition order samples them. */
+static void upload(GLuint texture, GLenum target, const struct xgpu_texture_description *description,
+	const unsigned char *base, const D3DCOLOR *palette, unsigned char channel_order)
+{
+	struct format_information information = format_information(description->format);
+	unsigned long face_count = description->cube_map ? 6 : 1;
+	unsigned long face_size = xgpu_texture_face_size(description);
+	unsigned long largest = description->width * description->height * description->depth;
+	unsigned long *converted = NULL;
+	unsigned long face, level;
+	unsigned int format = METAL_FORMAT_BGRA8, swizzle = 0, channel;
+
+	if (description->compressed)
+	{
+		format = information.kind == _texel_dxt1 ? METAL_FORMAT_BC1 : information.kind == _texel_dxt3 ?
+			METAL_FORMAT_BC2 : METAL_FORMAT_BC3;
+	}
+	else
+	{
+		converted = malloc(largest * sizeof(unsigned long));
+		if (!converted)
+		{
+			platform_log("textures: no memory to convert a %lux%lux%lu texture; it is not drawn",
+				description->width, description->height, description->depth);
+			return;
+		}
+	}
+	for (channel = 0; channel < 4; channel++)
+		swizzle |= (unsigned int)(METAL_SWIZZLE_RED + custom_edition_channel_sources[channel_order][channel]) << (channel * 8);
+	host_metal_texture_define(texture, description->cube_map ? _metal_texture_cube :
+		target == GL_TEXTURE_3D ? _metal_texture_3d : _metal_texture_2d, format, (unsigned int)description->width,
+		(unsigned int)description->height, (unsigned int)description->depth, (unsigned int)description->levels,
+		_metal_usage_sampled, swizzle);
+	for (face = 0; face < face_count; face++)
+	{
+		for (level = 0; level < description->levels; level++)
+		{
+			const unsigned char *source = base + face * face_size + xgpu_texture_level_offset(description, level);
+			unsigned long width = level_dimension(description->width, level);
+			unsigned long height = level_dimension(description->height, level);
+			unsigned long depth = level_dimension(description->depth, level);
+
+			if (description->compressed)
+			{
+				unsigned long row = ((width + 3) / 4) * information.bytes;
+
+				host_metal_texture_upload(texture, (unsigned int)face, (unsigned int)level, 0, 0, 0, (unsigned int)width,
+					(unsigned int)height, (unsigned int)depth, source, (unsigned int)row,
+					(unsigned int)(row * ((height + 3) / 4)));
+			}
+			else
+			{
+				if (!decode_level(description, level, source, palette, converted))
+				{
+					platform_log("textures: no memory to convert a %lux%lux%lu texture; it is not drawn",
+						description->width, description->height, description->depth);
+					break;
+				}
+				host_metal_texture_upload(texture, (unsigned int)face, (unsigned int)level, 0, 0, 0, (unsigned int)width,
+					(unsigned int)height, (unsigned int)depth, converted, (unsigned int)(width * 4),
+					(unsigned int)(width * height * 4));
+			}
+		}
+	}
+	free(converted);
+}
+#else
 static void upload(GLuint texture, GLenum target, const struct xgpu_texture_description *description,
 	const unsigned char *base, const D3DCOLOR *palette, unsigned char channel_order)
 {
@@ -837,6 +908,7 @@ static void upload(GLuint texture, GLenum target, const struct xgpu_texture_desc
 	free(converted);
 	texture_dump(target, description);
 }
+#endif
 
 /* ---------- cache */
 
@@ -1074,7 +1146,11 @@ GLuint xgpu_texture_get(const DWORD *resource, const D3DCOLOR *palette, GLenum *
 		}
 		entry->generation = 0;
 		entry->override = -1;
+#ifdef HALO_METAL
+		entry->texture = host_metal_texture_new();
+#else
 		glGenTextures(1, &entry->texture);
+#endif
 		entry->next = *bucket;
 		*bucket = entry;
 	}
@@ -1102,7 +1178,11 @@ GLuint xgpu_texture_get(const DWORD *resource, const D3DCOLOR *palette, GLenum *
 		/* (which bitmap is here may have changed with the pixels) */
 		if (entry->hud_upscale)
 		{
+#ifdef HALO_METAL
+			host_metal_texture_delete(entry->hud_upscale);
+#else
 			glDeleteTextures(1, &entry->hud_upscale);
+#endif
 			entry->hud_upscale = 0;
 			xgpu_gl_state_invalidate();
 		}
@@ -1191,9 +1271,15 @@ void xgpu_texture_cache_begin_frame(void)
 			if (texture_frame - entry->last_used_frame > TEXTURE_IDLE_FRAMES)
 			{
 				*link = entry->next;
+#ifdef HALO_METAL
+				host_metal_texture_delete(entry->texture);
+				if (entry->hud_upscale)
+					host_metal_texture_delete(entry->hud_upscale);
+#else
 				glDeleteTextures(1, &entry->texture);
 				if (entry->hud_upscale)
 					glDeleteTextures(1, &entry->hud_upscale);
+#endif
 				xgpu_gl_state_invalidate();
 				texture_drop_serial++;
 				free(entry);

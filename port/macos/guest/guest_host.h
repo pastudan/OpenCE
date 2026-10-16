@@ -16,6 +16,10 @@ stream objects are small integer handles.
 #ifndef __HALO_MACOS_GUEST_HOST_H
 #define __HALO_MACOS_GUEST_HOST_H
 
+struct metal_vertex_layout;
+struct metal_clear;
+struct metal_draw;
+
 /* ---------- process */
 
 /* errno, as the guest numbers it, after the last posix_* call on this
@@ -119,6 +123,43 @@ int host_sdl_glob_directory(const char *path, const char *pattern, unsigned int 
 /* the window's CAMetalLayer made, and the device's state with it */
 int host_metal_attach(unsigned int window);
 void host_metal_set_vsync(int interval);
+/* the frame drawn so far, shown: the picture last given to
+host_metal_present_target, letterboxed in the window */
 void host_metal_present(void);
+void host_metal_present_target(unsigned int texture, unsigned int width, unsigned int height);
+
+/* textures (port/macos/guest/metal_protocol.h's formats, types and usage):
+a handle, its storage (made again each time: a frame on the GPU keeps the
+old), pixels into a level, a level of one from another's first, and
+mipmaps made from a level down */
+unsigned int host_metal_texture_new(void);
+void host_metal_texture_define(unsigned int texture, int type, unsigned int format, unsigned int width,
+	unsigned int height, unsigned int depth, unsigned int levels, int usage, unsigned int swizzle);
+void host_metal_texture_upload(unsigned int texture, unsigned int face, unsigned int level, unsigned int x,
+	unsigned int y, unsigned int z, unsigned int width, unsigned int height, unsigned int depth, const void *data,
+	unsigned int bytes_per_row, unsigned int bytes_per_image);
+void host_metal_texture_delete(unsigned int texture);
+void host_metal_texture_copy_level(unsigned int source, unsigned int destination, unsigned int level,
+	unsigned int width, unsigned int height);
+void host_metal_texture_generate_mipmaps(unsigned int texture, unsigned int first);
+/* a colour target's pixels (BGRA, rows from the top) once the GPU has drawn
+them; 1 if read */
+int host_metal_texture_read(unsigned int texture, unsigned int width, unsigned int height, void *data);
+
+/* a shader of the translators' program text (0 if it does not build), and
+a vertex layout */
+unsigned int host_metal_shader(const char *source, int fragment);
+unsigned int host_metal_vertex_layout(const struct metal_vertex_layout *layout);
+
+/* drawing: the targets (textures, 0 for none), a clear and a draw */
+void host_metal_set_targets(unsigned int color, unsigned int depth);
+void host_metal_clear(const struct metal_clear *clear);
+void host_metal_draw(const struct metal_draw *draw);
+
+/* visibility tests: one begun (its number, or ~0), ended with the game's
+index of it, and the latest count the GPU has for an index (0 if none) */
+unsigned int host_metal_visibility_begin(void);
+void host_metal_visibility_end(unsigned int test, unsigned int index);
+int host_metal_visibility_result(unsigned int index, unsigned int *count);
 
 #endif

@@ -149,6 +149,13 @@ struct xgpu_pixel_uniforms
 };
 
 #ifdef HALO_METAL
+/* the host's renderer (port/macos/guest/guest_host.h), whose textures are
+the GLuint "names" the shared texture code holds */
+#include "metal_protocol.h"
+#include "guest_host.h"
+#endif
+
+#ifdef HALO_METAL
 /* a varying's name where the program text writes one: a member of the
 vertex shader's output, or the pixel shader's input */
 #define XGPU_VARYING "out."

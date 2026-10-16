@@ -85,6 +85,7 @@ def main() -> None:
         "#include \"host.h\"",
         "#include \"halo_w2c.h\"",
         "#include \"posix.h\"",
+        "#include \"metal_protocol.h\"",
         "",
     ]
     host_functions = parse(guest_host, "host")
