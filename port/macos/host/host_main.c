@@ -1,0 +1,326 @@
+/*
+HOST_MAIN.C
+
+The macOS build's program (port/macos/README.md): it makes the game's
+memory, runs the game (the guest, translated by wasm2c: halo_w2c.h) on the
+main thread, and starts a thread for each of the game's threads.
+
+Memory. The guest's memory is 0xA0000000 bytes: the C heap below 0x80000000
+(the link's initial memory ends there, so that __heap_end does), and the
+Xbox's memory window above it, the desktop builds' 512 MB, 0x80000000 to
+0xA0000000 (port/linux/src/platform.h; the web's and Android's are 128 MB),
+which the desktop's texture and sound caches need. Its pages are backed only
+once they are used. wasm2c's runtime reserves 8 GB of
+address space for it, every byte past the end inaccessible, so that a 32-bit
+offset plus a 32-bit displacement never needs a bounds check: an access
+outside it is a fault, which the runtime reports as a trap.
+
+Threads. Each of the game's threads (wasi-libc's pthread_create, through
+wasi's thread-spawn) runs on a host thread with a wasm2c instance of its own
+(its stack pointer and thread pointer are an instance's globals), every
+instance sharing the one memory. The memory is compiled as unshared
+(wasm2c --unshared-memory): plain loads and stores, as native code makes
+them; the atomic operations stay atomic, and wait and notify are the host's
+(os_sync_wait_on_address, below).
+
+The main thread. AppKit wants the window and its events on the process's
+main thread, and the game makes its window and pumps its events on the
+thread that runs its main: so the game runs on the main thread, and nothing
+else here needs it.
+*/
+
+#include "host.h"
+#include "halo_w2c.h"
+
+#include <errno.h>
+#include <mach/mach_time.h>
+#include <os/os_sync_wait_on_address.h>
+#include <pthread.h>
+#include <signal.h>
+#include <stdatomic.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <sys/resource.h>
+#include <unistd.h>
+
+/* the guest's memory: 0xA0000000 bytes (tools/macos_build.py links its
+initial memory as 0x80000000, the heap's end, and its maximum as this) */
+#define GUEST_MEMORY_PAGES (0xA0000000ull / WASM_DEFAULT_PAGE_SIZE)
+
+struct w2c_env
+{
+	wasm_rt_memory_t memory;
+};
+struct w2c_wasi
+{
+	int unused;
+};
+struct w2c_wasi__snapshot__preview1
+{
+	int unused;
+};
+
+static struct w2c_env env;
+static struct w2c_wasi wasi;
+static struct w2c_wasi__snapshot__preview1 preview1;
+
+uint8_t *host_memory_base;
+uint64_t host_memory_size;
+
+/* the thread's own instance (its globals: stack pointer, thread pointer) */
+static _Thread_local w2c_halo *thread_instance;
+
+wasm_rt_memory_t *w2c_env_memory(struct w2c_env *instance)
+{
+	return &instance->memory;
+}
+
+void host_wasi_set_arguments(int count, char **values);
+void host_sdl_main_thread_set(void);
+
+/* ---------- logging */
+
+void host_log(const char *format, ...)
+{
+	va_list arguments;
+
+	va_start(arguments, format);
+	fputs("host: ", stderr);
+	vfprintf(stderr, format, arguments);
+	fputc('\n', stderr);
+	va_end(arguments);
+}
+
+void host_fatal(const char *format, ...)
+{
+	va_list arguments;
+
+	va_start(arguments, format);
+	fputs("host: fatal: ", stderr);
+	vfprintf(stderr, format, arguments);
+	fputc('\n', stderr);
+	va_end(arguments);
+	fflush(stderr);
+	abort();
+}
+
+/* ---------- wait and notify (memory.atomic.wait32/64, notify) */
+
+/* nanoseconds to Mach absolute time: 1 to 1 on Apple silicon (its timebase
+is 125/3 on Intel Macs, which this build does not run on) */
+static uint64_t mach_from_ns(int64_t nanoseconds)
+{
+	static mach_timebase_info_data_t timebase;
+
+	if (!timebase.denom)
+		mach_timebase_info(&timebase);
+	return (uint64_t)nanoseconds * timebase.denom / timebase.numer;
+}
+
+u32 wasm_rt_atomic_wait32(void *address, u32 expected, s64 timeout)
+{
+	int result;
+
+	if (__atomic_load_n((u32 *)address, __ATOMIC_SEQ_CST) != expected)
+		return 1;
+	if (timeout < 0)
+		result = os_sync_wait_on_address(address, expected, 4, OS_SYNC_WAIT_ON_ADDRESS_NONE);
+	else
+		result = os_sync_wait_on_address_with_timeout(address, expected, 4, OS_SYNC_WAIT_ON_ADDRESS_NONE,
+			OS_CLOCK_MACH_ABSOLUTE_TIME, mach_from_ns(timeout));
+	return result < 0 && errno == ETIMEDOUT ? 2 : 0;
+}
+
+u32 wasm_rt_atomic_wait64(void *address, u64 expected, s64 timeout)
+{
+	int result;
+
+	if (__atomic_load_n((u64 *)address, __ATOMIC_SEQ_CST) != expected)
+		return 1;
+	if (timeout < 0)
+		result = os_sync_wait_on_address(address, expected, 8, OS_SYNC_WAIT_ON_ADDRESS_NONE);
+	else
+		result = os_sync_wait_on_address_with_timeout(address, expected, 8, OS_SYNC_WAIT_ON_ADDRESS_NONE,
+			OS_CLOCK_MACH_ABSOLUTE_TIME, mach_from_ns(timeout));
+	return result < 0 && errno == ETIMEDOUT ? 2 : 0;
+}
+
+u32 wasm_rt_atomic_notify(void *address, u32 count)
+{
+	u32 woken = 0;
+
+	if (!count)
+		return 0;
+	if (count == 0xffffffffu)
+	{
+		os_sync_wake_by_address_all(address, 4, OS_SYNC_WAKE_BY_ADDRESS_NONE);
+		return 1;
+	}
+	while (woken < count && os_sync_wake_by_address_any(address, 4, OS_SYNC_WAKE_BY_ADDRESS_NONE) == 0)
+		woken++;
+	return woken;
+}
+
+/* ---------- traps */
+
+/* a trap ends the game: the guest has no handler to unwind to */
+void host_trap(wasm_rt_trap_t code)
+{
+	host_fatal("the game trapped: %s", wasm_rt_strerror(code));
+}
+
+/* ---------- threads (wasi's thread-spawn) */
+
+struct thread_start
+{
+	u32 tid;
+	u32 argument;
+};
+
+static atomic_uint next_tid = 1;
+
+static void *thread_main(void *context)
+{
+	struct thread_start start = *(struct thread_start *)context;
+	w2c_halo *instance;
+
+	free(context);
+	wasm_rt_init_thread();
+	instance = calloc(1, sizeof(*instance));
+	if (!instance)
+		host_fatal("out of memory for a thread");
+	/* (instantiating again runs no guest code but the memory's own set-up,
+	which wasi-libc's __wasm_init_memory does once for every instance) */
+	wasm2c_halo_instantiate(instance, &env, &wasi, &preview1);
+	thread_instance = instance;
+	w2c_halo_wasi_thread_start(instance, start.tid, start.argument);
+	thread_instance = NULL;
+	wasm2c_halo_free(instance);
+	free(instance);
+	wasm_rt_free_thread();
+	return NULL;
+}
+
+u32 w2c_wasi_thread0x2Dspawn(struct w2c_wasi *instance, u32 argument)
+{
+	struct thread_start *start = malloc(sizeof(*start));
+	pthread_attr_t attributes;
+	pthread_t thread;
+	int result;
+
+	(void)instance;
+	if (!start)
+		return (u32)-6;
+	start->tid = atomic_fetch_add(&next_tid, 1) & 0x1fffffff;
+	start->argument = argument;
+	pthread_attr_init(&attributes);
+	/* (the native stack runs the translated code: deep, as the game's
+	recursions are, and more than its guest stack holds) */
+	pthread_attr_setstacksize(&attributes, 16 << 20);
+	pthread_attr_setdetachstate(&attributes, PTHREAD_CREATE_DETACHED);
+	result = pthread_create(&thread, &attributes, thread_main, start);
+	pthread_attr_destroy(&attributes);
+	if (result != 0)
+	{
+		free(start);
+		return (u32)-result;
+	}
+	return start->tid;
+}
+
+/* ---------- guest allocations (host.h) */
+
+uint32_t host_guest_malloc(uint32_t size)
+{
+	if (!thread_instance)
+		return 0;
+	return w2c_halo_halo_guest_malloc(thread_instance, size);
+}
+
+void host_guest_free(uint32_t offset)
+{
+	if (thread_instance && offset)
+		w2c_halo_halo_guest_free(thread_instance, offset);
+}
+
+uint32_t host_guest_strdup(const char *text)
+{
+	size_t length;
+	uint32_t copy;
+
+	if (!text)
+		return 0;
+	length = strlen(text) + 1;
+	copy = host_guest_malloc((uint32_t)length);
+	if (copy)
+		memcpy(host_memory_base + copy, text, length);
+	return copy;
+}
+
+/* ---------- the guest's errno, after a host call */
+
+static _Thread_local int host_errno_value;
+
+void host_errno_set_from_host(void)
+{
+	host_errno_value = errno;
+}
+
+/* errno as the guest numbers it (wasi-libc's, WASI's) */
+u32 w2c_env_host_errno(struct w2c_env *instance)
+{
+	(void)instance;
+	switch (host_errno_value)
+	{
+	case 0: return 0;
+	case EACCES: return 2;
+	case EAGAIN: return 6;
+	case EBADF: return 8;
+	case EEXIST: return 20;
+	case EINTR: return 27;
+	case EINVAL: return 28;
+	case EIO: return 29;
+	case EISDIR: return 31;
+	case EMFILE: return 33;
+	case ENAMETOOLONG: return 37;
+	case ENOENT: return 44;
+	case ENOMEM: return 48;
+	case ENOSPC: return 51;
+	case ENOTDIR: return 54;
+	case ENOTEMPTY: return 55;
+	case EPERM: return 63;
+	case EROFS: return 69;
+	default: return 29;
+	}
+}
+
+/* ---------- start */
+
+int main(int argc, char **argv)
+{
+	static w2c_halo instance;
+	struct rlimit limit;
+
+	/* (sockets of a closed connection fail rather than end the game) */
+	signal(SIGPIPE, SIG_IGN);
+	/* (the game opens many files at once: its maps, their caches) */
+	if (getrlimit(RLIMIT_NOFILE, &limit) == 0 && limit.rlim_cur < 4096)
+	{
+		limit.rlim_cur = limit.rlim_max < 4096 ? limit.rlim_max : 4096;
+		setrlimit(RLIMIT_NOFILE, &limit);
+	}
+	host_wasi_set_arguments(argc, argv);
+	host_sdl_main_thread_set();
+	wasm_rt_init();
+	wasm_rt_allocate_memory(&env.memory, (uint32_t)GUEST_MEMORY_PAGES, (uint32_t)GUEST_MEMORY_PAGES, false,
+		WASM_DEFAULT_PAGE_SIZE);
+	host_memory_base = (uint8_t *)env.memory.data;
+	host_memory_size = env.memory.size;
+	wasm2c_halo_instantiate(&instance, &env, &wasi, &preview1);
+	thread_instance = &instance;
+	w2c_halo_0x5Fstart(&instance);
+	/* (_start returns only when main does; exit is proc_exit) */
+	fflush(stdout);
+	return 0;
+}

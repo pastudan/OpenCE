@@ -147,7 +147,11 @@ int posix_socket_close(int socket)
 
 int posix_socket_bind(int socket, const void *address, int address_length)
 {
+#ifdef POSIX_DARWIN_PLATFORM_ADDRESSES
+	return succeed(posix_darwin_bind(socket, address, (socklen_t)address_length));
+#else
 	return succeed(bind(socket, address, (socklen_t)address_length));
+#endif
 }
 
 int posix_socket_connect(int socket, const void *address, int address_length)
@@ -158,7 +162,11 @@ int posix_socket_connect(int socket, const void *address, int address_length)
 	transport_endpoint_winsock.c); as WSAEINPROGRESS it gave up at once,
 	and every system link join failed, a split screen game's join of its
 	own host included. */
+#ifdef POSIX_DARWIN_PLATFORM_ADDRESSES
+	int result = posix_darwin_connect(socket, address, (socklen_t)address_length);
+#else
 	int result = connect(socket, address, (socklen_t)address_length);
+#endif
 
 	if (result < 0 && errno == EINPROGRESS)
 	{
@@ -176,7 +184,11 @@ int posix_socket_listen(int socket, int backlog)
 int posix_socket_accept(int socket, void *address, int *address_length)
 {
 	socklen_t length = address_length ? (socklen_t)*address_length : 0;
+#ifdef POSIX_DARWIN_PLATFORM_ADDRESSES
+	int result = posix_darwin_accept4(socket, address, address_length ? &length : NULL, SOCK_CLOEXEC);
+#else
 	int result = accept4(socket, address, address_length ? &length : NULL, SOCK_CLOEXEC);
+#endif
 
 	if (address_length)
 		*address_length = (int)length;
@@ -191,8 +203,13 @@ int posix_socket_send(int socket, const void *buffer, int length, int flags)
 int posix_socket_sendto(int socket, const void *buffer, int length, int flags,
 	const void *address, int address_length)
 {
+#ifdef POSIX_DARWIN_PLATFORM_ADDRESSES
+	return succeed((int)posix_darwin_sendto(socket, buffer, (size_t)length, flags | MSG_NOSIGNAL,
+		address, (socklen_t)address_length));
+#else
 	return succeed((int)sendto(socket, buffer, (size_t)length, flags | MSG_NOSIGNAL,
 		address, (socklen_t)address_length));
+#endif
 }
 
 int posix_socket_recv(int socket, void *buffer, int length, int flags)
@@ -214,7 +231,11 @@ int posix_socket_recvfrom(int socket, void *buffer, int length, int flags,
 	message.msg_namelen = address && address_length ? (socklen_t)*address_length : 0;
 	message.msg_iov = &vector;
 	message.msg_iovlen = 1;
+#ifdef POSIX_DARWIN_PLATFORM_ADDRESSES
+	result = (int)posix_darwin_recvmsg(socket, &message, flags);
+#else
 	result = (int)recvmsg(socket, &message, flags);
+#endif
 	if (address_length)
 		*address_length = (int)message.msg_namelen;
 	/* a datagram larger than the buffer: both give its start, but Winsock
@@ -315,7 +336,11 @@ int posix_socket_getsockopt(int socket, int level, int name, void *value, int *l
 int posix_socket_getsockname(int socket, void *address, int *address_length)
 {
 	socklen_t length = (socklen_t)*address_length;
+#ifdef POSIX_DARWIN_PLATFORM_ADDRESSES
+	int result = posix_darwin_getsockname(socket, address, &length);
+#else
 	int result = getsockname(socket, address, &length);
+#endif
 
 	*address_length = (int)length;
 	return succeed(result);
@@ -324,7 +349,11 @@ int posix_socket_getsockname(int socket, void *address, int *address_length)
 int posix_socket_getpeername(int socket, void *address, int *address_length)
 {
 	socklen_t length = (socklen_t)*address_length;
+#ifdef POSIX_DARWIN_PLATFORM_ADDRESSES
+	int result = posix_darwin_getpeername(socket, address, &length);
+#else
 	int result = getpeername(socket, address, &length);
+#endif
 
 	*address_length = (int)length;
 	return succeed(result);
@@ -570,6 +599,15 @@ int posix_command_line_argument(int index, char *buffer, posix_ulong size)
 	(void)buffer;
 	(void)size;
 	return 0;
+#elif defined(__APPLE__)
+	/* (the macOS build's host has its arguments: port/macos/host/host_main.c) */
+	extern int *_NSGetArgc(void);
+	extern char ***_NSGetArgv(void);
+
+	if (index < 0 || index >= *_NSGetArgc() || !size)
+		return 0;
+	snprintf(buffer, size, "%s", (*_NSGetArgv())[index]);
+	return 1;
 #else
 	char command_line[4096];
 	ssize_t length;
@@ -679,7 +717,7 @@ static int run_program(char *const arguments[])
 
 int posix_register_url_scheme(const char *scheme, const char *description)
 {
-#ifdef __ANDROID__
+#if defined(__ANDROID__) || defined(__APPLE__)
 	(void)scheme;
 	(void)description;
 	return 0;

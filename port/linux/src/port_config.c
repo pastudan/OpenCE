@@ -642,9 +642,9 @@ static pthread_mutex_t config_lock = PTHREAD_MUTEX_INITIALIZER;
 
 static void config_path(char *path, size_t size)
 {
-#if defined(HALO_ANDROID) || defined(HALO_WEB)
+#if defined(HALO_ANDROID) || defined(HALO_WEB) || defined(HALO_WASM_GUEST)
 	/* the data folder, which the app names (port/android/host/host_main.c;
-	on the web, port/web/src/web_main.c) */
+	on the web, port/web/src/web_main.c; on macOS, port/macos/host) */
 	const char *root = getenv("HALO_DATA_ROOT");
 
 	snprintf(path, size, "%s/config.toml", root && *root ? root : ".");
@@ -659,7 +659,7 @@ static void config_path(char *path, size_t size)
 /* the whole file, NUL terminated, or NULL; free() it */
 static char *config_read_file(const char *path, size_t *size)
 {
-#ifdef HALO_ARM64_GUEST
+#if defined(HALO_ARM64_GUEST) || defined(HALO_WASM_GUEST)
 	FILE *file = fopen(path, "rb");
 	char *text = NULL;
 	long length;
@@ -702,7 +702,7 @@ static char *config_read_file(const char *path, size_t *size)
 
 static int config_write_file(const char *path, const char *text)
 {
-#ifdef HALO_ARM64_GUEST
+#if defined(HALO_ARM64_GUEST) || defined(HALO_WASM_GUEST)
 	FILE *file = fopen(path, "wb");
 	int written;
 
