@@ -297,6 +297,36 @@ u32 w2c_env_host_errno(struct w2c_env *instance)
 
 /* ---------- start */
 
+int host_sdl_show_simple_message_box(unsigned int flags, const char *title, const char *message);
+
+/* the data folder (the one holding maps): HALO_DATA_ROOT, or else
+~/Games/Halo, so that the app starts from Finder, where there is no
+environment to name it; the guest enters it (port/macos/guest/guest_main.c) */
+static void data_root_choose(void)
+{
+	static char path[1024];
+	const char *home = getenv("HOME");
+	char maps[1100];
+
+	if (getenv("HALO_DATA_ROOT") && *getenv("HALO_DATA_ROOT"))
+		return;
+	snprintf(path, sizeof(path), "%s/Games/Halo", home && *home ? home : ".");
+	setenv("HALO_DATA_ROOT", path, 1);
+	snprintf(maps, sizeof(maps), "%s/maps", path);
+	if (access(maps, F_OK) != 0)
+	{
+		char message[1400];
+
+		snprintf(message, sizeof(message),
+			"Halo's maps were not found.\n\nPut the game's maps folder in\n%s\n"
+			"(so that %s/maps/ui.map exists), or set HALO_DATA_ROOT to the folder that holds it.",
+			path, path);
+		fprintf(stderr, "%s\n", message);
+		host_sdl_show_simple_message_box(0x10 /* SDL_MESSAGEBOX_ERROR */, "OpenCE", message);
+		exit(EXIT_FAILURE);
+	}
+}
+
 int main(int argc, char **argv)
 {
 	static w2c_halo instance;
@@ -311,6 +341,7 @@ int main(int argc, char **argv)
 		setrlimit(RLIMIT_NOFILE, &limit);
 	}
 	host_wasi_set_arguments(argc, argv);
+	data_root_choose();
 	host_sdl_main_thread_set();
 	wasm_rt_init();
 	wasm_rt_allocate_memory(&env.memory, (uint32_t)GUEST_MEMORY_PAGES, (uint32_t)GUEST_MEMORY_PAGES, false,
