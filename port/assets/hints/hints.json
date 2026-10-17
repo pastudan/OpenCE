@@ -1,0 +1,513 @@
+{
+ "assets": [
+  {
+   "name": "hud_msg_icons__1",
+   "tag": "ui\\hud\\bitmaps\\combined\\hud_msg_icons",
+   "bitmap": 1,
+   "width": 128,
+   "height": 128,
+   "format": "a8y8",
+   "scale": 8,
+   "crc": 1851454571,
+   "sprites": [
+    {
+     "sequence": 17,
+     "frame": 0,
+     "bitmap": 1,
+     "cell": [
+      95,
+      0,
+      126,
+      28
+     ],
+     "word": {
+      "text": "BACK",
+      "font": "Overpass-900",
+      "place": [
+       0.6955,
+       9.1649,
+       7.4335,
+       0.9966,
+       -0.2776
+      ]
+     },
+     "picture": {
+      "svg": "oval.svg",
+      "place": [
+       1.0,
+       -0.0126,
+       10.9993
+      ]
+     },
+     "likeness": 0.9915
+    },
+    {
+     "sequence": 18,
+     "frame": 0,
+     "bitmap": 1,
+     "cell": [
+      82,
+      82,
+      116,
+      110
+     ],
+     "word": {
+      "text": "START",
+      "font": "Overpass-900",
+      "place": [
+       0.295,
+       9.2367,
+       7.5884,
+       0.9905,
+       -0.6658
+      ]
+     },
+     "picture": {
+      "svg": "oval.svg",
+      "place": [
+       0.9995,
+       1.3518,
+       11.0001
+      ]
+     },
+     "likeness": 0.9857
+    }
+   ]
+  },
+  {
+   "name": "hud_msg_icons__3",
+   "tag": "ui\\hud\\bitmaps\\combined\\hud_msg_icons",
+   "bitmap": 3,
+   "width": 128,
+   "height": 128,
+   "format": "a8y8",
+   "scale": 8,
+   "crc": 2758814568,
+   "sprites": [
+    {
+     "sequence": 23,
+     "frame": 0,
+     "bitmap": 3,
+     "cell": [
+      0,
+      0,
+      53,
+      53
+     ],
+     "picture": {
+      "svg": "flashlight.svg",
+      "place": [
+       0.9999,
+       -0.0058,
+       0.0073
+      ]
+     },
+     "likeness": 0.9835
+    }
+   ]
+  },
+  {
+   "name": "hud_reticle_warnings__0",
+   "tag": "ui\\hud\\bitmaps\\combined\\hud_reticle_warnings",
+   "bitmap": 0,
+   "width": 128,
+   "height": 128,
+   "format": "a8y8",
+   "scale": 8,
+   "crc": 1728930376,
+   "whole": true,
+   "sprites": [
+    {
+     "sequence": 0,
+     "frame": 0,
+     "bitmap": 0,
+     "cell": [
+      0,
+      27,
+      49,
+      54
+     ],
+     "lines": [
+      {
+       "text": "Low",
+       "font": "Overpass-750",
+       "place": [
+        11.7959,
+        10.9452,
+        9.0541,
+        1.0051,
+        0.0255
+       ]
+      },
+      {
+       "text": "Battery",
+       "font": "Overpass-750",
+       "place": [
+        0.8766,
+        21.8842,
+        8.9625,
+        0.9967,
+        -0.0002
+       ]
+      }
+     ],
+     "likeness": 0.9874
+    },
+    {
+     "sequence": 1,
+     "frame": 0,
+     "bitmap": 0,
+     "cell": [
+      42,
+      79,
+      86,
+      94
+     ],
+     "lines": [
+      {
+       "text": "Reload",
+       "font": "Overpass-750",
+       "place": [
+        1.3786,
+        11.951,
+        9.0547,
+        0.9896,
+        -0.0921
+       ]
+      }
+     ],
+     "likeness": 0.9858
+    },
+    {
+     "sequence": 2,
+     "frame": 0,
+     "bitmap": 0,
+     "cell": [
+      0,
+      54,
+      42,
+      79
+     ],
+     "lines": [
+      {
+       "text": "No",
+       "font": "Overpass-750",
+       "place": [
+        12.5533,
+        11.0228,
+        9.1753,
+        0.9996,
+        -0.1461
+       ]
+      },
+      {
+       "text": "Ammo",
+       "font": "Overpass-750",
+       "place": [
+        1.6375,
+        21.8446,
+        8.9076,
+        0.9981,
+        -0.0858
+       ]
+      }
+     ],
+     "likeness": 0.9896
+    },
+    {
+     "sequence": 3,
+     "frame": 0,
+     "bitmap": 0,
+     "cell": [
+      77,
+      27,
+      105,
+      52
+     ],
+     "lines": [
+      {
+       "text": "Low",
+       "font": "Overpass-750",
+       "place": [
+        1.7966,
+        11.0311,
+        9.1879,
+        0.9954,
+        -0.0088
+       ]
+      },
+      {
+       "text": "Fuel",
+       "font": "Overpass-750",
+       "place": [
+        1.4197,
+        21.9457,
+        8.906,
+        0.995,
+        -0.0739
+       ]
+      }
+     ],
+     "likeness": 0.9877
+    },
+    {
+     "sequence": 4,
+     "frame": 0,
+     "bitmap": 0,
+     "cell": [
+      49,
+      27,
+      77,
+      52
+     ],
+     "lines": [
+      {
+       "text": "No",
+       "font": "Overpass-750",
+       "place": [
+        5.597,
+        10.9654,
+        9.1687,
+        1.0018,
+        -0.2002
+       ]
+      },
+      {
+       "text": "Fuel",
+       "font": "Overpass-750",
+       "place": [
+        1.4197,
+        21.9457,
+        8.906,
+        0.995,
+        -0.0739
+       ]
+      }
+     ],
+     "likeness": 0.9885
+    },
+    {
+     "sequence": 5,
+     "frame": 0,
+     "bitmap": 0,
+     "cell": [
+      42,
+      54,
+      102,
+      78
+     ],
+     "lines": [
+      {
+       "text": "No",
+       "font": "Overpass-750",
+       "place": [
+        21.6118,
+        10.948,
+        9.0751,
+        1.0033,
+        -0.0935
+       ]
+      },
+      {
+       "text": "Grenades",
+       "font": "Overpass-750",
+       "place": [
+        1.9166,
+        21.8842,
+        8.8909,
+        1.0,
+        -0.0876
+       ]
+      }
+     ],
+     "likeness": 0.9857
+    },
+    {
+     "sequence": 6,
+     "frame": 0,
+     "bitmap": 0,
+     "cell": [
+      56,
+      0,
+      106,
+      27
+     ],
+     "lines": [
+      {
+       "text": "No",
+       "font": "Overpass-750",
+       "place": [
+        16.5526,
+        11.0283,
+        9.175,
+        1.0001,
+        -0.1563
+       ]
+      },
+      {
+       "text": "Weapon",
+       "font": "Overpass-750",
+       "place": [
+        1.599,
+        21.8731,
+        8.9402,
+        1.0001,
+        -0.0647
+       ]
+      }
+     ],
+     "likeness": 0.9879
+    },
+    {
+     "sequence": 7,
+     "frame": 0,
+     "bitmap": 0,
+     "cell": [
+      0,
+      79,
+      42,
+      103
+     ],
+     "lines": [
+      {
+       "text": "Low",
+       "font": "Overpass-750",
+       "place": [
+        8.8316,
+        11.0305,
+        9.1776,
+        0.9969,
+        -0.0402
+       ]
+      },
+      {
+       "text": "Ammo",
+       "font": "Overpass-750",
+       "place": [
+        1.6358,
+        21.8445,
+        8.8946,
+        0.9997,
+        -0.086
+       ]
+      }
+     ],
+     "likeness": 0.9882
+    },
+    {
+     "sequence": 10,
+     "frame": 0,
+     "bitmap": 0,
+     "cell": [
+      0,
+      0,
+      56,
+      27
+     ],
+     "lines": [
+      {
+       "text": "Battery",
+       "font": "Overpass-750",
+       "place": [
+        5.0236,
+        10.871,
+        8.9076,
+        0.998,
+        0.0075
+       ]
+      },
+      {
+       "text": "Depleted",
+       "font": "Overpass-750",
+       "place": [
+        1.2945,
+        21.8992,
+        8.909,
+        0.9828,
+        -0.0131
+       ]
+      }
+     ],
+     "likeness": 0.9805
+    },
+    {
+     "sequence": 8,
+     "frame": 0,
+     "bitmap": 0,
+     "cell": [
+      106,
+      0,
+      117,
+      7
+     ],
+     "shape": "<path d=\"M5.5,1 L10,6 L1,6 Z\" fill=\"#ffffff\"/>"
+    },
+    {
+     "sequence": 9,
+     "frame": 0,
+     "bitmap": 0,
+     "cell": [
+      90,
+      103,
+      120,
+      109
+     ],
+     "shape": "<path d=\"M1.5,2 L4,5 L1,5 Z\" fill=\"#ffffff\"/>",
+     "grey": "<g fill=\"#ffffff\"><circle cx=\"3\" cy=\"3\" r=\"1.9873\"/></g>"
+    },
+    {
+     "sequence": 9,
+     "frame": 1,
+     "bitmap": 0,
+     "cell": [
+      60,
+      103,
+      90,
+      109
+     ],
+     "shape": "<path d=\"M20.5,1 L24,5 L17,5 Z M1.5,2 L4,5 L1,5 Z\" fill=\"#ffffff\"/>",
+     "grey": "<g fill=\"#ffffff\"><circle cx=\"3\" cy=\"3\" r=\"1.9873\"/><circle cx=\"11\" cy=\"3\" r=\"1.9873\"/></g>"
+    },
+    {
+     "sequence": 9,
+     "frame": 2,
+     "bitmap": 0,
+     "cell": [
+      86,
+      79,
+      116,
+      85
+     ],
+     "shape": "<path d=\"M11.5,1 L15,5 L8,5 Z\" fill=\"#ffffff\"/>",
+     "grey": "<g fill=\"#ffffff\"><circle cx=\"3\" cy=\"3\" r=\"1.9873\"/><circle cx=\"11\" cy=\"3\" r=\"1.9873\"/><circle cx=\"19\" cy=\"3\" r=\"1.9873\"/></g>"
+    },
+    {
+     "sequence": 9,
+     "frame": 3,
+     "bitmap": 0,
+     "cell": [
+      0,
+      103,
+      30,
+      109
+     ],
+     "shape": "<path d=\"M10.5,1 L14,5 L7,5 Z M22.5,1 L26,5 L19,5 Z\" fill=\"#ffffff\"/>",
+     "grey": "<g fill=\"#ffffff\"><circle cx=\"3\" cy=\"3\" r=\"1.9873\"/><circle cx=\"11\" cy=\"3\" r=\"1.9873\"/><circle cx=\"19\" cy=\"3\" r=\"1.9873\"/><circle cx=\"27\" cy=\"3\" r=\"1.9873\"/></g>"
+    },
+    {
+     "sequence": 9,
+     "frame": 4,
+     "bitmap": 0,
+     "cell": [
+      30,
+      103,
+      60,
+      109
+     ],
+     "shape": "<path d=\"M28.5,4 L29,5 L28,5 Z\" fill=\"#ffffff\"/>",
+     "grey": "<g fill=\"#ffffff\"><circle cx=\"3\" cy=\"3\" r=\"1.9873\"/><circle cx=\"11\" cy=\"3\" r=\"1.9873\"/><circle cx=\"19\" cy=\"3\" r=\"1.9873\"/><circle cx=\"27\" cy=\"3\" r=\"1.9873\"/></g>"
+    }
+   ]
+  }
+ ]
+}

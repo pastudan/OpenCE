@@ -82,8 +82,8 @@ METERS = {
     HUD + "combined\\hud_ammo_meters": ("hud_xbox_order/bitmaps/combined/hud_ammo_meters.svg",
                                        "extra/xbox_order_hud_meters/tags/ui/hud/bitmaps/combined/hud_ammo_meters.bitmap"),
 }
-# redraws not used: those with English text (other languages' maps have
-# their own; the Xbox message icons all have some), the sniper's zoom labels
+# redraws not used: those with English text (the PC's, not the Xbox's: the
+# Xbox's reticle warnings and some message icons are tools/hint_assets.py's), the sniper's zoom labels
 # (2x and 8x, where the Xbox's are 2x and 10x), and the meters in the PC
 # channel order
 UNUSED = {

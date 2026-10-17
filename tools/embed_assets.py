@@ -2,7 +2,8 @@
 """Embeds the high-res HUD textures (port/assets/hud, made by
 tools/hud_assets.py), the menus' titles (port/assets/titles, made by
 tools/title_assets.py), their controller button icons (port/assets/buttons,
-made by tools/button_assets.py), the fonts the text is drawn with
+made by tools/button_assets.py), the HUD's hint icons and reticle warnings
+(port/assets/hints, made by tools/hint_assets.py), the fonts the text is drawn with
 (port/assets/fonts), the menus' files (port/assets/menus, made by
 tools/ce_menus.py) and SMAA's shader and lookup textures
 (port/third_party/smaa) in the game as C data:
@@ -11,7 +12,8 @@ tools/ce_menus.py) and SMAA's shader and lookup textures
 
 writes OUTPUT.c with each PNG and the bitmap it stands for (its tag, index
 and checksum of its pixels, from port/assets/hud/layout.json,
-port/assets/titles/titles.json and port/assets/buttons/buttons.json), the
+port/assets/titles/titles.json, port/assets/buttons/buttons.json and
+port/assets/hints/hints.json), the
 fonts and their tags from port/assets/fonts/fonts.json, the menu files
 listed in port/assets/menus/menus.json, and SMAA's shader and lookup
 textures, as port/linux/src/hud_hires.h, text_hires.h, menu_files.h and
@@ -38,6 +40,8 @@ TITLE_ASSETS = Path("port/assets/titles")
 TITLE_LIST = TITLE_ASSETS / "titles.json"
 BUTTON_ASSETS = Path("port/assets/buttons")
 BUTTON_LIST = BUTTON_ASSETS / "buttons.json"
+HINT_ASSETS = Path("port/assets/hints")
+HINT_LIST = HINT_ASSETS / "hints.json"
 FONT_ASSETS = Path("port/assets/fonts")
 FONT_LIST = FONT_ASSETS / "fonts.json"
 MENU_ASSETS = Path("port/assets/menus")
@@ -65,7 +69,7 @@ def textures() -> List[tuple]:
     text)."""
     result = []
     for folder, listing, title in ((HUD_ASSETS, LAYOUT, False), (TITLE_ASSETS, TITLE_LIST, True),
-                                   (BUTTON_ASSETS, BUTTON_LIST, True)):
+                                   (BUTTON_ASSETS, BUTTON_LIST, True), (HINT_ASSETS, HINT_LIST, False)):
         if (ROOT / listing).is_file():
             result += [(folder, asset, title) for asset in json.loads((ROOT / listing).read_text())["assets"]]
     return result
@@ -85,7 +89,7 @@ def smaa_files() -> List[tuple]:
 
 def hud_asset_inputs() -> List[Path]:
     """The files the generated source is made from."""
-    inputs = [listing for listing in (LAYOUT, TITLE_LIST, BUTTON_LIST, FONT_LIST, MENU_LIST)
+    inputs = [listing for listing in (LAYOUT, TITLE_LIST, BUTTON_LIST, HINT_LIST, FONT_LIST, MENU_LIST)
               if (ROOT / listing).is_file()]
     return [*inputs, *(folder / f"{asset['name']}.png" for folder, asset, _ in textures()),
             *(FONT_ASSETS / name for name in font_files()), *(MENU_ASSETS / name for name in menu_files()),
@@ -99,7 +103,7 @@ def hud_configure_inputs() -> List[Path]:
     list may rename or remove."""
     inputs = []
     for folder, listing in ((HUD_ASSETS, LAYOUT), (TITLE_ASSETS, TITLE_LIST), (BUTTON_ASSETS, BUTTON_LIST),
-                            (FONT_ASSETS, FONT_LIST), (MENU_ASSETS, MENU_LIST)):
+                            (HINT_ASSETS, HINT_LIST), (FONT_ASSETS, FONT_LIST), (MENU_ASSETS, MENU_LIST)):
         if (ROOT / listing).is_file():
             inputs += [folder, listing]
     if (ROOT / SMAA_ASSETS).is_dir():
@@ -164,8 +168,9 @@ def main() -> None:
         tag = asset["tag"].replace("\\", "\\\\")
         coverage = int(any(cell["kind"] == "meter" for cell in asset.get("cells", [])))
         point_threshold = int(any(cell.get("thresholds") for cell in asset.get("cells", [])))
-        # (the sequences whose sprites it stands for, a bit each of 32; 0: the whole bitmap)
-        sequences = [sprite["sequence"] for sprite in asset.get("sprites", [])]
+        # (the sequences whose sprites it stands for, a bit each of 32; 0: the
+        # whole bitmap, as one whose sprites are listed only to be drawn is)
+        sequences = [] if asset.get("whole") else sorted({sprite["sequence"] for sprite in asset.get("sprites", [])})
         if any(not 0 <= sequence < 32 for sequence in sequences):
             sys.exit(f"{name}: sprite sequences must be 0 to 31 (hud_hires.h: sprites)")
         sprites = sum(1 << sequence for sequence in sequences)
