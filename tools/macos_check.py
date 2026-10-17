@@ -43,8 +43,9 @@ def check_bundle(app: Path) -> Path:
     icon = app / "Contents" / "Resources" / (info.get("CFBundleIconFile", "") + ".icns")
     if not icon.is_file():
         fail(f"the icon Info.plist names, {icon}, is missing")
-    signed = subprocess.run(["codesign", "-dv", str(app)], capture_output=True, text=True)
-    if signed.returncode == 0:
+    # (a bundle signed as a whole has its resources' seal; the build's own
+    # app, build/macos, has only the linker's signature of the executable)
+    if (app / "Contents" / "_CodeSignature").is_dir():
         verify = subprocess.run(["codesign", "--verify", "--deep", "--strict", str(app)], capture_output=True,
                                 text=True)
         if verify.returncode != 0:

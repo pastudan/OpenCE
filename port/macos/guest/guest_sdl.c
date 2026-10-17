@@ -20,6 +20,7 @@ whose host side is generated from these prototypes
 */
 
 #include <pthread.h>
+#include <stdio.h>
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
@@ -742,6 +743,78 @@ bool SDL_TimeToDateTime(SDL_Time ticks, SDL_DateTime *date, bool local_time)
 	(void)date;
 	(void)local_time;
 	return false;
+}
+
+/* ---------- files read and written whole or by parts (the mods' and the
+settings': port_mods.c, port_config.c), with the C library's stdio, which
+wasi-libc gives the guest (paths are UTF-8 already) */
+
+struct SDL_IOStream
+{
+	FILE *file;
+};
+
+SDL_IOStream *SDL_IOFromFile(const char *file, const char *mode)
+{
+	SDL_IOStream *stream;
+	FILE *opened = file && mode ? fopen(file, mode) : NULL;
+
+	if (!opened)
+		return NULL;
+	stream = malloc(sizeof(*stream));
+	if (!stream)
+	{
+		fclose(opened);
+		return NULL;
+	}
+	stream->file = opened;
+	return stream;
+}
+
+Sint64 SDL_SeekIO(SDL_IOStream *context, Sint64 offset, SDL_IOWhence whence)
+{
+	int origin = whence == SDL_IO_SEEK_CUR ? SEEK_CUR : whence == SDL_IO_SEEK_END ? SEEK_END : SEEK_SET;
+
+	if (!context || fseeko(context->file, (off_t)offset, origin) != 0)
+		return -1;
+	return (Sint64)ftello(context->file);
+}
+
+size_t SDL_ReadIO(SDL_IOStream *context, void *pointer, size_t size)
+{
+	return context ? fread(pointer, 1, size, context->file) : 0;
+}
+
+bool SDL_CloseIO(SDL_IOStream *context)
+{
+	int closed;
+
+	if (!context)
+		return false;
+	closed = fclose(context->file);
+	free(context);
+	return closed == 0;
+}
+
+bool SDL_SaveFile(const char *file, const void *data, size_t datasize)
+{
+	FILE *out = fopen(file, "wb");
+	bool written;
+
+	if (!out)
+		return false;
+	written = fwrite(data, 1, datasize, out) == datasize;
+	return fclose(out) == 0 && written;
+}
+
+bool SDL_RenamePath(const char *oldpath, const char *newpath)
+{
+	return rename(oldpath, newpath) == 0;
+}
+
+bool SDL_RemovePath(const char *path)
+{
+	return remove(path) == 0;
 }
 
 /* ---------- files (the menus folder's: menu_files.c) */
