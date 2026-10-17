@@ -10,6 +10,10 @@
   weapons' reticles): redraws by MrBruh (`port/assets/hud`), based on
   reference photos by Aerocatia. The sniper rifle's zoom labels (2x, 10x)
   are set in Overpass (`port/assets/fonts`).
+- **The HUD's hint icons and reticle warnings** (the controller's sticks,
+  triggers and buttons beside the messages' words, and Reload, No Ammo and
+  the rest): redraws made with Bridge, fitted to the maps' art, with their
+  words set in Overpass (`port/assets/hints`).
 
 ## Third-party art
 

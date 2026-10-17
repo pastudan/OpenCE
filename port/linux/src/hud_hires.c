@@ -10,7 +10,8 @@ first drawn and kept: up to 71 of the HUD's, about 227 MB with their mip
 levels, though a game draws only some (the scopes' only when zoomed), and
 the titles of the menus shown, about 3 MB each (11 MB for the carnage
 report's, a whole panel), and their button icons, about 0.3 MB each (5.3
-MB for the message icons' sheet).
+MB for the message icons' sheet), and the HUD's hint icons and reticle
+warnings (port/assets/hints), 5.3 MB for each of their seven sheets.
 They are drawn with linear filtering and their mip levels (d3d8_gl.c,
 configure_sampler), as they are larger than they appear.
 
@@ -115,7 +116,7 @@ int hud_hires_override_coverage(long asset)
 
 /* the placeholders of the textures drawn for some of a bitmap's sprites
 (port/linux/game/hud_hires_tags.c): their D3D textures' Data */
-#define MAXIMUM_PLACEHOLDERS 8
+#define MAXIMUM_PLACEHOLDERS 16
 
 static struct
 {

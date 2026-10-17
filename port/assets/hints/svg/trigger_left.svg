@@ -1,0 +1,16 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="50" height="35" viewBox="0 0 50 35">
+<!-- the left trigger, seen from its side: a faint surface with a bright outline and edge, and its solid face with an L knocked out (Overpass Black). The letter's group (id "letter") is in the mask the face (id "face") is drawn through; tools/hint_assets.py leaves the mask off for the menus' small trigger, which has none. Of the HUD messages' and the menus' controller icons (ui\hud\bitmaps\combined\hud_msg_icons, hud_msg_icons_sm), a white drawing (the game tints it), redrawn over the large sheet's picture in the texels of its cell, with its sizes fitted to the map's art (tools/hint_assets.py places it on each sheet). -->
+<defs><mask id="letter-cut" maskUnits="userSpaceOnUse" x="0" y="0" width="50" height="35">
+<rect width="50" height="35" fill="#ffffff"/>
+<g id="letter" transform="translate(22.602 21.308) scale(1.059)"><path transform="matrix(0.00857 0 0 -0.00857 0 0)" d="M146 0V1400H462V306H1132V0Z" fill="#000000"/></g>
+</mask></defs>
+<path d="M2.304,1.586 L5.603,2.233 C20.048,4.198 33.905,7.576 42.401,9.817 L44.146,10.607 C40.41,18.547 34.32,25.681 23.116,28.91
+C19.521,29.907 16.845,32.16 8.642,33.39 C2.785,32.713 4.046,33.761 1.726,29.326 L7.167,2.664 Z"
+ fill="#ffffff" fill-opacity="0.315" stroke="#ffffff" stroke-width="1.124" stroke-linejoin="round"/>
+<path d="M7.699,13.892 C7.654,15.666 6.159,23.028 5.84,25.443 C9.068,30.683 10.41,28.238 15.32,31.872 C19.203,30.827 22.227,27.749 24.693,29.161"
+ fill="none" stroke="#ffffff" stroke-opacity="0.904" stroke-width="1.294" stroke-linecap="round"/>
+<path d="M6.433,24.505 C4.17,30.961 6.364,29.499 9.91,29.667" fill="none" stroke="#ffffff" stroke-opacity="0.988"
+ stroke-width="2.368" stroke-linecap="round"/>
+<g id="face" mask="url(#letter-cut)"><path d="M7.178,4.159 C19.824,3.173 33.596,7.029 42.324,9.352 L44.597,11.97
+C40.99,19.472 33.086,26.993 24.279,32.053 C19.362,19.593 14.497,9.545 8.154,2.197 Z" fill="#ffffff"/></g>
+</svg>

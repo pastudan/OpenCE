@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="6" height="3" viewBox="0 0 6 3">
+<!-- the arrow above the right thumbstick that shows it pressed in (the HUD
+messages' icon of the right stick's click, ui\hud\bitmaps\combined\hud_msg_icons):
+a small triangle pointing down, white. tools/hint_assets.py places it, small
+then whole, on the click's frames. -->
+<path d="M0,0 L6,0 L3,2.94 Z" fill="#ffffff"/>
+</svg>

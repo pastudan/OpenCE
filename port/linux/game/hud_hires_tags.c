@@ -13,7 +13,8 @@ are written there, and asks hud_hires_asset_at which bitmap they are: a block
 reused for another bitmap, or a map unloaded, is a write, which asks again.
 
 A texture drawn for only some of a bitmap's sprites (hud_msg_icons_sm's
-buttons) does not stand for its bitmap: the game draws those sprites from a
+buttons, the message icons' sticks and triggers) does not stand for its
+bitmap, and a bitmap may have more than one, for other sprites: the game draws those sprites from a
 placeholder (hud_hires_sprite_bitmap), a bitmap of the same size and format,
 so the same coordinates, made when first needed and deleted with the map;
 the texture cache draws the texture for it (hud_hires_placeholder_texture).
@@ -48,7 +49,7 @@ struct bitmap_data const *hud_hires_sprite_bitmap(struct bitmap_data const *bitm
 enum
 {
 	MAXIMUM_HIRES_BITMAPS = 128,
-	MAXIMUM_HIRES_SPRITE_BITMAPS = 8,
+	MAXIMUM_HIRES_SPRITE_BITMAPS = 16,
 };
 
 /* ---------- globals */
@@ -205,6 +206,9 @@ struct bitmap_data const *hud_hires_sprite_bitmap(
 				hud_hires_register_placeholder(
 					hires_sprite_bitmaps[index].asset,
 					(unsigned long const *)placeholder->hardware_format);
+				platform_log("high-res hud: %s bitmap %ld's sprites drawn from their texture",
+					hud_hires_asset_tag(hires_sprite_bitmaps[index].asset),
+					hud_hires_asset_bitmap(hires_sprite_bitmaps[index].asset));
 			}
 			else
 			{

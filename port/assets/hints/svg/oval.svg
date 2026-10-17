@@ -1,0 +1,4 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="31" height="17" viewBox="0 0 31 17">
+<!-- the Back and Start buttons, below their words: a solid oval. Of the HUD messages' and the menus' controller icons (ui\hud\bitmaps\combined\hud_msg_icons, hud_msg_icons_sm), a white drawing (the game tints it), redrawn over the large sheet's picture in the texels of its cell, with its sizes fitted to the map's art (tools/hint_assets.py places it on each sheet). -->
+<ellipse cx="15.408" cy="8.222" rx="14.409" ry="7.752" fill="#ffffff"/>
+</svg>

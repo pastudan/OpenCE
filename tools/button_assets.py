@@ -28,7 +28,7 @@ of every map, hud_msg_icons_sm, that the game tints: stencils, each oval in
 white with its letter cut out. They are drawn from the redraws' oval and
 letter (their ids "oval" and "letter"), into a texture of the sheet's
 layout that has only those sprites: the sheet's other icons (triggers and
-sticks, with English words) keep the map's, so the texture stands for the
+sticks, with English words) are tools/hint_assets.py's, so the texture stands for the
 sprites alone, and the game draws them from it through a placeholder
 (port/linux/game/hud_hires_tags.c).
 

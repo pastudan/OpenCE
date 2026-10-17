@@ -149,6 +149,13 @@ symbols in this file:
 
 #include <stddef.h>
 
+/* port: the placeholder bitmap the HUD's messages draw a sprite of a
+high-res texture from, or the sheet if it has none
+(port/linux/game/hud_hires_tags.c) */
+struct bitmap_data const *hud_hires_sprite_bitmap(
+	struct bitmap_data const *sheet,
+	short sequence_index);
+
 /* ---------- constants */
 
 enum
@@ -543,6 +550,8 @@ static void render_state_bitmap(
 	if (bitmap && _texture_cache_bitmap_get_hardware_format(
 		(struct bitmap_data *)bitmap, FALSE, TRUE))
 	{
+		/* port: the sprite from a high-res texture, if it has one */
+		bitmap = hud_hires_sprite_bitmap(bitmap, icon->sequence_index);
 		scale = local_player_count() > 1 ? 0.75f : 1.0f;
 		point.x = (short)(icon->offset.x * scale + cursor_bounds->x0);
 		point.y = (short)(cursor_bounds->y1 - icon->offset.y * scale);

@@ -1,0 +1,4 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="19" height="22" viewBox="0 0 19 22">
+<!-- the Black and White buttons (one picture, which the game tints): a round button seen at an angle, a solid tilted oval. Of the HUD messages' and the menus' controller icons (ui\hud\bitmaps\combined\hud_msg_icons, hud_msg_icons_sm), a white drawing (the game tints it), redrawn over the large sheet's picture in the texels of its cell, with its sizes fitted to the map's art (tools/hint_assets.py places it on each sheet). -->
+<ellipse cx="9.001" cy="11.189" rx="6.951" ry="10.367" transform="rotate(-28 9.4 10.6)" fill="#ffffff"/>
+</svg>

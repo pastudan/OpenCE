@@ -1,0 +1,16 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="51" height="35" viewBox="0 0 51 35">
+<!-- the right trigger, the left one's mirror image, with an R knocked out of its face (Overpass Black); as trigger_left.svg. Of the HUD messages' and the menus' controller icons (ui\hud\bitmaps\combined\hud_msg_icons, hud_msg_icons_sm), a white drawing (the game tints it), redrawn over the large sheet's picture in the texels of its cell, with its sizes fitted to the map's art (tools/hint_assets.py places it on each sheet). -->
+<defs><mask id="letter-cut" maskUnits="userSpaceOnUse" x="0" y="0" width="51" height="35">
+<rect width="51" height="35" fill="#ffffff"/>
+<g id="letter" transform="translate(10.18 21.802) scale(1.039)"><path transform="matrix(0.00857 0 0 -0.00857 0 0)" d="M146 0V1400H840Q1019 1400 1124.0 1337.5Q1229 1275 1274.5 1171.0Q1320 1067 1320 944Q1320 867 1291.0 785.5Q1262 704 1206.5 636.5Q1151 569 1072 534L1332 0H978L728 484H462V0ZM462 782H844Q900 782 932.5 804.5Q965 827 978.5 864.0Q992 901 992 944Q992 984 979.0 1020.0Q966 1056 933.5 1079.0Q901 1102 844 1102H462Z" fill="#000000"/></g>
+</mask></defs>
+<path d="M43.695,1.59 L39.33,2.312 C25.526,4.01 10.821,8.748 2.95,10.285 L1.588,10.549 C3.231,17.453 15.126,24.675 22.886,28.906
+C26.469,29.906 29.091,32.486 37.658,33.345 C43.155,32.723 41.588,33.585 44.045,29.455 L38.596,2.616 Z"
+ fill="#ffffff" fill-opacity="0.304" stroke="#ffffff" stroke-width="1.107" stroke-linejoin="round"/>
+<path d="M37.94,13.873 C38.961,18.456 39.647,23.342 38.74,26.31 C38.154,31.592 35.589,30.658 34.081,29.5 C27.154,32.485 24.669,28.657 25.013,29.089"
+ fill="none" stroke="#ffffff" stroke-opacity="0.748" stroke-width="1.578" stroke-linecap="round"/>
+<path d="M39.655,24.503 C40.965,30.966 40.286,29.835 36.424,29.296" fill="none" stroke="#ffffff" stroke-opacity="0.997"
+ stroke-width="2.266" stroke-linecap="round"/>
+<g id="face" mask="url(#letter-cut)"><path d="M40.586,2.491 C28.263,2.462 12.844,7.015 2.59,9.34 L1.349,12.388
+C4.9,19.612 12.694,27.093 21.393,31.991 C26.41,19.541 31.509,9.513 37.872,2.669 Z" fill="#ffffff"/></g>
+</svg>

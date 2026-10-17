@@ -1,0 +1,18 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="53" height="53" viewBox="0 0 53 53">
+<!-- the flashlight, seen from its end: its lens in a rim, on a short body. Of the HUD messages' and the menus' controller icons (ui\hud\bitmaps\combined\hud_msg_icons, hud_msg_icons_sm), a white drawing (the game tints it), redrawn over the large sheet's picture in the texels of its cell, with its sizes fitted to the map's art (tools/hint_assets.py places it on each sheet). -->
+<path d="M3.857,23.595 C3.738,13.263 12.761,8.762 24.533,8.622 C38.227,8.369 47.397,11.578 48.61,21.146
+C48.937,26.022 48.178,26.037 44.103,30.203 L44.161,31.258 C45.627,34.478 44.342,38.371 37.864,37.81
+L35.807,38.502 L34.003,44.183 C30.783,45.75 29.238,47.145 26.726,46.709 C24.777,46.809 22.33,46.571 18.777,44.284
+L17.204,39.145 L15.199,37.74 C9.537,38.498 8.79,36.272 8.05,33.991 L8.417,29.524 C3.81,26.101 3.721,25.599 4.06,19.056 Z"
+ fill="#ffffff" fill-opacity="0.35" stroke="#ffffff" stroke-opacity="0.988" stroke-width="1.042" stroke-linejoin="round"/>
+<path d="M8.13,30.763 C12.264,28.396 14.79,26.589 17.686,27.112 C20.123,30.177 22.589,31.438 26.51,29.822
+C32.4,31.368 33.2,29.023 35.308,27.277 C38.411,26.263 40.57,28.425 44.27,30.672" fill="none" stroke="#ffffff"
+ stroke-opacity="0.726" stroke-width="0.976"/>
+<path d="M8.172,30.772 C18.35,33.009 37.609,31.876 43.587,30.694" fill="none" stroke="#ffffff" stroke-opacity="0.622" stroke-width="0.83"/>
+<path d="M9.572,38.024 C14.146,38.033 16.644,37.074 16.514,38.301 M35.923,37.663 C38.34,37.75 39.612,38.096 43.436,38.08"
+ fill="none" stroke="#ffffff" stroke-opacity="0.597" stroke-width="1.014"/>
+<path d="M24.094,36.712 L24.693,35.894 L29.583,38.078 M23.992,35.883 L25.39,39.438" fill="none" stroke="#ffffff"
+ stroke-opacity="0.711" stroke-width="0.93"/>
+<path d="M21.782,43.692 C22.054,44.305 32.061,43.933 31.439,42.711 M22.306,42.98 C24.762,45.663 30.787,45.457 31.265,44.224"
+ fill="none" stroke="#ffffff" stroke-opacity="0.378" stroke-width="0.819"/>
+</svg>

@@ -1,0 +1,24 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="36" height="26" viewBox="0 0 36 26">
+<!-- the right thumbstick: its cap, a dish seen from above with a line down its middle, on a stem, as the HUD messages' and the menus' icons draw it
+(ui\hud\bitmaps\combined\hud_msg_icons, hud_msg_icons_sm): a white drawing, faint
+inside, in the texels of the large sheet's picture (below its word). Redrawn as
+simple shapes whose sizes were fitted to the map's art. tools/hint_assets.py moves
+the cap (id "cap") and its silhouette in the mask (id "cap-silhouette") down for a
+pressed stick. -->
+<defs>
+<mask id="behind" maskUnits="userSpaceOnUse" x="-8" y="-8" width="52" height="42">
+<rect x="-8" y="-8" width="52" height="42" fill="#ffffff"/>
+<path id="cap-silhouette" d="M1.782,9.626 A15.219,8.127 0 0 1 32.22,9.626 L32.22,12.827 A15.219,5.244 0 0 1 1.782,12.827 Z" fill="#000000"/>
+</mask>
+</defs>
+<g mask="url(#behind)">
+<path d="M9.565,12.827 L9.565,20.902 A7.435,3.653 0 0 0 24.436,20.902 L24.436,12.827 Z" fill="#ffffff" fill-opacity="0.361"/>
+<path d="M9.565,12.827 L9.565,20.902 A7.435,3.653 0 0 0 24.436,20.902 L24.436,12.827" fill="none" stroke="#ffffff" stroke-width="0.835"/>
+</g>
+<g id="cap">
+<path d="M1.782,9.626 A15.219,8.127 0 0 1 32.22,9.626 L32.22,12.827 A15.219,5.244 0 0 1 1.782,12.827 Z" fill="#ffffff" fill-opacity="0.361" stroke="#ffffff" stroke-width="0.835" stroke-linejoin="round"/>
+<ellipse cx="17.001" cy="9.626" rx="12.226" ry="6.528" fill="none" stroke="#ffffff" stroke-opacity="0.305" stroke-width="0.749"/>
+<ellipse cx="17.001" cy="4.356" rx="10.849" ry="1.966" fill="none" stroke="#ffffff" stroke-opacity="0.687" stroke-width="1.213"/>
+<line x1="17.001" y1="7.792" x2="17.001" y2="11.013" stroke="#ffffff" stroke-opacity="0.961" stroke-width="1.622" stroke-linecap="round"/>
+</g>
+</svg>
