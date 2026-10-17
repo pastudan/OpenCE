@@ -326,7 +326,14 @@ static boolean setting_text(char const *name, char *text, unsigned int size, boo
 		/* (display.mode empty: display.fullscreen's, as the window has it:
 		sdl_platform.c) */
 		if (!strcmp(name, "display.mode") && !text[0])
-			snprintf(text, size, "%s", default_value || config_boolean("display.fullscreen") ? "borderless" : "windowed");
+		{
+			char fullscreen[16] = "";
+
+			if (default_value)
+				config_default("display.fullscreen", fullscreen, sizeof(fullscreen));
+			snprintf(text, size, "%s", (default_value ? !strcmp(fullscreen, "true") :
+				config_boolean("display.fullscreen")) ? "borderless" : "windowed");
+		}
 		/* (display.window_size empty: 640x480 times display.window_scale, as
 		older versions set it) */
 		if (!strcmp(name, "display.window_size") && !text[0])

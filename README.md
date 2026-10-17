@@ -67,6 +67,7 @@ Each platform has its own instructions:
 | Windows (32-bit x86 executable, OpenGL 4.5, SDL3) | [port/windows/README.md](port/windows/README.md) |
 | Android (arm64 app, OpenGL ES 3, SDL3) | [port/android/README.md](port/android/README.md) |
 | Web (WebAssembly, WebGL 2, SDL3; desktop Chrome, Edge and Firefox) | [port/web/README.md](port/web/README.md) |
+| macOS (Apple silicon app, Metal, SDL3; macOS 14.4 or later) | [port/macos/README.md](port/macos/README.md) |
 
 The Linux README also gives the controls, the settings and the multiplayer
 functions. These are almost the same on all platforms.

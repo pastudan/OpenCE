@@ -6,6 +6,7 @@
     python tools/ci_build.py android release
     python tools/ci_build.py linux profile
     python tools/ci_build.py web release
+    python tools/ci_build.py macos release
 
 Builds are portable (any x86-64 processor), so they run on other
 computers. Debug builds skip link-time and profile-guided optimisation,
@@ -21,6 +22,10 @@ The web build (port/web/README.md) needs Emscripten (emcc on the PATH, as
 emsdk_env.sh puts it); dist/halo-web-<config>/ is the whole site, which a
 static host serves as it is: the workflow publishes the release build's to
 GitHub Pages.
+
+The macOS build (port/macos/README.md) needs its tools, which
+port/macos/tools/setup_toolchain.sh installs, and emsdk's clang;
+dist/halo-macos-<config>/OpenCE.app is the app, signed ad hoc.
 """
 
 import argparse
@@ -40,6 +45,7 @@ OUTPUTS = {
     "windows": ["build/windows/halo.exe", "build/windows/SDL3.dll"],
     "android": [],  # the APK, below
     "web": [],  # the site, below
+    "macos": [],  # the app, below
 }
 APKS = {
     "debug": "port/android/app/build/outputs/apk/debug/app-debug.apk",
@@ -104,6 +110,14 @@ def main() -> int:
     for output in outputs:
         shutil.copy2(ROOT / output, dist)
         print(f"{output} -> {dist.relative_to(ROOT)}", flush=True)
+    if args.platform == "macos":
+        # the app, a folder (tools/macos_build.py), signed ad hoc so that
+        # Apple silicon runs it (a copy from elsewhere also needs its
+        # quarantine taken off: port/macos/README.md)
+        app = dist / "OpenCE.app"
+        shutil.copytree(ROOT / "build/macos/OpenCE.app", app, symlinks=True)
+        run(["codesign", "--force", "--sign", "-", "--timestamp=none", app])
+        print(f"build/macos/OpenCE.app -> {app.relative_to(ROOT)}", flush=True)
     if args.platform == "windows":
         # the symbols of halo.exe and SDL3.dll, apart (players do not need
         # them): the workflow uploads them to Sentry, which turns the crash

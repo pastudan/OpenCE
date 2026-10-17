@@ -2,6 +2,7 @@
 """Makes the game's icons from its artwork, port/assets/icon:
 
     python tools/app_icon.py
+    python tools/app_icon.py --macos   # the Mac app's icon only (on a Mac)
 
 - opence-icon.png, the helmet on its background (512x512): the Windows
   executable's icon (port/windows/opence-icon.ico, which port/windows/halo.rc
@@ -36,6 +37,7 @@ ICON = ARTWORK / "opence-icon.png"
 RENDER = ARTWORK / "opence-icon-render.png"
 WINDOW_ICON = ARTWORK / "opence-icon-256.png"
 WINDOWS_ICON = ROOT / "port/windows/opence-icon.ico"
+MACOS_ICON = ROOT / "port/macos/OpenCE.icns"
 RESOURCES = ROOT / "port/android/app/src/main/res"
 
 # the layers' size, and the part of them a launcher shows, in dp
@@ -92,6 +94,46 @@ def monochrome(render: Image.Image) -> Image.Image:
     return Image.fromarray(out, "RGBA")
 
 
+def macos_icon(icon: Image.Image, render: Image.Image) -> None:
+    """the Mac app's icon (port/macos/OpenCE.icns, which tools/macos_build.py
+    puts in OpenCE.app): the render on the background's gradient, in the
+    rounded square Mac icons have (824 of the 1024 pixels, the rest left
+    clear for the shadow the Dock and Finder draw), at each of the sizes an
+    icon set has. Needs iconutil (macOS)."""
+    import shutil
+    import subprocess
+    import tempfile
+
+    top, bottom = background_gradient(icon, render)
+    side, inner, radius = 1024, 824, 185
+    rows = np.linspace(0.0, 1.0, inner)[:, None]
+    gradient = np.zeros((inner, inner, 4), np.float64)
+    for channel in range(3):
+        gradient[..., channel] = top[channel] + (bottom[channel] - top[channel]) * rows
+    gradient[..., 3] = 255
+    tile = Image.fromarray(gradient.astype(np.uint8))
+    # (the render fills the square as it fills the other icons)
+    tile.alpha_composite(render.resize((inner, inner), Image.LANCZOS))
+    # (the corners, drawn at four times the size for smooth edges)
+    mask = Image.new("L", (inner * 4, inner * 4), 0)
+    from PIL import ImageDraw
+
+    ImageDraw.Draw(mask).rounded_rectangle((0, 0, inner * 4 - 1, inner * 4 - 1), radius * 4, fill=255)
+    tile.putalpha(mask.resize((inner, inner), Image.LANCZOS))
+    picture = Image.new("RGBA", (side, side), (0, 0, 0, 0))
+    picture.alpha_composite(tile, ((side - inner) // 2, (side - inner) // 2))
+    with tempfile.TemporaryDirectory() as directory:
+        iconset = Path(directory) / "OpenCE.iconset"
+        iconset.mkdir()
+        for size in (16, 32, 128, 256, 512):
+            picture.resize((size, size), Image.LANCZOS).save(iconset / f"icon_{size}x{size}.png")
+            picture.resize((size * 2, size * 2), Image.LANCZOS).save(iconset / f"icon_{size}x{size}@2x.png")
+        subprocess.run(["iconutil", "-c", "icns", str(iconset), "-o", str(Path(directory) / "OpenCE.icns")],
+                       check=True)
+        shutil.copyfile(Path(directory) / "OpenCE.icns", MACOS_ICON)
+    print(f"{MACOS_ICON.relative_to(ROOT)}: 16 to 1024")
+
+
 def web_icons(icon: Image.Image) -> None:
     WEB_ICONS.mkdir(parents=True, exist_ok=True)
     for size in WEB_SIZES:
@@ -100,8 +142,14 @@ def web_icons(icon: Image.Image) -> None:
 
 
 def main() -> None:
+    import sys
+
     icon = Image.open(ICON).convert("RGBA")
     render = Image.open(RENDER).convert("RGBA")
+    # (--macos: the Mac app's icon only, which needs a Mac's iconutil)
+    if "--macos" in sys.argv[1:]:
+        macos_icon(icon, render)
+        return
 
     # the desktop's icons
     icon.resize((256, 256), Image.LANCZOS).save(WINDOW_ICON, optimize=True)
