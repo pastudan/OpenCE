@@ -8,8 +8,10 @@ Metal.
 1. Put the game's `maps` folder (from your own disc image, as for the other
    ports: [Game data](../../README.md#game-data)) in `~/Games/Halo`, so that
    `~/Games/Halo/maps/ui.map` exists. `HALO_DATA_ROOT` names another folder.
-2. Open `OpenCE.app`. A build downloaded from GitHub is signed only ad hoc,
-   so macOS quarantines it: take that off once with
+2. Open `OpenCE.app`. A notarized build (`OpenCE-macos.dmg`, see
+   "Signing and notarization") opens as it is. One signed only ad hoc (the
+   workflow's artifact, without the signing secrets) is quarantined by
+   macOS once downloaded: take that off once with
    `xattr -dr com.apple.quarantine OpenCE.app`, or right-click it and choose
    Open.
 
@@ -73,6 +75,50 @@ without game data. The GitHub workflow `.github/workflows/macos.yml` runs both o
 runner (free for public repositories) and uploads the app.
 
 `tools/app_icon.py --macos` makes the app's icon, `OpenCE.icns`.
+
+## Signing and notarization
+
+An app signed ad hoc (as `ci_build.py` signs it) runs on the Mac that
+built it, but one downloaded elsewhere is stopped by Gatekeeper until its
+quarantine is taken off. To give others an app that opens with a
+double-click, sign it with a Developer ID and have Apple notarize it:
+
+```sh
+python3 tools/macos_release.py dist/halo-macos-release/OpenCE.app
+```
+
+It signs the app under the hardened runtime with `OpenCE.entitlements`
+(only the microphone, for voice chat: the game is compiled ahead of time
+and needs no JIT), sends it to Apple's notary service, staples the ticket,
+and packs `OpenCE-macos.dmg` (the app and a link to Applications), signed,
+notarized and stapled too.
+
+What it needs, from an [Apple Developer Program](https://developer.apple.com/programs/)
+membership:
+
+1. A **Developer ID Application** certificate (developer.apple.com, Certificates),
+   in the keychain. `MACOS_SIGN_IDENTITY` names it when there are several.
+2. Credentials for the notary service, either:
+   - an App Store Connect API key (App Store Connect, Users and Access,
+     Integrations, Team Keys, with the Developer role): `MACOS_NOTARY_KEY`
+     (the `.p8` file, or its text), `MACOS_NOTARY_KEY_ID` and
+     `MACOS_NOTARY_ISSUER`; or
+   - a profile saved in the keychain with `xcrun notarytool store-credentials
+     OpenCE --apple-id <id> --team-id <team>` (an app-specific password):
+     `MACOS_NOTARY_PROFILE=OpenCE`.
+
+Without notary credentials it signs and packs only; `--sign-only` does so
+on purpose. `MACOS_SIGN_IDENTITY=-` signs ad hoc under the hardened
+runtime, to check that the game runs under it.
+
+The workflow does the same when the repository has these secrets:
+`MACOS_CERTIFICATE` (the certificate with its private key, exported as a
+`.p12`, base64: `base64 -i certificate.p12 | pbcopy`),
+`MACOS_CERTIFICATE_PASSWORD` (the `.p12`'s), and `MACOS_NOTARY_KEY`,
+`MACOS_NOTARY_KEY_ID` and `MACOS_NOTARY_ISSUER`; and, if needed, the
+variable `MACOS_SIGN_IDENTITY`. It puts the certificate in a keychain of
+its own and deletes it afterwards, and never signs a pull request's code.
+Without the secrets it uploads the app signed ad hoc, as before.
 
 ## Debugging
 

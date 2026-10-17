@@ -36,6 +36,9 @@ jobs:
     timeout-minutes: 60
     env:
       EMSDK_VERSION: 6.0.10
+      # (whether the repository has a Developer ID to sign with: Sign and
+      # notarize, below)
+      MACOS_SIGNING: ${{ secrets.MACOS_CERTIFICATE != '' }}
     steps:
       - uses: actions/checkout@v4
 
@@ -84,6 +87,23 @@ jobs:
 
       - name: Compile cache
         run: ccache --show-stats
+
+      # (signed with a Developer ID, notarized and packed as a disk image:
+      # tools/macos_release.py, only where the repository has the secrets,
+      # and never for a pull request's code; without them the app stays
+      # signed ad hoc)
+      - name: Sign and notarize
+        if: env.MACOS_SIGNING == 'true' && github.event_name != 'pull_request'
+        env:
+          MACOS_CERTIFICATE: ${{ secrets.MACOS_CERTIFICATE }}
+          MACOS_CERTIFICATE_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
+          MACOS_SIGN_IDENTITY: ${{ vars.MACOS_SIGN_IDENTITY }}
+          MACOS_NOTARY_KEY: ${{ secrets.MACOS_NOTARY_KEY }}
+          MACOS_NOTARY_KEY_ID: ${{ secrets.MACOS_NOTARY_KEY_ID }}
+          MACOS_NOTARY_ISSUER: ${{ secrets.MACOS_NOTARY_ISSUER }}
+        run: |
+          python3 tools/macos_release.py dist/halo-macos-release/OpenCE.app
+          python3 tools/macos_check.py dist/halo-macos-release/OpenCE.app
 
       - uses: actions/upload-artifact@v4
         with:
