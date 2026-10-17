@@ -69,7 +69,7 @@ host and adds `--unshared-memory`.
 `dist/halo-macos-release` and signs it ad hoc, and
 `python3 tools/macos_check.py dist/halo-macos-release/OpenCE.app` checks it:
 the bundle, and that the game starts, opens Metal and exits by itself
-without game data. The GitHub workflow runs both on a standard `macos-15`
+without game data. The GitHub workflow `.github/workflows/macos.yml` runs both on a standard `macos-15`
 runner (free for public repositories) and uploads the app.
 
 `tools/app_icon.py --macos` makes the app's icon, `OpenCE.icns`.
