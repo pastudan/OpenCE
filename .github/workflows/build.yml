@@ -1,7 +1,8 @@
 name: Build
 
 # Debug and release builds of the native ports (Linux, Windows, Android) and
-# the web port for every pushed commit, uploaded as artifacts.
+# the web port for every pushed commit, uploaded as artifacts, and the macOS
+# port's app (one build: see its job).
 # tools/ci_build.py does each build; see it for the options.
 #
 # Kept cheap:
@@ -335,6 +336,72 @@ jobs:
           name: halo-web-release
           path: dist/halo-web-release
           include-hidden-files: true
+          retention-days: 3
+
+  macos:
+    # The macOS port (port/macos/README.md): the game compiled to wasm32 by
+    # emsdk's clang, with wasi-sdk's C library, turned into C by wabt's
+    # wasm2c (patched: port/macos/tools), and built with the Mac's clang and
+    # SDL 3 into OpenCE.app, which draws with Metal. A standard GitHub-hosted
+    # runner, which costs a public repository nothing. The tools, emsdk and
+    # SDL's source are cached; compiles go through ccache.
+    runs-on: macos-15
+    timeout-minutes: 60
+    env:
+      EMSDK_VERSION: 6.0.10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/cache@v4
+        with:
+          path: ~/emsdk
+          key: emsdk-macos-${{ env.EMSDK_VERSION }}
+
+      # (wasi-sdk and the patched wabt, which setup_toolchain.sh puts there)
+      - uses: actions/cache@v4
+        with:
+          path: ~/toolchains
+          key: macos-toolchains-${{ hashFiles('port/macos/tools/**') }}
+
+      - uses: actions/cache@v4
+        with:
+          path: build/macos/third_party
+          key: macos-third-party-${{ hashFiles('tools/macos_build.py') }}
+
+      - name: Install the toolchain
+        run: |
+          brew install ninja ccache
+          if [ ! -x ~/emsdk/upstream/bin/clang ]; then
+            rm -rf ~/emsdk
+            git clone --depth 1 https://github.com/emscripten-core/emsdk.git ~/emsdk
+            ~/emsdk/emsdk install "$EMSDK_VERSION"
+          fi
+          ~/emsdk/emsdk activate "$EMSDK_VERSION"
+          sh port/macos/tools/setup_toolchain.sh
+
+      - uses: actions/cache@v4
+        with:
+          path: .ccache
+          key: ccache-macos-${{ github.sha }}
+          restore-keys: ccache-macos-
+
+      # (one build: the macOS build has no link-time or profile-guided
+      # optimisation to leave out of a debug build, so the two would match)
+      - name: Release
+        run: EMSDK=~/emsdk python3 tools/ci_build.py macos release
+
+      # (the app is whole and signed, and starts, opens Metal and exits by
+      # itself with no game data: tools/macos_check.py)
+      - name: Test
+        run: python3 tools/macos_check.py dist/halo-macos-release/OpenCE.app
+
+      - name: Compile cache
+        run: ccache --show-stats
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: halo-macos-release
+          path: dist/halo-macos-release
           retention-days: 3
 
   release:

@@ -8,6 +8,8 @@
 	<string>Halo</string>
 	<key>CFBundleExecutable</key>
 	<string>OpenCE</string>
+	<key>CFBundleIconFile</key>
+	<string>OpenCE</string>
 	<key>CFBundleIdentifier</key>
 	<string>org.opencommunityedition.halo</string>
 	<key>CFBundleInfoDictionaryVersion</key>

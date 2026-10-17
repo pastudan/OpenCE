@@ -869,9 +869,11 @@ BOOL platform_video_initialize(unsigned long width, unsigned long height)
 		return FALSE;
 	}
 #ifndef HALO_ANDROID
-#ifndef HALO_GLES
+#if !defined(HALO_GLES) && !defined(HALO_MACOS)
 	/* the game's icon, which the desktop shows for the window (on Windows
-	also halo.exe's own, port/windows/halo.rc; a web page has its own) */
+	also halo.exe's own, port/windows/halo.rc; a web page has its own, and
+	a Mac app its bundle's, port/macos/OpenCE.icns, which this would replace
+	in the Dock) */
 	if (platform_window_icon_size)
 	{
 		SDL_Surface *icon = SDL_LoadPNG_IO(SDL_IOFromConstMem(platform_window_icon, platform_window_icon_size), true);
@@ -1569,8 +1571,13 @@ void platform_pump_events(void)
 			}
 #ifndef HALO_ANDROID
 			/* F11 switches between fullscreen and the window (SDL keeps the
-			window's size and place while fullscreen) */
-			if (event.key.down && !event.key.repeat && event.key.scancode == SDL_SCANCODE_F11)
+			window's size and place while fullscreen); on a Mac, whose F11
+			shows the desktop, Command-F too */
+			if (event.key.down && !event.key.repeat && (event.key.scancode == SDL_SCANCODE_F11
+#ifdef HALO_MACOS
+				|| (event.key.scancode == SDL_SCANCODE_F && (event.key.mod & SDL_KMOD_GUI))
+#endif
+				))
 			{
 				platform_window_set_fullscreen(!platform_window_fullscreen());
 			}

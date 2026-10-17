@@ -443,5 +443,10 @@ def generate_macos_build(n: Writer, sln: Any) -> None:
     info_plist = build_dir / "OpenCE.app" / "Contents" / "Info.plist"
     n.rule(name="macos_copy", command="cp $in $out", description="MACOS COPY $out")
     n.build(outputs=info_plist, rule="macos_copy", inputs=PORT_DIR / "Info.plist")
-    n.build(outputs="macos", rule="phony", inputs=[executable, info_plist])
+    # (the app's icon, which Info.plist names: tools/app_icon.py --macos)
+    icon = build_dir / "OpenCE.app" / "Contents" / "Resources" / "OpenCE.icns"
+    n.rule(name="macos_copy_into", command="mkdir -p $$(dirname $out) && cp $in $out",
+           description="MACOS COPY $out")
+    n.build(outputs=icon, rule="macos_copy_into", inputs=PORT_DIR / "OpenCE.icns")
+    n.build(outputs="macos", rule="phony", inputs=[executable, info_plist, icon])
     n.newline()
