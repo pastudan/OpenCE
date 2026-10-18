@@ -11,8 +11,9 @@
   reference photos by Aerocatia. The sniper rifle's zoom labels (2x, 10x)
   are set in Overpass (`port/assets/fonts`).
 - **The HUD's reticle warnings and some hint icons** (Reload, No Ammo and
-  the rest; the messages' Back, Start and flashlight icons): redraws made
-  with Bridge, fitted to the maps' art, with their words set in Overpass
+  the rest; the messages' Back, Start, flashlight, weapon and grenade
+  icons): redraws made with Bridge, fitted to the maps' art (the weapons'
+  and grenades' traced from it), with their words set in Overpass
   (`port/assets/hints`).
 
 ## Third-party art

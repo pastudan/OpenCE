@@ -11,7 +11,7 @@ levels, though a game draws only some (the scopes' only when zoomed), and
 the titles of the menus shown, about 3 MB each (11 MB for the carnage
 report's, a whole panel), and their button icons, about 0.3 MB each (5.3
 MB for the message icons' sheet), and the HUD's hint icons and reticle
-warnings (port/assets/hints), 5.3 MB for each of their three sheets.
+warnings (port/assets/hints), 5.3 MB for each of their five sheets.
 They are drawn with linear filtering and their mip levels (d3d8_gl.c,
 configure_sampler), as they are larger than they appear.
 

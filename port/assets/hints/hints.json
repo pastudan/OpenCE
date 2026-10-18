@@ -1,6 +1,98 @@
 {
  "assets": [
   {
+   "name": "hud_msg_icons__0",
+   "tag": "ui\\hud\\bitmaps\\combined\\hud_msg_icons",
+   "bitmap": 0,
+   "width": 128,
+   "height": 128,
+   "format": "a8y8",
+   "scale": 8,
+   "crc": 1457896459,
+   "sprites": [
+    {
+     "sequence": 4,
+     "frame": 0,
+     "bitmap": 0,
+     "cell": [
+      0,
+      102,
+      122,
+      128
+     ],
+     "picture": {
+      "svg": "weapon_04.svg",
+      "place": [
+       1.0,
+       0.0,
+       0.0
+      ]
+     },
+     "likeness": 0.9841
+    },
+    {
+     "sequence": 5,
+     "frame": 0,
+     "bitmap": 0,
+     "cell": [
+      0,
+      40,
+      100,
+      72
+     ],
+     "picture": {
+      "svg": "weapon_05.svg",
+      "place": [
+       1.0,
+       0.0,
+       0.0
+      ]
+     },
+     "likeness": 0.9849
+    },
+    {
+     "sequence": 6,
+     "frame": 0,
+     "bitmap": 0,
+     "cell": [
+      74,
+      0,
+      122,
+      39
+     ],
+     "picture": {
+      "svg": "weapon_06.svg",
+      "place": [
+       1.0,
+       0.0,
+       0.0
+      ]
+     },
+     "likeness": 0.9822
+    },
+    {
+     "sequence": 9,
+     "frame": 0,
+     "bitmap": 0,
+     "cell": [
+      36,
+      0,
+      74,
+      40
+     ],
+     "picture": {
+      "svg": "weapon_09.svg",
+      "place": [
+       1.0,
+       0.0,
+       0.0
+      ]
+     },
+     "likeness": 0.9884
+    }
+   ]
+  },
+  {
    "name": "hud_msg_icons__1",
    "tag": "ui\\hud\\bitmaps\\combined\\hud_msg_icons",
    "bitmap": 1,
@@ -71,6 +163,118 @@
       ]
      },
      "likeness": 0.9857
+    },
+    {
+     "sequence": 7,
+     "frame": 0,
+     "bitmap": 1,
+     "cell": [
+      0,
+      0,
+      95,
+      42
+     ],
+     "picture": {
+      "svg": "weapon_07.svg",
+      "place": [
+       1.0,
+       0.0,
+       0.0
+      ]
+     },
+     "likeness": 0.9928
+    },
+    {
+     "sequence": 8,
+     "frame": 0,
+     "bitmap": 1,
+     "cell": [
+      0,
+      82,
+      82,
+      115
+     ],
+     "picture": {
+      "svg": "weapon_08.svg",
+      "place": [
+       1.0,
+       0.0,
+       0.0
+      ]
+     },
+     "likeness": 0.9873
+    },
+    {
+     "sequence": 11,
+     "frame": 0,
+     "bitmap": 1,
+     "cell": [
+      36,
+      42,
+      102,
+      81
+     ],
+     "picture": {
+      "svg": "weapon_11.svg",
+      "place": [
+       1.0,
+       0.0,
+       0.0
+      ]
+     },
+     "likeness": 0.9834
+    }
+   ]
+  },
+  {
+   "name": "hud_msg_icons__2",
+   "tag": "ui\\hud\\bitmaps\\combined\\hud_msg_icons",
+   "bitmap": 2,
+   "width": 128,
+   "height": 128,
+   "format": "a8y8",
+   "scale": 8,
+   "crc": 734518216,
+   "sprites": [
+    {
+     "sequence": 10,
+     "frame": 0,
+     "bitmap": 2,
+     "cell": [
+      0,
+      0,
+      62,
+      56
+     ],
+     "picture": {
+      "svg": "weapon_10.svg",
+      "place": [
+       1.0,
+       0.0,
+       0.0
+      ]
+     },
+     "likeness": 0.9907
+    },
+    {
+     "sequence": 12,
+     "frame": 0,
+     "bitmap": 2,
+     "cell": [
+      0,
+      92,
+      122,
+      118
+     ],
+     "picture": {
+      "svg": "weapon_12.svg",
+      "place": [
+       1.0,
+       0.0,
+       0.0
+      ]
+     },
+     "likeness": 0.9917
     }
    ]
   },

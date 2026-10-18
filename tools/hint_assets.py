@@ -1,11 +1,14 @@
 #!/usr/bin/env python3
 """Makes high-res textures of some of the HUD's hint icons
-(port/assets/hints/*.png): the BACK and START buttons and the flashlight
-that the HUD's messages draw beside their words, and the warnings by the
-reticle (Reload, No Ammo, Low Battery, No Grenades, No Weapon), from
-hand-drawn SVG redraws (port/assets/hints/svg: oval.svg, flashlight.svg)
-and words set in Overpass (port/assets/fonts):
+(port/assets/hints/*.png): the BACK and START buttons, the flashlight and
+the weapons' and grenades' pictures that the HUD's messages draw beside
+their words ("Press X to pick up [the weapon]"), and the warnings by the
+reticle (Reload, No Ammo, Low Battery, No Grenades, No Weapon), from SVG
+redraws (port/assets/hints/svg: oval.svg and flashlight.svg drawn by hand,
+weapon_*.svg traced from the maps' pictures) and words set in Overpass
+(port/assets/fonts):
 
+    python tools/hint_assets.py trace --map assets/maps/a10.map
     python tools/hint_assets.py layout --map assets/maps/a10.map
     python tools/hint_assets.py build
     python tools/hint_assets.py check --map assets/maps/a10.map --out /tmp/hint_check
@@ -19,9 +22,8 @@ port/linux/src/hud_hires.c); another language's keep the map's art.
 
 The message icons' sheet also has the controller's buttons, sticks and
 triggers (drawn from port/assets/buttons' redraws instead:
-hud_hires_button_draw, port/linux/game/hud_hires_tags.c) and the weapons'
-and grenades' pictures (not redrawn), so each texture here stands only for
-the sprites it draws, through a placeholder bitmap
+hud_hires_button_draw, port/linux/game/hud_hires_tags.c), so each texture
+here stands only for the sprites it draws, through a placeholder bitmap
 (port/linux/game/hud_hires_tags.c). The warnings' sheet is drawn whole.
 
 Every icon is a white drawing (the game tints it) in a sprite's cell: a word
@@ -31,6 +33,9 @@ a redraw drawn over the map's picture (whose sizes were fitted to it),
 placed on each cell by the shape of the map's picture there (its area and
 centre, then least squares).
 
+trace: traces each weapon's picture on the map (its grey levels as layers of
+    smooth outlines: potrace, over the art upsampled 8x) into
+    svg/weapon_<sequence>.svg, which can be cleaned by hand afterwards.
 layout: reads the sheets from the map (their sprites, sizes and pixels'
     CRCs) and fits each word and picture to its cell; writes
     port/assets/hints/hints.json (numbers only).
@@ -39,7 +44,8 @@ build: draws port/assets/hints/*.png as hints.json says (committed; the
 check: compares each PNG, reduced to its bitmap's size, with the map's
     bitmap and writes side-by-side images into --out.
 
-Needs rsvg-convert, Pillow, NumPy, SciPy and fontTools.
+Needs rsvg-convert, Pillow, NumPy, SciPy and fontTools; trace also potracer
+(the potrace module).
 """
 
 import argparse
@@ -79,6 +85,14 @@ ICONS = {
     18: {"word": "START", "picture": "oval.svg"},
     23: {"picture": "flashlight.svg"},
 }
+# the weapons' and grenades' pictures, by sequence: traced from the map's
+# own (trace, below) into port/assets/hints/svg/weapon_<sequence>.svg, drawn
+# where the map's are (each SVG is its sprite's cell)
+WEAPONS = range(4, 13)
+ICONS.update({sequence: {"picture": f"weapon_{sequence:02}.svg", "traced": True} for sequence in WEAPONS})
+# a traced picture's grey levels: each a layer of its outline, the darker
+# ones under the lighter (the art's flat greys, its edges and highlights)
+TRACE_LEVELS = 4
 # the warnings, by sequence: two lines of words, set in Overpass's Bold
 # (its weight is the map's), and the sheet's arrows and triangle
 WARNING_FONT = "Overpass-750"
@@ -313,7 +327,9 @@ def icon_layout(group: dict, sequence: int, icon: dict, alphas: list) -> list:
             word_alpha, picture_alpha = split_word(alpha)
             entry["word"] = {"text": icon["word"], "font": WORD_FONT, "place": fit_word(WORD_FONT, icon["word"],
                                                                                          word_alpha)}
-        entry["picture"] = {"svg": icon["picture"], "place": fit_picture(icon["picture"], picture_alpha)}
+        # (a traced picture is its cell's own drawing: in place)
+        place = [1.0, 0.0, 0.0] if icon.get("traced") else fit_picture(icon["picture"], picture_alpha)
+        entry["picture"] = {"svg": icon["picture"], "place": place}
         drawn = reduced(document(right - left, bottom - top, icon_body(entry)), right - left, bottom - top)
         entry["likeness"] = likeness(soften(drawn), soften(alpha))
         sprites.append(entry)
@@ -452,6 +468,77 @@ def dots(grey: np.ndarray) -> str:
     return '<g fill="#ffffff">' + "".join(circles) + "</g>"
 
 
+# ---------- tracing
+
+
+def trace_levels(alpha: np.ndarray, count: int) -> np.ndarray:
+    """The art's grey levels: its covered texels' alpha in count clusters."""
+    values = alpha[alpha > 0.06]
+    centres = np.quantile(values, np.linspace(0.1, 0.9, count))
+    for _ in range(30):
+        labels = np.argmin(np.abs(values[:, None] - centres[None]), axis=1)
+        centres = np.array([values[labels == index].mean() if (labels == index).any() else centres[index]
+                            for index in range(count)])
+    return np.sort(centres)
+
+
+def traced_body(alpha: np.ndarray, count: int = TRACE_LEVELS) -> str:
+    """A cell's picture as smooth outlines, one layer for each of its grey
+    levels (where the art is at least that level), each layer's opacity what
+    adds to the ones under it to give its level: the art upsampled 8x with a
+    cubic filter, then traced by potrace."""
+    import potrace
+    from scipy import ndimage
+
+    scale, margin = 8, 2
+    centres = trace_levels(alpha, count)
+    thresholds = [centres[0] / 2] + [(centres[index] + centres[index + 1]) / 2 for index in range(count - 1)]
+    large = np.clip(ndimage.zoom(np.pad(alpha, margin), scale, order=3), 0, 1)
+
+    def point(p) -> str:
+        return f"{number(round(p.x / scale - margin, 2))},{number(round(p.y / scale - margin, 2))}"
+
+    layers, below = [], 0.0
+    for threshold, level in zip(thresholds, centres):
+        paths = potrace.Bitmap(~(large > threshold)).trace(turdsize=6, alphamax=1.0, opticurve=True,
+                                                           opttolerance=0.2)
+        commands = []
+        for curve in paths:
+            commands.append(f"M{point(curve.start_point)}")
+            for segment in curve.segments:
+                if segment.is_corner:
+                    commands.append(f"L{point(segment.c)}L{point(segment.end_point)}")
+                else:
+                    commands.append(f"C{point(segment.c1)} {point(segment.c2)} {point(segment.end_point)}")
+            commands.append("Z")
+        opacity = min(1.0, max(0.0, 1 - (1 - level) / (1 - below)))
+        below = level
+        layers.append(f'<path d="{"".join(commands)}" fill="#ffffff" fill-opacity="{number(round(opacity, 3))}" '
+                      f'fill-rule="evenodd"/>')
+    return "\n".join(layers)
+
+
+def trace(arguments) -> None:
+    """Writes port/assets/hints/svg/weapon_<sequence>.svg for each weapon's
+    picture, traced from the map's."""
+    xbox_map = XboxMap(Path(arguments.map))
+    group = xbox_map.bitmap_group(LARGE)
+    alphas = [decode_bitmap(bitmap)[..., 3].astype(float) / 255 for bitmap in group["bitmaps"]]
+    for sequence in WEAPONS:
+        for frame, (bitmap, cell) in enumerate(sheet_sprites(group, sequence)):
+            left, top, right, bottom = cell
+            alpha = alphas[bitmap][top:bottom, left:right]
+            body = traced_body(alpha)
+            width, height = right - left, bottom - top
+            text = document(width, height, f"<title>{LARGE} sequence {sequence}, traced (tools/hint_assets.py "
+                                           f"trace)</title>\n{body}")
+            path = ASSETS / "svg" / ICONS[sequence]["picture"]
+            path.write_text(text)
+            drawn = reduced(text, width, height, 8)
+            print(f"{path.relative_to(ROOT)}: {width}x{height}, likeness "
+                  f"{likeness(soften(drawn), soften(alpha)):.3f}")
+
+
 def layout(arguments) -> None:
     xbox_map = XboxMap(Path(arguments.map))
     entries = []
@@ -539,12 +626,14 @@ def main() -> None:
     commands = parser.add_subparsers(dest="command", required=True)
     command = commands.add_parser("layout")
     command.add_argument("--map", required=True)
+    command = commands.add_parser("trace")
+    command.add_argument("--map", required=True)
     commands.add_parser("build")
     command = commands.add_parser("check")
     command.add_argument("--map", required=True)
     command.add_argument("--out", required=True)
     arguments = parser.parse_args()
-    {"layout": layout, "build": build, "check": check}[arguments.command](arguments)
+    {"trace": trace, "layout": layout, "build": build, "check": check}[arguments.command](arguments)
 
 
 if __name__ == "__main__":
