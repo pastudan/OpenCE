@@ -1,8 +1,8 @@
 /*
-XISO.C
+IMAGE_SOURCE.C
 
-Copies the maps folder out of an Xbox disc image (an "xiso"), for the
-desktop ports' first start without game data (sdl_platform.c).
+Discovers the maps in a bounded, transport-independent Xbox disc image.
+Does not copy or publish files. Follows the desktop reader's format handling.
 
 The image's file system is XDVDFS, read as extract-xiso does
 (https://github.com/XboxDev/extract-xiso, extract-xiso.c, whose format
@@ -14,10 +14,6 @@ directories whose entries form a binary tree (each entry: left and right
 subtree offsets in 4-byte units, the start sector, the size, attributes, the
 name's length and the name, 4-byte aligned). Images made from a whole disc
 put the game partition further in, at one of the offsets below.
-
-The files are written to <destination>/maps.partial first, which becomes
-<destination>/maps once they all are, so an interrupted extraction never
-leaves a maps folder that looks complete.
 
 Some parts of this code are copyright in@fishtank.com. This product
 includes software developed by in <in@fishtank.com>.
@@ -56,9 +52,6 @@ includes software developed by in <in@fishtank.com>.
  * OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF
  * ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 */
-
-/* (the desktop ports only: the Android app and the web page import the game
-data themselves) */
 
 /* Transport-independent, bounded discovery for the TV importer. The format
    interpretation follows xiso.c and retains its extract-xiso notice above. */

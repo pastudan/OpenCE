@@ -106,6 +106,21 @@ Direct NFS/SMB support is deferred, not silently replaced with a companion
 service. A normal HTTP server on a user's Mac/NAS is the first direct-URL
 source.
 
+## Validation so far
+
+- macOS: native libtorrent with WebTorrent enabled builds; ordinary TCP
+  and WebRTC-only generated-payload tests pass. The WebRTC peer is the same
+  WebTorrent 3.0.21 version used by the existing seeder.
+- 24 synthetic dependency/archive and image-reader tests pass locally.
+  Read-at discovery of the user's local image found 24 map files using
+  53,336 bytes of metadata/header reads; no game data is included here.
+- First GitHub AppleTVOS probe compiled all dependencies and source, then
+  failed to link because CoreGraphics was omitted (fixed). This is not yet
+  a passing TV app build or device execution result.
+- Later hosted macOS 15 runs failed to acquire runners; a standard macOS 26
+  run is being tried. Local device/simulator validation is blocked until
+  full Xcode and the tvOS SDK/runtime are installed.
+
 ## Remaining gates
 
 - Native WebRTC-only interoperability with the existing WebTorrent seeder,
