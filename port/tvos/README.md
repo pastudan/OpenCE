@@ -112,8 +112,10 @@ source.
   ordinary peer tests on tvOS, and both transports sharing one store.
 - The game's AppleTVOS target, UIKit/SDL lifecycle, sandboxed paths and
   memory budgets, including a capability-gated BC texture fallback.
-- Bounded image-source API, HTTP range and verified-piece adapters, import
-  UI, cancellation, resume and cache/save recovery.
+- Shared integration of the bounded image-source API (`import/image_source.c`
+  has synthetic bounds/name/cycle/header tests, but is not wired into the
+  existing importer yet), HTTP range and verified-piece adapters, import UI,
+  cancellation, resume and cache/save recovery.
 - Development signing and physical Apple TV gameplay tests.
 
 The macOS branch and its notarization work remain independent. No store

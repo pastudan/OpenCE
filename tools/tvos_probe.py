@@ -149,6 +149,35 @@ def main():
         command += ["-DCMAKE_OSX_DEPLOYMENT_TARGET=14.4"]
     run(command)
     run(["cmake", "--build", cmake_build, "--parallel", args.jobs])
+    if args.platform != "macos":
+        app = cmake_build / "OpenCETVProbe.app"
+        platform = text(["xcrun", "vtool", "-show-build", app / "OpenCETVProbe"])
+        expected = "TVOSSIMULATOR" if args.platform == "simulator" else "TVOS"
+        if f"platform {expected}\n" not in platform:
+            raise RuntimeError(f"Incorrect Mach-O platform, expected {expected}: {platform}")
+        print(platform)
+        licenses = app / "Licenses"
+        licenses.mkdir(exist_ok=True)
+        files = {
+            "libtorrent.txt": deps / "libtorrent/COPYING",
+            "libdatachannel.txt": deps / "libtorrent/deps/libdatachannel/LICENSE",
+            "libjuice.txt": deps / "libtorrent/deps/libdatachannel/deps/libjuice/LICENSE",
+            "usrsctp.txt": deps / "libtorrent/deps/libdatachannel/deps/usrsctp/LICENSE.md",
+            "plog.txt": deps / "libtorrent/deps/libdatachannel/deps/plog/LICENSE",
+            "boost.txt": boost / "LICENSE_1_0.txt",
+            "openssl.txt": deps / "openssl/LICENSE.txt",
+        }
+        for name, original in files.items():
+            shutil.copyfile(original, licenses / name)
+        (licenses / "Sources.txt").write_text(
+            f"libtorrent: https://github.com/arvidn/libtorrent/tree/{LIBTORRENT}\n"
+            "libdatachannel: https://github.com/paullouisageneau/libdatachannel/tree/a02b751917ac8afc8c58dc6f4461d25ff9465d48\n"
+            "libjuice: https://github.com/paullouisageneau/libjuice/tree/5948a4162d37bc213d6051b67ee2876ccc5a99a6\n"
+            "usrsctp: https://github.com/paullouisageneau/usrsctp/tree/fec583d54493f879d2ae44a743423bf8a04371ab\n"
+            "plog: https://github.com/SergiusTheBest/plog/tree/94899e0b926ac1b0f4750bfbd495167b4a6ae9ef\n"
+            f"OpenSSL: https://github.com/openssl/openssl/tree/{OPENSSL}\n"
+            f"Boost: https://archives.boost.io/release/{BOOST_VERSION}/source/{BOOST_ARCHIVE}\n"
+            "No modifications to these covered sources. Build configuration: tools/tvos_probe.py.\n")
     if args.platform == "macos":
         run(["ctest", "--test-dir", cmake_build, "--output-on-failure"])
     print(f"Built {args.platform} probes at {cmake_build}; this is NOT the game or a device-tested release.")

@@ -10,6 +10,7 @@ on:
       - "tools/tvos_probe.py"
       - "tools/tvos_simcheck.py"
       - "tools/test_tvos_probe.py"
+      - "tools/test_tvos_image_source.py"
       - ".github/workflows/tvos.yml"
   workflow_dispatch:
 
@@ -21,7 +22,9 @@ concurrency:
 
 jobs:
   probes:
-    runs-on: macos-15
+    # Standard, free public-repository runner; macos-15's ARM pool is
+    # currently failing to acquire runners before its queue timeout.
+    runs-on: macos-26
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
@@ -37,6 +40,11 @@ jobs:
         with:
           path: build/tvos-probe/deps
           key: tvos-probe-deps-${{ hashFiles('tools/tvos_probe.py') }}
+      - name: Test dependency and bounded image reader checks
+        run: |
+          python3 -m venv "$RUNNER_TEMP/probe-tests"
+          "$RUNNER_TEMP/probe-tests/bin/pip" install pytest
+          "$RUNNER_TEMP/probe-tests/bin/python" -m pytest -q tools/test_tvos_probe.py tools/test_tvos_image_source.py
       - name: Build and test ordinary peers on the Mac
         run: python3 tools/tvos_probe.py --platform macos --jobs 3
       - uses: actions/setup-node@v4
