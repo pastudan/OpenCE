@@ -76,7 +76,8 @@ def boost_headers(deps):
         # A new private tree avoids following pre-existing cached symlinks.
         # Keep and rehash the archive; a text stamp cannot authenticate headers.
         with tempfile.TemporaryDirectory(dir=deps) as stage:
-            source.extractall(stage, members=members)
+            options = {"filter": "data"} if hasattr(tarfile, "data_filter") else {}
+            source.extractall(stage, members=members, **options)
             if directory.is_symlink():
                 directory.unlink()
             elif directory.exists():

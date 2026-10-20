@@ -1,0 +1,11 @@
+{
+  "name": "opence-tvos-interop-fixture",
+  "private": true,
+  "type": "module",
+  "engines": { "node": ">=22" },
+  "description": "Test-only WebTorrent peer and loopback tracker; not embedded in the tvOS app",
+  "dependencies": {
+    "webtorrent": "3.0.21",
+    "bittorrent-tracker": "11.2.3"
+  }
+}

@@ -38,6 +38,13 @@ jobs:
           key: tvos-probe-deps-${{ hashFiles('tools/tvos_probe.py') }}
       - name: Build and test ordinary peers on the Mac
         run: python3 tools/tvos_probe.py --platform macos --jobs 3
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - name: Test WebTorrent interoperability without TCP fallback
+        run: |
+          npm ci --prefix port/tvos/probe/test-runtime --no-audit --no-fund
+          node port/tvos/probe/webtorrent_fixture.mjs --modules port/tvos/probe/test-runtime --client build/tvos-probe/macos/build/opence_rtc_probe
       - name: Cross-compile device probe
         run: python3 tools/tvos_probe.py --platform tvos --jobs 3
       - name: Cross-compile simulator probe
@@ -52,3 +59,4 @@ jobs:
           name: tvos-feasibility-probes-not-the-game
           path: dist/tvos-probe
           retention-days: 3
+          if-no-files-found: error

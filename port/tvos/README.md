@@ -45,8 +45,23 @@ named **not-the-game**.
 
 An address-space reservation is **not** a physical-memory stress test.
 Simulator success is **not** evidence of Apple TV GPU performance. The
-probe does not yet test SDL lifecycle, the wasm2c fault handler, gameplay,
-or compatibility with WebTorrent peers. Those are separate acceptance gates.
+TV probe does not yet test SDL lifecycle, the wasm2c fault handler,
+gameplay, or WebTorrent peers on the TV itself. Those are separate gates.
+
+The host-only WebRTC fixture uses the existing seeder's WebTorrent 3.0.21
+and a private loopback WebSocket tracker. It disables ordinary TCP/uTP,
+DHT and web-seed fallback, retrieves magnet metadata, verifies pieces and
+compares payload bytes independently on both sides. Run it with:
+
+```sh
+npm ci --prefix port/tvos/probe/test-runtime
+node port/tvos/probe/webtorrent_fixture.mjs \
+  --modules port/tvos/probe/test-runtime \
+  --client build/tvos-probe/macos/build/opence_rtc_probe
+```
+
+Both the ordinary TCP and WebRTC-only fixtures passed locally on macOS.
+This is not yet a tvOS interoperability or simultaneous hybrid-swarm test.
 
 ## Network stack being evaluated
 
