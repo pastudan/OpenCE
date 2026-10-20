@@ -6,6 +6,8 @@
 #import <os/os_sync_wait_on_address.h>
 #import <dispatch/dispatch.h>
 #include <errno.h>
+#include <stdio.h>
+#include <stdlib.h>
 #include <pthread.h>
 #include <stdatomic.h>
 #include <sys/mman.h>
@@ -22,8 +24,9 @@ static void *wake_thread(void *unused)
     return NULL;
 }
 
-static NSString *probe(void)
+static NSString *probe(BOOL *passed)
 {
+    *passed = YES;
     NSMutableString *report = [NSMutableString stringWithString:@"OpenCE Apple TV feasibility probe\n\n"];
     id<MTLDevice> device = MTLCreateSystemDefaultDevice();
     [report appendFormat:@"Metal: %@\n", device ? device.name : @"FAILED"];
@@ -65,7 +68,7 @@ static NSString *probe(void)
         uint32_t observed = atomic_load(&wait_word);
         pthread_join(thread, NULL);
         [report appendFormat:@"Atomic wait/wake: %@ (return %d, errno %d)\n",
-            status == 0 && observed == 1 ? @"passed" : @"FAILED or inconclusive", status, saved_error];
+            status >= 0 && observed == 1 ? @"passed" : @"FAILED or inconclusive", status, saved_error];
     } else {
         [report appendString:@"Atomic wait/wake: FAILED to start thread\n"];
     }
@@ -75,6 +78,7 @@ static NSString *probe(void)
     [report appendFormat:@"\nTCP result %d: %s\n", tcp, result];
     [NSFileManager.defaultManager removeItemAtPath:temporary error:NULL];
     [report appendString:@"\nNOT TESTED: gameplay, SDL lifecycle, wasm2c faults, peak RAM, WebRTC peers.\n"];
+    *passed = tcp == 0 && [report rangeOfString:@"FAILED"].location == NSNotFound;
     return report;
 }
 
@@ -98,9 +102,17 @@ static NSString *probe(void)
     self.window.rootViewController = controller;
     [self.window makeKeyAndVisible];
     dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
-        NSString *report = probe();
+        BOOL passed = NO;
+        NSString *report = probe(&passed);
         NSLog(@"%@", report);
-        dispatch_async(dispatch_get_main_queue(), ^{ label.text = report; });
+        dispatch_async(dispatch_get_main_queue(), ^{
+            label.text = report;
+            if (getenv("OPENCE_PROBE_AUTOMATED")) {
+                fprintf(stderr, "%s: automatic TV platform probes\n", passed ? "PASS" : "FAIL");
+                fflush(stderr);
+                exit(passed ? 0 : 1);
+            }
+        });
     });
     return YES;
 }

@@ -8,6 +8,7 @@ on:
     paths:
       - "port/tvos/**"
       - "tools/tvos_probe.py"
+      - "tools/tvos_simcheck.py"
       - "tools/test_tvos_probe.py"
       - ".github/workflows/tvos.yml"
   workflow_dispatch:
@@ -49,6 +50,8 @@ jobs:
         run: python3 tools/tvos_probe.py --platform tvos --jobs 3
       - name: Cross-compile simulator probe
         run: python3 tools/tvos_probe.py --platform simulator --jobs 3
+      - name: Run TV platform probe in simulator
+        run: python3 tools/tvos_simcheck.py build/tvos-probe/simulator/build/OpenCETVProbe.app
       - name: Package unsigned probes
         run: |
           mkdir -p dist/tvos-probe
