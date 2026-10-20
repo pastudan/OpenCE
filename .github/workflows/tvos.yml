@@ -60,6 +60,13 @@ jobs:
         run: python3 tools/tvos_probe.py --platform simulator --jobs 3
       - name: Run TV platform probe in simulator
         run: python3 tools/tvos_simcheck.py build/tvos-probe/simulator/build/OpenCETVProbe.app
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: tvos-probe-failure-diagnostics
+          path: build/tvos-probe/simulator/build/simulator-diagnostics
+          retention-days: 3
+          if-no-files-found: ignore
       - name: Package unsigned probes
         run: |
           mkdir -p dist/tvos-probe

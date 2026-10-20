@@ -114,12 +114,16 @@ source.
 - 24 synthetic dependency/archive and image-reader tests pass locally.
   Read-at discovery of the user's local image found 24 map files using
   53,336 bytes of metadata/header reads; no game data is included here.
-- First GitHub AppleTVOS probe compiled all dependencies and source, then
-  failed to link because CoreGraphics was omitted (fixed). This is not yet
-  a passing TV app build or device execution result.
-- Later hosted macOS 15 runs failed to acquire runners; a standard macOS 26
-  run is being tried. Local device/simulator validation is blocked until
-  full Xcode and the tvOS SDK/runtime are installed.
+- GitHub AppleTVOS and simulator cross-builds pass, as does host WebRTC
+  interoperability. The first execution check exposed a missing scene
+  lifecycle; apps built with the new SDK must adopt it.
+- With Xcode 27.1 and the tvOS 27.0 runtime installed locally, the scene-based
+  probe passes Metal buffer work, address reservation, wait/wake and TCP
+  transfer in the simulator. It reports no BC compression support and a
+  256 MiB maximum Metal buffer. Those are simulator results, not physical
+  Apple TV capabilities or gameplay measurements.
+- Local device probe compilation also passes. Development provisioning,
+  physical TV runtime checks and gameplay validation are still pending.
 
 ## Remaining gates
 

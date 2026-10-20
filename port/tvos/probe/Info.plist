@@ -10,4 +10,12 @@
 <key>MinimumOSVersion</key><string>17.4</string>
 <key>UIDeviceFamily</key><array><integer>3</integer></array>
 <key>UILaunchScreen</key><dict/>
+<key>UIApplicationSceneManifest</key><dict>
+<key>UIApplicationSupportsMultipleScenes</key><false/>
+<key>UISceneConfigurations</key><dict>
+<key>UIWindowSceneSessionRoleApplication</key><array><dict>
+<key>UISceneConfigurationName</key><string>TV probe</string>
+<key>UISceneDelegateClassName</key><string>TVProbeSceneDelegate</string>
+</dict></array>
+</dict></dict>
 </dict></plist>

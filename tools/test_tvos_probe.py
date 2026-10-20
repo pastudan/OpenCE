@@ -52,3 +52,27 @@ def test_reject_checksum_mismatch(tmp_path):
     (tmp_path / probe.BOOST_ARCHIVE).write_bytes(b"untrusted")
     with pytest.raises(RuntimeError, match="checksum mismatch"):
         probe.boost_headers(tmp_path)
+
+
+def test_simulator_type_must_match_runtime():
+    import tvos_simcheck
+    runtime = {"identifier": "com.apple.CoreSimulator.SimRuntime.tvOS-27-0", "version": "27.0",
+               "isAvailable": True, "supportedDeviceTypes": [{"identifier": "compatible"}]}
+    types = [{"name": "Apple TV 4K", "identifier": "compatible"},
+             {"name": "Apple TV 1080p", "identifier": "obsolete"}]
+    chosen_runtime, device = tvos_simcheck.select_simulator([runtime], types)
+    assert chosen_runtime is runtime and device["identifier"] == "compatible"
+    with pytest.raises(ValueError, match="compatible"):
+        tvos_simcheck.select_simulator([runtime], types[1:])
+    with pytest.raises(ValueError, match="No installed"):
+        tvos_simcheck.select_simulator([], types)
+
+
+def test_probe_scene_manifest_matches_delegate():
+    import plistlib
+    root = Path(__file__).resolve().parent.parent
+    info = plistlib.loads((root / "port/tvos/probe/Info.plist").read_bytes())
+    config = info["UIApplicationSceneManifest"]["UISceneConfigurations"]["UIWindowSceneSessionRoleApplication"][0]
+    source = (root / "port/tvos/probe/platform_probe.m").read_text()
+    assert f'@interface {config["UISceneDelegateClassName"]} :' in source
+    assert 'initWithWindowScene:' in source

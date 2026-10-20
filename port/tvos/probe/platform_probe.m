@@ -14,6 +14,12 @@
 #include <unistd.h>
 #include "swarm_test.h"
 
+static void stage(const char *name)
+{
+    fprintf(stderr, "TV probe: %s\n", name);
+    fflush(stderr);
+}
+
 static _Atomic uint32_t wait_word;
 static void *wake_thread(void *unused)
 {
@@ -28,6 +34,7 @@ static NSString *probe(BOOL *passed)
 {
     *passed = YES;
     NSMutableString *report = [NSMutableString stringWithString:@"OpenCE Apple TV feasibility probe\n\n"];
+    stage("Metal");
     id<MTLDevice> device = MTLCreateSystemDefaultDevice();
     [report appendFormat:@"Metal: %@\n", device ? device.name : @"FAILED"];
     if (device) {
@@ -48,6 +55,7 @@ static NSString *probe(BOOL *passed)
     }
     // Same reservation size as wasm2c uses on the Mac. Do not interpret
     // this as a physical-memory stress test or install a signal handler.
+    stage("virtual address reservation");
     size_t reserved = (size_t)8 * 1024 * 1024 * 1024;
     void *memory = mmap(NULL, reserved, PROT_NONE, MAP_PRIVATE | MAP_ANON, -1, 0);
     if (memory == MAP_FAILED) {
@@ -59,6 +67,7 @@ static NSString *probe(BOOL *passed)
         [report appendFormat:@"8 GiB reservation / Xbox offset page: %@\n", result ? @"FAILED" : @"passed"];
         munmap(memory, reserved);
     }
+    stage("atomic wait/wake");
     pthread_t thread;
     atomic_store(&wait_word, 0);
     if (pthread_create(&thread, NULL, wake_thread, NULL) == 0) {
@@ -72,6 +81,7 @@ static NSString *probe(BOOL *passed)
     } else {
         [report appendString:@"Atomic wait/wake: FAILED to start thread\n"];
     }
+    stage("loopback TCP");
     NSString *temporary = [NSTemporaryDirectory() stringByAppendingPathComponent:NSUUID.UUID.UUIDString];
     char result[1024] = {0};
     int tcp = opence_probe_tcp(temporary.fileSystemRepresentation, result, sizeof(result));
@@ -83,13 +93,26 @@ static NSString *probe(BOOL *passed)
 }
 
 @interface TVProbeDelegate : UIResponder <UIApplicationDelegate>
-@property(nonatomic, strong) UIWindow *window;
 @end
 @implementation TVProbeDelegate
 - (BOOL)application:(UIApplication *)application didFinishLaunchingWithOptions:(NSDictionary *)options
 {
     (void)application; (void)options;
-    self.window = [[UIWindow alloc] initWithFrame:UIScreen.mainScreen.bounds];
+    stage("UIKit launch delegate");
+    return YES;
+}
+@end
+
+@interface TVProbeSceneDelegate : UIResponder <UIWindowSceneDelegate>
+@property(nonatomic, strong) UIWindow *window;
+@end
+@implementation TVProbeSceneDelegate
+- (void)scene:(UIScene *)scene willConnectToSession:(UISceneSession *)session options:(UISceneConnectionOptions *)options
+{
+    (void)session; (void)options;
+    stage("UIKit scene connected");
+    if (![scene isKindOfClass:UIWindowScene.class]) return;
+    self.window = [[UIWindow alloc] initWithWindowScene:(UIWindowScene *)scene];
     UIViewController *controller = [UIViewController new];
     controller.view.backgroundColor = UIColor.blackColor;
     UILabel *label = [[UILabel alloc] initWithFrame:CGRectInset(self.window.bounds, 80, 60)];
@@ -102,10 +125,13 @@ static NSString *probe(BOOL *passed)
     self.window.rootViewController = controller;
     [self.window makeKeyAndVisible];
     dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+        stage("worker started");
         BOOL passed = NO;
         NSString *report = probe(&passed);
-        NSLog(@"%@", report);
+        fprintf(stderr, "%s\n", report.UTF8String);
+        fflush(stderr);
         dispatch_async(dispatch_get_main_queue(), ^{
+            stage("main-queue completion");
             label.text = report;
             if (getenv("OPENCE_PROBE_AUTOMATED")) {
                 fprintf(stderr, "%s: automatic TV platform probes\n", passed ? "PASS" : "FAIL");
@@ -114,12 +140,12 @@ static NSString *probe(BOOL *passed)
             }
         });
     });
-    return YES;
 }
 @end
 
 int main(int argc, char **argv)
 {
+    stage("process main");
     @autoreleasepool {
         return UIApplicationMain(argc, argv, nil, NSStringFromClass(TVProbeDelegate.class));
     }
