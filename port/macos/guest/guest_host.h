@@ -122,6 +122,7 @@ int host_sdl_glob_directory(const char *path, const char *pattern, unsigned int 
 
 /* the window's CAMetalLayer made, and the device's state with it */
 int host_metal_attach(unsigned int window);
+int host_metal_supports_bc(void);
 void host_metal_set_vsync(int interval);
 /* the frame drawn so far, shown: the picture last given to
 host_metal_present_target, letterboxed in the window */

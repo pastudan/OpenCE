@@ -302,6 +302,7 @@ int host_sdl_show_simple_message_box(unsigned int flags, const char *title, cons
 /* the data folder (the one holding maps): HALO_DATA_ROOT, or else
 ~/Games/Halo, so that the app starts from Finder, where there is no
 environment to name it; the guest enters it (port/macos/guest/guest_main.c) */
+#ifndef HALO_TVOS
 static void data_root_choose(void)
 {
 	static char path[1024];
@@ -327,7 +328,14 @@ static void data_root_choose(void)
 	}
 }
 
+#endif
+
+#ifdef HALO_TVOS
+/* The TV entry supplies cache paths and enters UIKit through SDL_RunApp. */
+int opence_guest_main(int argc, char **argv)
+#else
 int main(int argc, char **argv)
+#endif
 {
 	static w2c_halo instance;
 	struct rlimit limit;
@@ -341,7 +349,9 @@ int main(int argc, char **argv)
 		setrlimit(RLIMIT_NOFILE, &limit);
 	}
 	host_wasi_set_arguments(argc, argv);
+#ifndef HALO_TVOS
 	data_root_choose();
+#endif
 	host_sdl_main_thread_set();
 	wasm_rt_init();
 	wasm_rt_allocate_memory(&env.memory, (uint32_t)GUEST_MEMORY_PAGES, (uint32_t)GUEST_MEMORY_PAGES, false,

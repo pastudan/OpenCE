@@ -423,8 +423,8 @@ static BOOL decode_level(const struct xgpu_texture_description *description, uns
 	return TRUE;
 }
 
-#ifdef HALO_GLES
-/* ---------- DXT decoding, for ES drivers without S3TC (Mali) */
+#if defined(HALO_GLES) || defined(HALO_METAL)
+/* ---------- DXT decoding, for drivers without S3TC/BC (Mali, Apple TV) */
 
 static unsigned long color565(unsigned long value)
 {
@@ -710,8 +710,9 @@ static void upload(GLuint texture, GLenum target, const struct xgpu_texture_desc
 	unsigned long *converted = NULL;
 	unsigned long face, level;
 	unsigned int format = METAL_FORMAT_BGRA8, swizzle = 0, channel;
+	BOOL compressed_upload = description->compressed && host_metal_supports_bc();
 
-	if (description->compressed)
+	if (compressed_upload)
 	{
 		format = information.kind == _texel_dxt1 ? METAL_FORMAT_BC1 : information.kind == _texel_dxt3 ?
 			METAL_FORMAT_BC2 : METAL_FORMAT_BC3;
@@ -741,7 +742,7 @@ static void upload(GLuint texture, GLenum target, const struct xgpu_texture_desc
 			unsigned long height = level_dimension(description->height, level);
 			unsigned long depth = level_dimension(description->depth, level);
 
-			if (description->compressed)
+			if (compressed_upload)
 			{
 				unsigned long row = ((width + 3) / 4) * information.bytes;
 
@@ -751,7 +752,9 @@ static void upload(GLuint texture, GLenum target, const struct xgpu_texture_desc
 			}
 			else
 			{
-				if (!decode_level(description, level, source, palette, converted))
+				if (description->compressed)
+					dxt_decode_level(information.kind, source, width, height, depth, converted);
+				else if (!decode_level(description, level, source, palette, converted))
 				{
 					platform_log("textures: no memory to convert a %lux%lux%lu texture; it is not drawn",
 						description->width, description->height, description->depth);

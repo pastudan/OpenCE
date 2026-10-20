@@ -21,7 +21,11 @@ nothing of it.
 #include <errno.h>
 #include <fcntl.h>
 #include <string.h>
+#ifdef HALO_TVOS
+#include <stdlib.h>
+#else
 #include <sys/random.h>
+#endif
 #include <sys/socket.h>
 #include <sys/stat.h>
 #include <sys/types.h>
@@ -208,7 +212,12 @@ static inline ssize_t getrandom(void *buffer, size_t size, unsigned int flags)
 	(void)flags;
 	if (size > 256)
 		size = 256;
+#ifdef HALO_TVOS
+	arc4random_buf(buffer, size);
+	return (ssize_t)size;
+#else
 	return getentropy(buffer, size) == 0 ? (ssize_t)size : -1;
+#endif
 }
 
 #endif

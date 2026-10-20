@@ -28,7 +28,9 @@ the offsets wasi/wasip1.h gives.
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#ifndef HALO_TVOS
 #include <sys/random.h>
+#endif /* tvOS uses arc4random_buf from stdlib.h */
 #include <sys/stat.h>
 #include <sys/time.h>
 #include <sys/uio.h>
@@ -827,8 +829,12 @@ u32 w2c_wasi__snapshot__preview1_random_get(struct w2c_wasi__snapshot__preview1 
 	{
 		uint32_t take = size > 256 ? 256 : size;
 
+#ifdef HALO_TVOS
+		arc4random_buf(host_memory_base + buffer, take);
+#else
 		if (getentropy(host_memory_base + buffer, take) != 0)
 			return fail();
+#endif
 		buffer += take;
 		size -= take;
 	}

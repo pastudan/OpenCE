@@ -637,7 +637,9 @@ int host_metal_attach(unsigned int window)
 		metal.layer.pixelFormat = MTLPixelFormatBGRA8Unorm;
 		metal.layer.framebufferOnly = YES;
 		metal.layer.maximumDrawableCount = 3;
+#ifndef HALO_TVOS
 		metal.layer.displaySyncEnabled = metal.vsync ? YES : NO;
+#endif
 		metal.window = object;
 		return 1;
 	}
@@ -646,11 +648,18 @@ int host_metal_attach(unsigned int window)
 void host_metal_set_vsync(int interval)
 {
 	metal.vsync = interval != 0;
+#ifndef HALO_TVOS
 	if (metal.layer)
 		metal.layer.displaySyncEnabled = metal.vsync ? YES : NO;
+#endif
 }
 
 /* ---------- textures */
+
+int host_metal_supports_bc(void)
+{
+	return metal.device && metal.device.supportsBCTextureCompression ? 1 : 0;
+}
 
 unsigned int host_metal_texture_new(void)
 {

@@ -1,8 +1,10 @@
 # Apple TV development port — feasibility stage
 
-**There is not a playable tvOS build yet.** This branch first checks that
-our native runtime/Metal assumptions and the hybrid torrent dependencies
-can be built for Apple TV. Do not mistake the probe app for OpenCE.
+**Development port, not ready for sideload play yet.** The initial game
+host builds for device and simulator; the menu and a10 have run through
+Metal in the tvOS simulator. Import/source-selection UI, completed lifecycle
+and sandbox integration, provisioning and physical TV checks are unfinished.
+The separate feasibility probe app is not the game.
 
 ## Prerequisites
 
@@ -22,6 +24,35 @@ can be built for Apple TV. Do not mistake the probe app for OpenCE.
   Mode enabled where required, and a development signing team/profile.
   A Mac Developer ID signature and notarized DMG do **not** sign a tvOS app.
 - CMake, ninja, Python 3, Perl, make, git and Apple's clang.
+
+## Initial game-host build
+
+From the repository root, with the Mac guest toolchains already installed:
+
+```sh
+export DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer
+python3 tools/tvos_build.py --platform simulator
+python3 tools/tvos_build.py --platform device
+```
+
+Outputs: `build/tvos/{simulator,device}/OpenCETV.app`. The device bundle is
+unsigned and still needs Apple development provisioning. This reuses the
+Mac generator's guest/wasm2c outputs but builds every native object and SDL
+for the selected TV SDK, with explicit guest-memory bounds checks. It does
+not link Mac host binaries. Metal decodes DXT textures to BGRA when BC
+compression is unavailable.
+
+A simulator-only smoke test can use the owner's existing extracted maps:
+
+```sh
+python3 tools/tvos_game_check.py build/tvos/simulator/OpenCETV.app \
+  --data-root /path/holding/maps --map a10
+```
+
+This creates/removes only its own simulator, requires frame output and a
+timed clean exit, and does not prove visual correctness or real controller
+play. It temporarily uses a loopback debug console for the map request.
+No maps are put into the app, repository or CI artifacts.
 
 ## Feasibility probes
 
@@ -129,8 +160,9 @@ source.
 
 - Native WebRTC-only interoperability with the existing WebTorrent seeder,
   ordinary peer tests on tvOS, and both transports sharing one store.
-- The game's AppleTVOS target, UIKit/SDL lifecycle, sandboxed paths and
-  memory budgets, including a capability-gated BC texture fallback.
+- Finish the game's UIKit/SDL lifecycle, restricted WASI preopens and
+  physical-device memory budgets. Initial targets and BC decoding exist,
+  but are not a completed TV product.
 - Shared integration of the bounded image-source API (`import/image_source.c`
   has synthetic bounds/name/cycle/header tests, but is not wired into the
   existing importer yet), HTTP range and verified-piece adapters, import UI,
