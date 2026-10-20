@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+<key>CFBundleExecutable</key><string>OpenCETVProbe</string>
+<key>CFBundleIdentifier</key><string>com.pastudan.opence.tvprobe</string>
+<key>CFBundleName</key><string>OpenCE TV Probe</string>
+<key>CFBundlePackageType</key><string>APPL</string>
+<key>CFBundleVersion</key><string>1</string>
+<key>CFBundleShortVersionString</key><string>0.1</string>
+<key>MinimumOSVersion</key><string>17.4</string>
+<key>UIDeviceFamily</key><array><integer>3</integer></array>
+<key>UILaunchScreen</key><dict/>
+</dict></plist>

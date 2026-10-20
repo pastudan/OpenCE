@@ -1,0 +1,54 @@
+name: tvOS feasibility
+
+# This builds probes, NOT a playable TV port. No game assets, credentials,
+# signing identity, public trackers or default torrents. Keep independent
+# of the Mac and upstream Build workflows.
+on:
+  push:
+    paths:
+      - "port/tvos/**"
+      - "tools/tvos_probe.py"
+      - "tools/test_tvos_probe.py"
+      - ".github/workflows/tvos.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+concurrency:
+  group: tvos-probe-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  probes:
+    runs-on: macos-15
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Select Xcode and check SDKs
+        run: |
+          xcodebuild -version
+          xcrun --sdk appletvos --show-sdk-path
+          xcrun --sdk appletvsimulator --show-sdk-path
+          brew install ninja cmake
+      - uses: actions/cache@v4
+        with:
+          path: build/tvos-probe/deps
+          key: tvos-probe-deps-${{ hashFiles('tools/tvos_probe.py') }}
+      - name: Build and test ordinary peers on the Mac
+        run: python3 tools/tvos_probe.py --platform macos --jobs 3
+      - name: Cross-compile device probe
+        run: python3 tools/tvos_probe.py --platform tvos --jobs 3
+      - name: Cross-compile simulator probe
+        run: python3 tools/tvos_probe.py --platform simulator --jobs 3
+      - name: Package unsigned probes
+        run: |
+          mkdir -p dist/tvos-probe
+          ditto -c -k --keepParent build/tvos-probe/tvos/build/OpenCETVProbe.app dist/tvos-probe/device-unsigned.zip
+          ditto -c -k --keepParent build/tvos-probe/simulator/build/OpenCETVProbe.app dist/tvos-probe/simulator.zip
+      - uses: actions/upload-artifact@v4
+        with:
+          name: tvos-feasibility-probes-not-the-game
+          path: dist/tvos-probe
+          retention-days: 3
