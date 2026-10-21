@@ -34,6 +34,10 @@ struct frame_record
 	uint32_t draws, passes, copies, compiles, fog_draws, transparent_draws;
 	_Atomic uint64_t gpu_ns, gpu_start_ns, gpu_end_ns, presented_ns;
 	_Atomic uint32_t gpu_buffers, gpu_failed;
+	/* command buffers hoisted ahead of the frame's (host_metal.m): their
+	span, which includes waiting behind the frame before, apart */
+	_Atomic uint64_t hoisted_ns;
+	_Atomic uint32_t hoisted_buffers;
 };
 
 #define EVENTS 64
@@ -116,7 +120,7 @@ static void write_csv(void)
 	}
 	fprintf(file, "serial,t_ms,wall_ms,host_ms,compile_ms,wait_inflight_ms,wait_drawable_ms,wait_readback_ms,"
 		"sleep_ms,guest_ms,gpu_ms,gpu_buffers,gpu_failed,gpu_start_ms,gpu_end_ms,presented_ms,draws,passes,copies,"
-		"compiles,fog_draws,transparent_draws\n");
+		"compiles,fog_draws,transparent_draws,hoisted_ms,hoisted_buffers\n");
 	/* (the records are in the order they were presented: serials are the
 	frames', from 1) */
 	for (serial = first; serial <= current_serial; serial++)
@@ -135,7 +139,7 @@ static void write_csv(void)
 		gpu_start = atomic_load(&record->gpu_start_ns);
 		gpu_end = atomic_load(&record->gpu_end_ns);
 		presented = atomic_load(&record->presented_ns);
-		fprintf(file, "%llu,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%u,%u,%.3f,%.3f,%.3f,%u,%u,%u,%u,%u,%u\n",
+		fprintf(file, "%llu,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%u,%u,%.3f,%.3f,%.3f,%u,%u,%u,%u,%u,%u,%.3f,%u\n",
 			(unsigned long long)serial, ms(record->present_ns - start_ns), ms(record->wall_ns),
 			host_frame_log_level >= 2 && host > 0 ? host / 1000000.0 : 0.0,
 			ms(record->compile_ns), ms(record->wait_inflight_ns), ms(record->wait_drawable_ns),
@@ -145,7 +149,8 @@ static void write_csv(void)
 			atomic_load(&record->gpu_failed),
 			gpu_start > start_ns ? ms(gpu_start - start_ns) : 0.0, gpu_end > start_ns ? ms(gpu_end - start_ns) : 0.0,
 			presented > start_ns ? ms(presented - start_ns) : 0.0, record->draws, record->passes, record->copies,
-			record->compiles, record->fog_draws, record->transparent_draws);
+			record->compiles, record->fog_draws, record->transparent_draws, ms(atomic_load(&record->hoisted_ns)),
+			atomic_load(&record->hoisted_buffers));
 	}
 	fclose(file);
 	host_log("frame log: %s", path);
@@ -422,6 +427,8 @@ void host_frame_log_present(uint64_t serial)
 	atomic_store(&record->presented_ns, 0);
 	atomic_store(&record->gpu_buffers, host_frame_acc.gpu_early_buffers);
 	atomic_store(&record->gpu_failed, 0);
+	atomic_store(&record->hoisted_ns, 0);
+	atomic_store(&record->hoisted_buffers, 0);
 	record->present_ns = now;
 	record->wall_ns = now - last_present_ns;
 	record->host_ns = host_frame_acc.host_ns;
@@ -479,6 +486,23 @@ void host_frame_log_gpu(uint64_t serial, double start_seconds, double end_second
 			atomic_store(&record->gpu_end_ns, end);
 	}
 	atomic_fetch_add(&record->gpu_buffers, 1);
+}
+
+void host_frame_log_gpu_hoisted(uint64_t serial, double start_seconds, double end_seconds)
+{
+	struct frame_record *record;
+	uint64_t start, end;
+
+	if (!host_frame_log_level || !records)
+		return;
+	record = &records[serial % capacity];
+	if (atomic_load(&record->serial) != serial)
+		return;
+	start = ns_of_seconds(start_seconds);
+	end = ns_of_seconds(end_seconds);
+	if (end > start && start)
+		atomic_fetch_add(&record->hoisted_ns, end - start);
+	atomic_fetch_add(&record->hoisted_buffers, 1);
 }
 
 void host_frame_log_presented(uint64_t serial, double presented_seconds)

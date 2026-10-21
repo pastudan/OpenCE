@@ -120,7 +120,8 @@ def parse_frame_log(text):
     rows = []
     for row in csv.DictReader(io.StringIO("\n".join(lines))):
         rows.append({key: (int(value) if key in ("serial", "gpu_buffers", "gpu_failed", "draws", "passes", "copies",
-                                                    "compiles", "fog_draws", "transparent_draws")
+                                                    "compiles", "fog_draws", "transparent_draws",
+                                                    "hoisted_buffers")
                            else float(value)) for key, value in row.items()})
     # (when each frame reached the display: the interval between two that did)
     previous = None

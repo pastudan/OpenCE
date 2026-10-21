@@ -68,6 +68,9 @@ int host_frame_log_main_thread(void);
 void host_frame_log_present(uint64_t serial);
 /* a command buffer of frame serial finished on the GPU (any thread) */
 void host_frame_log_gpu(uint64_t serial, double start_seconds, double end_seconds, int failed);
+/* a command buffer hoisted ahead of frame serial's finished (its span
+includes waiting behind the frame before: not added to the GPU time) */
+void host_frame_log_gpu_hoisted(uint64_t serial, double start_seconds, double end_seconds);
 /* frame serial reached the display (0: it never did) */
 void host_frame_log_presented(uint64_t serial, double presented_seconds);
 /* something to find the frames by ("map-open", "a10.map") */

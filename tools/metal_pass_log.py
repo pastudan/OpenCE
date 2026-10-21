@@ -35,7 +35,7 @@ PHASES = ["clear", "model_sky", "models", "env_lightmaps", "env_shadows", "env_d
           "lens_flares", "screen_effect", "hud", "screen_flash"]
 LOAD = {0: "dontcare", 1: "load", 2: "clear"}
 STORE = {0: "dontcare", 1: "store", 2: "resolve", 3: "store+resolve", 4: "unknown", 5: "custom"}
-REASON = {0: "other", 1: "targets", 2: "blit", 3: "present", 4: "phase", 5: "flush"}
+REASON = {0: "other", 1: "targets", 2: "blit", 3: "present", 4: "phase", 5: "flush", 6: "unpark"}
 # bytes a pixel of an attachment's format in memory (BGRA8; Depth32Float_Stencil8: 4 + 1)
 COLOR_BYTES = {80: 4, 70: 4, 81: 4}
 DEPTH_BYTES, STENCIL_BYTES = 4, 1
