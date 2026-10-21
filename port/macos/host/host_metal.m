@@ -39,6 +39,7 @@ indices keeps its latest count (host_metal_visibility_result).
 #include <string.h>
 
 #include "host.h"
+#include "host_frame_log.h"
 #include "metal_protocol.h"
 
 SDL_Window *host_sdl_window(unsigned int window);
@@ -266,7 +267,17 @@ static void frame_begin(void)
 		return;
 	/* (the frame FRAMES_IN_FLIGHT before this one, which had these buffers,
 	finished first) */
-	dispatch_semaphore_wait(frames_free, DISPATCH_TIME_FOREVER);
+	if (host_frame_log_detail())
+	{
+		uint64_t waited = host_frame_log_now();
+
+		dispatch_semaphore_wait(frames_free, DISPATCH_TIME_FOREVER);
+		host_frame_acc.wait_inflight_ns += host_frame_log_now() - waited;
+	}
+	else
+	{
+		dispatch_semaphore_wait(frames_free, DISPATCH_TIME_FOREVER);
+	}
 	frame = frame_current();
 	if (!frame->ring)
 	{
@@ -468,6 +479,7 @@ static BOOL encoder_begin(void)
 	pass.depth_format = depth ? depth.pixelFormat : MTLPixelFormatInvalid;
 	encoder = [commands renderCommandEncoderWithDescriptor:descriptor];
 	encoder_serial++;
+	host_frame_acc.passes++;
 	/* (the next pass of these targets keeps what this one drew) */
 	pass.color_load = pass.depth_load = pass.stencil_load = MTLLoadActionLoad;
 	bound_forget();
@@ -489,6 +501,7 @@ static void pass_flush(void)
 
 void host_metal_set_targets(unsigned int color, unsigned int depth)
 {
+	HOST_FRAME_LOG_SCOPE;
 	if (color == pass.color && depth == pass.depth)
 		return;
 	@autoreleasepool
@@ -631,6 +644,7 @@ int host_metal_attach(unsigned int window)
 		if (!metal.device)
 		{
 			profile_enabled = getenv("HALO_METAL_PROFILE") && atoi(getenv("HALO_METAL_PROFILE")) != 0;
+			host_frame_log_start();
 			metal.device = MTLCreateSystemDefaultDevice();
 			if (!metal.device)
 			{
@@ -673,7 +687,7 @@ void host_metal_set_vsync(int interval)
 
 void host_metal_profile_phase(int profile, int begin)
 {
-	if (!profile_enabled)
+	if (!profile_enabled && !host_frame_log_level)
 		return;
 	if (begin)
 		profile_phase = profile >= 0 && profile < 29 ? profile : -1;
@@ -715,6 +729,7 @@ keeps it until it is done, and the new one can be written at once) */
 void host_metal_texture_define(unsigned int handle, int type, unsigned int format, unsigned int width,
 	unsigned int height, unsigned int depth, unsigned int levels, int usage, unsigned int swizzle)
 {
+	HOST_FRAME_LOG_SCOPE;
 	if (!metal.device || !handle || handle >= HANDLE_COUNT || handles[handle].type != _handle_texture || !width ||
 		!height)
 	{
@@ -778,6 +793,7 @@ void host_metal_texture_upload(unsigned int handle, unsigned int face, unsigned 
 	unsigned int y, unsigned int z, unsigned int width, unsigned int height, unsigned int depth, const void *data,
 	unsigned int bytes_per_row, unsigned int bytes_per_image)
 {
+	HOST_FRAME_LOG_SCOPE;
 	id<MTLTexture> texture = texture_object(handle);
 	BOOL volume;
 
@@ -896,6 +912,7 @@ void host_metal_texture_generate_mipmaps(unsigned int handle, unsigned int first
 
 unsigned int host_metal_shader(const char *source, int fragment)
 {
+	HOST_FRAME_LOG_SCOPE;
 	static MTLCompileOptions *options;
 
 	if (!metal.device || !source)
@@ -946,10 +963,29 @@ unsigned int host_metal_shader(const char *source, int fragment)
 				text = [[text substringToIndex:end.location] stringByAppendingString:probe];
 			}
 		}
+		/* HALO_METAL_SHADER_SALT (diagnostic, for measuring cold compiles):
+		a comment of its text at the end of every shader, so that none is
+		found in the system's compiled-shader cache of an earlier launch.
+		The code compiled is the same */
+		{
+			static const char *salt = (const char *)1;
+
+			if (salt == (const char *)1)
+				salt = getenv("HALO_METAL_SHADER_SALT") && *getenv("HALO_METAL_SHADER_SALT") ?
+					getenv("HALO_METAL_SHADER_SALT") : NULL;
+			if (salt)
+				text = [text stringByAppendingFormat:@"\n// salt %s\n", salt];
+		}
 		uint64_t compile_started = profile_enabled ? SDL_GetTicksNS() : 0;
+		uint64_t frame_log_started = host_frame_log_detail() ? host_frame_log_now() : 0;
 		library = [metal.device newLibraryWithSource:text options:options error:&error];
 		if (profile_enabled)
 			profile_shader_ns += SDL_GetTicksNS() - compile_started;
+		if (frame_log_started)
+		{
+			host_frame_acc.compile_ns += host_frame_log_now() - frame_log_started;
+			host_frame_acc.compiles++;
+		}
 		if (!library)
 		{
 			host_log("Metal: a %s shader does not build:\n%s\n%s", fragment ? "pixel" : "vertex",
@@ -1052,10 +1088,16 @@ static id<MTLRenderPipelineState> pipeline_get(const struct metal_draw *draw)
 	descriptor.depthAttachmentPixelFormat = pass.depth_format;
 	descriptor.stencilAttachmentPixelFormat = pass.depth_format;
 	uint64_t compile_started = profile_enabled ? SDL_GetTicksNS() : 0;
+	uint64_t frame_log_started = host_frame_log_detail() ? host_frame_log_now() : 0;
 	state = descriptor.vertexFunction && descriptor.fragmentFunction && descriptor.vertexDescriptor ?
 		[metal.device newRenderPipelineStateWithDescriptor:descriptor error:&error] : nil;
 	if (profile_enabled)
 		profile_pipeline_ns += SDL_GetTicksNS() - compile_started;
+	if (frame_log_started)
+	{
+		host_frame_acc.compile_ns += host_frame_log_now() - frame_log_started;
+		host_frame_acc.compiles++;
+	}
 	if (!state)
 	{
 		host_log("Metal: no pipeline for shaders %u/%u: %s", draw->vertex_shader, draw->fragment_shader,
@@ -1149,7 +1191,13 @@ static id<MTLRenderPipelineState> clear_pipeline_get(uint32_t color_mask)
 	descriptor.colorAttachments[0].writeMask = color_mask;
 	descriptor.depthAttachmentPixelFormat = pass.depth_format;
 	descriptor.stencilAttachmentPixelFormat = pass.depth_format;
+	uint64_t frame_log_started = host_frame_log_detail() ? host_frame_log_now() : 0;
 	state = [metal.device newRenderPipelineStateWithDescriptor:descriptor error:&error];
+	if (frame_log_started)
+	{
+		host_frame_acc.compile_ns += host_frame_log_now() - frame_log_started;
+		host_frame_acc.compiles++;
+	}
 	if (!state)
 		host_log("Metal: no clear pipeline: %s", error.localizedDescription.UTF8String);
 	cache_add(&clear_pipelines, &key, sizeof(key), hash, state);
@@ -1173,6 +1221,7 @@ static BOOL scissor_inside(const metal_u32 rectangle[4], MTLScissorRect *scissor
 
 void host_metal_clear(const struct metal_clear *clear)
 {
+	HOST_FRAME_LOG_SCOPE;
 	id<MTLTexture> color = texture_object(pass.color), depth = texture_object(pass.depth);
 	uint32_t width, height, color_mask;
 	BOOL whole;
@@ -1279,6 +1328,7 @@ static id<MTLTexture> feedback_copy(id<MTLTexture> target)
 		descriptor.storageMode = MTLStorageModePrivate;
 		metal.feedback = [metal.device newTextureWithDescriptor:descriptor];
 	}
+	host_frame_acc.copies++;
 	if (profile_enabled)
 	{
 		profile_feedback_copies++;
@@ -1302,9 +1352,15 @@ static id<MTLTexture> dummy_texture(uint32_t type)
 
 void host_metal_draw(const struct metal_draw *original)
 {
+	HOST_FRAME_LOG_SCOPE;
 	struct metal_draw adjusted;
 	const struct metal_draw *draw = original;
 
+	host_frame_acc.draws++;
+	/* (_rasterizer_profile_environment_fog, _queued_transparents:
+	tools/test_metal_profile.py checks the numbers) */
+	host_frame_acc.fog_draws += profile_phase == 17;
+	host_frame_acc.transparent_draws += profile_phase == 22;
 	if (!metal.device || !draw->vertex_shader || !draw->fragment_shader || !draw->vertex_layout)
 		return;
 	/* HALO_METAL_ONLY: only the draws of these pixel shaders (handles,
@@ -1637,6 +1693,7 @@ each) into data, once the GPU has drawn everything before: the frame so
 far is committed and waited for. 1 if it read them. */
 int host_metal_texture_read(unsigned int handle, unsigned int width, unsigned int height, void *data)
 {
+	HOST_FRAME_LOG_SCOPE;
 	id<MTLTexture> texture = texture_object(handle);
 
 	if (!texture || !data || texture.pixelFormat != MTLPixelFormatBGRA8Unorm || width > texture.width ||
@@ -1659,7 +1716,22 @@ int host_metal_texture_read(unsigned int handle, unsigned int width, unsigned in
 		frame: its ring and counters stay) */
 		[submitted commit];
 		commands = [metal.queue commandBuffer];
-		[submitted waitUntilCompleted];
+		if (host_frame_log_detail())
+		{
+			uint64_t waited = host_frame_log_now();
+
+			[submitted waitUntilCompleted];
+			host_frame_acc.wait_readback_ns += host_frame_log_now() - waited;
+			/* (this part of the frame's GPU time: its completion is not the
+			present's command buffer) */
+			if (submitted.GPUEndTime > submitted.GPUStartTime)
+				host_frame_acc.gpu_early_ns += (uint64_t)((submitted.GPUEndTime - submitted.GPUStartTime) * 1e9);
+			host_frame_acc.gpu_early_buffers++;
+		}
+		else
+		{
+			[submitted waitUntilCompleted];
+		}
 		memcpy(data, buffer.contents, bytes);
 		return 1;
 	}
@@ -1676,6 +1748,7 @@ void host_metal_present_target(unsigned int texture, unsigned int width, unsigne
 
 void host_metal_present(void)
 {
+	HOST_FRAME_LOG_SCOPE;
 	if (!metal.device)
 		return;
 	@autoreleasepool
@@ -1699,7 +1772,24 @@ void host_metal_present(void)
 			{
 				metal.layer.drawableSize = CGSizeMake(width, height);
 			}
-			drawable = [metal.layer nextDrawable];
+			if (host_frame_log_detail())
+			{
+				uint64_t waited = host_frame_log_now();
+
+				drawable = [metal.layer nextDrawable];
+				host_frame_acc.wait_drawable_ns += host_frame_log_now() - waited;
+			}
+			else
+			{
+				drawable = [metal.layer nextDrawable];
+			}
+			if (drawable && host_frame_log_level)
+			{
+				[drawable addPresentedHandler:^(id<MTLDrawable> shown)
+				{
+					host_frame_log_presented(serial, shown.presentedTime);
+				}];
+			}
 			if (drawable)
 			{
 				MTLRenderPassDescriptor *descriptor = [MTLRenderPassDescriptor renderPassDescriptor];
@@ -1781,6 +1871,11 @@ void host_metal_present(void)
 				host_log("Metal: frame %llu failed on the GPU: %s", (unsigned long long)serial,
 					buffer.error.localizedDescription.UTF8String);
 			}
+			if (host_frame_log_level)
+			{
+				host_frame_log_gpu(serial, buffer.GPUStartTime, buffer.GPUEndTime,
+					buffer.status == MTLCommandBufferStatusError);
+			}
 			if (sample_profile && buffer.status == MTLCommandBufferStatusCompleted)
 			{
 				uint64_t now = SDL_GetTicksNS();
@@ -1812,5 +1907,13 @@ void host_metal_present(void)
 		[commands commit];
 		commands = nil;
 		frame_serial++;
+		/* (the record's own: the present's host time, up to here, is the
+		frame's; the rest goes to the next) */
+		if (host_frame_log_level)
+		{
+			host_frame_log_scope_end(&host_frame_log_scope);
+			host_frame_log_scope = 0;
+			host_frame_log_present(serial);
+		}
 	}
 }

@@ -30,6 +30,7 @@ else here needs it.
 */
 
 #include "host.h"
+#include "host_frame_log.h"
 #include "halo_w2c.h"
 
 #include <errno.h>
@@ -121,28 +122,38 @@ static uint64_t mach_from_ns(int64_t nanoseconds)
 u32 wasm_rt_atomic_wait32(void *address, u32 expected, s64 timeout)
 {
 	int result;
+	uint64_t waited;
 
 	if (__atomic_load_n((u32 *)address, __ATOMIC_SEQ_CST) != expected)
 		return 1;
+	/* (the main thread's waits, the game's frame pacing among them, are
+	not its work: HALO_FRAME_LOG) */
+	waited = host_frame_log_detail() ? host_frame_log_now() : 0;
 	if (timeout < 0)
 		result = os_sync_wait_on_address(address, expected, 4, OS_SYNC_WAIT_ON_ADDRESS_NONE);
 	else
 		result = os_sync_wait_on_address_with_timeout(address, expected, 4, OS_SYNC_WAIT_ON_ADDRESS_NONE,
 			OS_CLOCK_MACH_ABSOLUTE_TIME, mach_from_ns(timeout));
+	if (waited)
+		host_frame_acc.sleep_ns += host_frame_log_now() - waited;
 	return result < 0 && errno == ETIMEDOUT ? 2 : 0;
 }
 
 u32 wasm_rt_atomic_wait64(void *address, u64 expected, s64 timeout)
 {
 	int result;
+	uint64_t waited;
 
 	if (__atomic_load_n((u64 *)address, __ATOMIC_SEQ_CST) != expected)
 		return 1;
+	waited = host_frame_log_detail() ? host_frame_log_now() : 0;
 	if (timeout < 0)
 		result = os_sync_wait_on_address(address, expected, 8, OS_SYNC_WAIT_ON_ADDRESS_NONE);
 	else
 		result = os_sync_wait_on_address_with_timeout(address, expected, 8, OS_SYNC_WAIT_ON_ADDRESS_NONE,
 			OS_CLOCK_MACH_ABSOLUTE_TIME, mach_from_ns(timeout));
+	if (waited)
+		host_frame_acc.sleep_ns += host_frame_log_now() - waited;
 	return result < 0 && errno == ETIMEDOUT ? 2 : 0;
 }
 

@@ -16,6 +16,7 @@ the offsets wasi/wasip1.h gives.
 */
 
 #include "host.h"
+#include "host_frame_log.h"
 #include "halo_w2c.h"
 
 #include <dirent.h>
@@ -628,6 +629,18 @@ u32 w2c_wasi__snapshot__preview1_path_open(struct w2c_wasi__snapshot__preview1 *
 		descriptor = open(host, (flags & ~(O_WRONLY | O_RDWR | O_CREAT | O_TRUNC)) | O_RDONLY, 0666);
 	if (descriptor < 0)
 		return fail();
+	/* (a map or a saved core opened: where a benchmark's scene begins,
+	HALO_FRAME_LOG) */
+	if (host_frame_log_level)
+	{
+		size_t used = strlen(host);
+		const char *name = strrchr(host, '/');
+
+		if (used > 4 && !strcmp(host + used - 4, ".map"))
+			host_frame_log_event("map-open", name ? name + 1 : host);
+		else if (strstr(host, "/core/") && !(flags & (O_WRONLY | O_RDWR)))
+			host_frame_log_event("core-open", name ? name + 1 : host);
+	}
 	put32(out, (uint32_t)descriptor);
 	return 0;
 }
@@ -795,10 +808,15 @@ u32 w2c_wasi__snapshot__preview1_poll_oneoff(struct w2c_wasi__snapshot__preview1
 		struct timespec duration;
 		uint64_t left = wake - now;
 
+		uint64_t slept = host_frame_log_detail() ? host_frame_log_now() : 0;
+
 		duration.tv_sec = (time_t)(left / 1000000000ull);
 		duration.tv_nsec = (long)(left % 1000000000ull);
 		while (nanosleep(&duration, &duration) != 0 && errno == EINTR)
 			;
+		/* (the main thread's sleeps, frame pacing among them: HALO_FRAME_LOG) */
+		if (slept)
+			host_frame_acc.sleep_ns += host_frame_log_now() - slept;
 	}
 	/* every subscription's event: the clocks have passed, and descriptors
 	are taken as ready */
