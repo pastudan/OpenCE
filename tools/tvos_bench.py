@@ -502,6 +502,13 @@ def run_device(runs, out, extra_env, device, core=None, traces=(), trace_results
                 deploy.run(deploy.copy_args("from", device, f"{container}/frame_log.csv", csv_path), timeout=300)
             except subprocess.SubprocessError as error:
                 print(f"no frame log copied: {error}", flush=True)
+            # (HALO_PASS_LOG: the pass log beside it, host_frame_log.c's name for it)
+            if run_environment(run, extra=extra_env).get("HALO_PASS_LOG", "0") not in ("", "0"):
+                try:
+                    deploy.run(deploy.copy_args("from", device, f"{container}/frame_log-passes.csv",
+                                                out / f"{name}-passes.csv"), timeout=600)
+                except subprocess.SubprocessError as error:
+                    print(f"no pass log copied: {error}", flush=True)
             results.append(finish_run(run, "device", log_path, csv_path, findings))
             print(markdown(results[-1:]).splitlines()[2], flush=True)
             write_results(out, results, {"label": "partial (device)"})
