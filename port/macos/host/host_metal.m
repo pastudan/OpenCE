@@ -594,10 +594,50 @@ static id<MTLTexture> dummy_make(MTLTextureType type)
 	return texture;
 }
 
+/* the options every shader is compiled with. The language version is
+MSL 2.2, not the SDK's default (the newest, 4.x): the shaders need nothing
+past 2.1 (invariant positions), and most of a compile is the newest
+metal_stdlib's headers, not the shader's code. Measured on an M4, the
+translated pixel shaders of a10 and b30 took 8.8 ms each at 2.2 and 47 ms at
+the default, and rendered bit-identically at both
+(port/tvos/PERFORMANCE.md, "Shader compile stalls").
+HALO_METAL_LANGUAGE_VERSION ("2.4", "3.0", ..., or "default") compiles
+them as another version, for comparing */
+static MTLCompileOptions *compile_options(void)
+{
+	static MTLCompileOptions *options;
+
+	if (!options)
+	{
+		const char *version = getenv("HALO_METAL_LANGUAGE_VERSION");
+		unsigned int major = 2, minor = 2;
+		MTLLanguageVersion sdk_default;
+
+		options = [MTLCompileOptions new];
+		sdk_default = options.languageVersion;
+		/* (every pass that draws a surface again lands on the same pixels:
+		GLSL's invariant gl_Position) */
+		options.preserveInvariance = YES;
+		if (version && *version && strcmp(version, "default") && sscanf(version, "%u.%u", &major, &minor) != 2)
+		{
+			host_log("Metal: HALO_METAL_LANGUAGE_VERSION %s is not a version (major.minor): using 2.2", version);
+			major = 2;
+			minor = 2;
+		}
+		if (!version || strcmp(version, "default"))
+			options.languageVersion = (MTLLanguageVersion)((major << 16) + minor);
+		host_log("Metal: shaders compiled as MSL %u.%u (the SDK's default %u.%u)",
+			(unsigned int)(options.languageVersion >> 16), (unsigned int)(options.languageVersion & 0xffff),
+			(unsigned int)(sdk_default >> 16), (unsigned int)(sdk_default & 0xffff));
+	}
+	return options;
+}
+
 static BOOL renderer_initialize(void)
 {
 	NSError *error = nil;
-	id<MTLLibrary> library = [metal.device newLibraryWithSource:renderer_shaders options:nil error:&error];
+	id<MTLLibrary> library = [metal.device newLibraryWithSource:renderer_shaders options:compile_options()
+		error:&error];
 	MTLRenderPipelineDescriptor *descriptor;
 	MTLSamplerDescriptor *sampler;
 	int index;
@@ -913,24 +953,16 @@ void host_metal_texture_generate_mipmaps(unsigned int handle, unsigned int first
 unsigned int host_metal_shader(const char *source, int fragment)
 {
 	HOST_FRAME_LOG_SCOPE;
-	static MTLCompileOptions *options;
-
 	if (!metal.device || !source)
 		return 0;
 	@autoreleasepool
 	{
 		NSError *error = nil;
+		MTLCompileOptions *options = compile_options();
 		id<MTLLibrary> library;
 		id<MTLFunction> function;
 		uint32_t handle;
 
-		if (!options)
-		{
-			options = [MTLCompileOptions new];
-			/* (every pass that draws a surface again lands on the same
-			pixels: GLSL's invariant gl_Position) */
-			options.preserveInvariance = YES;
-		}
 		NSString *text = [NSString stringWithUTF8String:source];
 
 		/* HALO_METAL_PROBE: an expression of the pixel shaders' (a
