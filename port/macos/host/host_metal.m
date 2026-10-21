@@ -72,6 +72,9 @@ struct handle
 	int private_storage;
 	int fresh;
 	uint64_t used_serial;
+	/* the command buffer (park.generation) that last read it and wrote it:
+	whether a pass can be hoisted past what it has encoded (below) */
+	uint32_t commands_read, commands_written;
 };
 
 static struct handle handles[HANDLE_COUNT];
@@ -216,6 +219,8 @@ struct frame
 	NSMutableArray *overflow;
 	id<MTLBuffer> overflow_current;
 	uint32_t overflow_used;
+	/* command buffers of passes hoisted ahead of a large one (park, below) */
+	NSMutableArray *hoisted;
 
 	id<MTLBuffer> visibility;
 	/* each test's index (the game's), whether it has ended, and each
@@ -231,6 +236,8 @@ struct frame
 static struct frame frames[FRAMES_IN_FLIGHT];
 static dispatch_semaphore_t frames_free;
 static id<MTLCommandBuffer> commands;
+/* a number of each command buffer the frame encodes into (handles' commands_read) */
+static uint32_t commands_generation = 1, commands_generations = 1;
 static uint64_t frame_serial = 1;
 static _Atomic uint64_t completed_serial;
 
@@ -292,7 +299,9 @@ static void frame_begin(void)
 	frame->overflow_used = 0;
 	frame->test_count = 0;
 	frame->counter_count = 0;
+	frame->hoisted = nil;
 	commands = [metal.queue commandBuffer];
+	commands_generation = ++commands_generations;
 }
 
 /* room for bytes in the frame's ring (or a buffer of its own past it): the
@@ -343,7 +352,7 @@ static struct
 } pass;
 
 static id<MTLRenderCommandEncoder> encoder;
-static uint64_t encoder_serial;
+static uint64_t encoder_serial, encoder_serials;
 
 /* ---------- the pass log (HALO_PASS_LOG, host_frame_log.h): diagnostic
 
@@ -367,6 +376,7 @@ enum
 	_pass_end_present,
 	_pass_end_phase,
 	_pass_end_flush,
+	_pass_end_unpark,
 };
 
 static struct
@@ -594,6 +604,55 @@ static struct
 	uint32_t counter;
 } bound;
 
+/* ---------- hoisting small passes out of a large one
+
+Halo draws its 3D view into the screen-sized target and, between its
+phases, into small ones: the shadow maps (128x128 and the like), the water's
+bump map and its mipmaps, the HUD's meter textures, mipmap composites. Each
+of those ended the screen's pass, and the next draw into the screen began a
+new one, loading its colour, depth and stencil from memory and storing them
+again at its end: at 3840x2160 about 75 MB each way, three to six times a
+frame, which on a tile-based GPU is the bandwidth that matters.
+
+So the screen's pass is parked instead (its encoder left open, in the
+frame's command buffer), and the small passes and blits between are encoded
+in a command buffer of their own, committed when the screen's targets come
+back: before the frame's, so the GPU runs them first, and the screen's pass
+goes on as one. Moving work earlier is right only when it does not depend
+on what the frame's command buffer has encoded so far, and nothing encoded
+there depends on its not having happened yet:
+- a hoisted pass or blit may read a texture only if the frame's command
+  buffer has not written it (else the pass is unparked: ended, as before);
+- it may write a texture only if the frame's command buffer has neither
+  written it (unparked) nor read it; one that was read (a shadow map drawn
+  again for the next light) is renamed: its handle gets another texture,
+  its pixels copied in first, and the draws already encoded keep the old.
+Readbacks, presents, feedback copies and the parked targets being redefined
+unpark first. HALO_METAL_HOIST=0 turns it off (for comparison). */
+
+#define PARK_LARGE_PIXELS (1u << 20)
+#define PARK_RENAME_PIXELS (1024u * 1024u)
+#define PARK_POOL 32
+
+static struct
+{
+	int enabled;
+	/* HALO_METAL_HOIST=toggle:N (diagnostic): on and off every N frames,
+	for comparing the two in one run */
+	uint32_t toggle;
+	BOOL active;
+	id<MTLRenderCommandEncoder> encoder;
+	id<MTLCommandBuffer> commands;
+	uint32_t generation;
+	uint64_t encoder_serial;
+	struct host_pass_record *record;
+	__typeof__(pass) main_pass;
+	__typeof__(bound) main_bound;
+	/* renamed textures, free again once their frame is done */
+	id<MTLTexture> pool[PARK_POOL];
+	uint64_t pool_serial[PARK_POOL];
+} park;
+
 /* each test's counter in the current pass (frame_current's tests) */
 static uint32_t test_counter[VISIBILITY_TESTS];
 static uint64_t test_counter_encoder[VISIBILITY_TESTS];
@@ -650,6 +709,222 @@ static id<MTLTexture> dummy_color(uint32_t width, uint32_t height)
 	return metal.dummy_color;
 }
 
+/* ---------- parking (hoisting, above) */
+
+static void park_initialize(void)
+{
+	const char *setting = getenv("HALO_METAL_HOIST");
+
+	park.enabled = !(setting && !strcmp(setting, "0")) && pass_log.timing != 2;
+	if (setting && !strncmp(setting, "toggle:", 7) && atoi(setting + 7) > 0)
+	{
+		park.toggle = (uint32_t)atoi(setting + 7);
+		host_log("Metal: HALO_METAL_HOIST=%s (diagnostic): hoisting on in even blocks of %u frames, off in odd",
+			setting, park.toggle);
+	}
+	if (!park.enabled)
+		host_log("Metal: small passes are not hoisted out of the screen's (HALO_METAL_HOIST=0 or pass timing by buffers)");
+}
+
+static BOOL texture_small(uint32_t handle)
+{
+	id<MTLTexture> texture = texture_object(handle);
+
+	return !texture || texture.width * texture.height < PARK_LARGE_PIXELS;
+}
+
+/* the open pass, large, left open; what comes next goes into a command
+buffer of its own */
+static void park_begin(void)
+{
+	park.encoder = encoder;
+	park.main_pass = pass;
+	park.main_bound = bound;
+	park.record = pass_log.record;
+	park.encoder_serial = encoder_serial;
+	park.commands = commands;
+	park.generation = commands_generation;
+	encoder = nil;
+	pass_log.record = NULL;
+	commands = [metal.queue commandBuffer];
+	commands_generation = ++commands_generations;
+	park.active = YES;
+}
+
+/* the hoisted command buffer, committed: ahead of the frame's */
+static void park_commit_hoisted(void)
+{
+	struct frame *frame = frame_current();
+
+	[commands commit];
+	if (!frame->hoisted)
+		frame->hoisted = [NSMutableArray array];
+	[frame->hoisted addObject:commands];
+	commands = park.commands;
+	commands_generation = park.generation;
+	park.commands = nil;
+	park.active = NO;
+}
+
+/* the screen's targets back: its pass goes on */
+static void park_resume(void)
+{
+	pass_log.end_reason = _pass_end_targets;
+	encoder_end();
+	park_commit_hoisted();
+	encoder = park.encoder;
+	park.encoder = nil;
+	pass = park.main_pass;
+	bound = park.main_bound;
+	pass_log.record = park.record;
+	encoder_serial = park.encoder_serial;
+}
+
+/* something that must come after the parked pass: the hoisted work
+committed and the parked pass ended (the current targets, the hoisted
+ones, go on in the frame's command buffer, loaded) */
+static void park_end(void)
+{
+	if (!park.active)
+		return;
+	pass_log.end_reason = _pass_end_unpark;
+	encoder_end();
+	park_commit_hoisted();
+	encoder = park.encoder;
+	park.encoder = nil;
+	pass_log.record = park.record;
+	encoder_serial = park.encoder_serial;
+	pass_log.end_reason = _pass_end_unpark;
+	encoder_end();
+	bound_forget();
+}
+
+/* a target the frame's command buffer has read, given another texture for
+the hoisted pass to draw into (its pixels copied in when the pass keeps
+them); NO if it cannot be */
+static BOOL park_rename(uint32_t handle, BOOL keep)
+{
+	id<MTLTexture> old = texture_object(handle), fresh = nil;
+	uint64_t done = atomic_load(&completed_serial);
+	int index, slot = -1;
+
+	if (!old || old.textureType != MTLTextureType2D || old.mipmapLevelCount != 1 || old.sampleCount != 1 ||
+		old.width * old.height > PARK_RENAME_PIXELS || !(old.usage & MTLTextureUsageRenderTarget))
+	{
+		return NO;
+	}
+	for (index = 0; index < PARK_POOL && !fresh; index++)
+	{
+		id<MTLTexture> pooled = park.pool[index];
+
+		if (pooled && park.pool_serial[index] <= done && pooled.width == old.width && pooled.height == old.height &&
+			pooled.pixelFormat == old.pixelFormat && pooled.usage == old.usage)
+		{
+			fresh = pooled;
+			park.pool[index] = nil;
+		}
+	}
+	if (!fresh)
+	{
+		MTLTextureDescriptor *descriptor = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:old.pixelFormat
+			width:old.width height:old.height mipmapped:NO];
+
+		descriptor.usage = old.usage;
+		descriptor.storageMode = MTLStorageModePrivate;
+		fresh = [metal.device newTextureWithDescriptor:descriptor];
+		if (!fresh)
+			return NO;
+	}
+	if (keep)
+	{
+		id<MTLBlitCommandEncoder> blit = [commands blitCommandEncoder];
+
+		[blit copyFromTexture:old toTexture:fresh];
+		[blit endEncoding];
+	}
+	/* (the old one free again once this frame is done) */
+	for (index = 0; index < PARK_POOL; index++)
+	{
+		if (!park.pool[index] || park.pool_serial[index] <= done)
+		{
+			slot = index;
+			break;
+		}
+	}
+	if (slot >= 0)
+	{
+		park.pool[slot] = old;
+		park.pool_serial[slot] = frame_serial;
+	}
+	handle_set(handle, fresh);
+	handles[handle].commands_read = 0;
+	return YES;
+}
+
+/* a pass about to begin while the screen's is parked: hoisted, unless it
+depends on what the frame's command buffer has drawn (or is large) */
+static void park_check_targets(void)
+{
+	uint32_t targets[2] = { pass.color, pass.depth };
+	int index;
+
+	if (!park.active)
+		return;
+	for (index = 0; index < 2; index++)
+	{
+		if (targets[index] && (handles[targets[index]].commands_written == park.generation ||
+			!texture_small(targets[index])))
+		{
+			park_end();
+			return;
+		}
+	}
+	for (index = 0; index < 2; index++)
+	{
+		BOOL keep = index == 0 ? pass.color_load == MTLLoadActionLoad :
+			pass.depth_load == MTLLoadActionLoad || pass.stencil_load == MTLLoadActionLoad;
+
+		if (targets[index] && handles[targets[index]].commands_read == park.generation &&
+			!park_rename(targets[index], keep))
+		{
+			park_end();
+			return;
+		}
+	}
+}
+
+/* a blit that reads one texture and writes another (0: none): hoisted
+when it can be, the screen's pass parked for it */
+static void park_blit(uint32_t read, uint32_t write)
+{
+	if (park.active)
+	{
+		if ((read && handles[read].commands_written == park.generation) ||
+			(write && (handles[write].commands_written == park.generation ||
+			handles[write].commands_read == park.generation)))
+		{
+			park_end();
+		}
+		return;
+	}
+	if (park.enabled && encoder && pass.width * pass.height >= PARK_LARGE_PIXELS &&
+		(!read || handles[read].commands_written != commands_generation) &&
+		(!write || (handles[write].commands_written != commands_generation &&
+		handles[write].commands_read != commands_generation)))
+	{
+		park_begin();
+	}
+}
+
+/* after a blit: what it read and wrote, in this command buffer */
+static void blit_mark(uint32_t read, uint32_t write)
+{
+	if (read && read < HANDLE_COUNT)
+		handles[read].commands_read = commands_generation;
+	if (write && write < HANDLE_COUNT)
+		handles[write].commands_written = commands_generation;
+}
+
 static BOOL encoder_begin(void)
 {
 	MTLRenderPassDescriptor *descriptor;
@@ -657,6 +932,19 @@ static BOOL encoder_begin(void)
 
 	if (encoder)
 		return YES;
+	/* (the screen's targets, parked by a blit: its pass goes on, unless a
+	clear waits in the load actions) */
+	if (park.active && pass.color == park.main_pass.color && pass.depth == park.main_pass.depth)
+	{
+		if (pass.color_load == MTLLoadActionLoad && pass.depth_load == MTLLoadActionLoad &&
+			pass.stencil_load == MTLLoadActionLoad)
+		{
+			park_resume();
+			return encoder != nil;
+		}
+		park_end();
+	}
+	park_check_targets();
 	color = texture_object(pass.color);
 	depth = texture_object(pass.depth);
 	if (!color && !depth)
@@ -720,8 +1008,12 @@ static BOOL encoder_begin(void)
 	if (host_pass_log_enabled)
 		pass_log_begin(descriptor);
 	encoder = [commands renderCommandEncoderWithDescriptor:descriptor];
-	encoder_serial++;
+	encoder_serial = ++encoder_serials;
 	host_frame_acc.passes++;
+	if (pass.color)
+		handles[pass.color].commands_written = commands_generation;
+	if (pass.depth)
+		handles[pass.depth].commands_written = commands_generation;
 	/* (the next pass of these targets keeps what this one drew) */
 	pass.color_load = pass.depth_load = pass.stencil_load = MTLLoadActionLoad;
 	bound_forget();
@@ -752,8 +1044,22 @@ void host_metal_set_targets(unsigned int color, unsigned int depth)
 	@autoreleasepool
 	{
 		pass_flush();
-		pass_log.end_reason = _pass_end_targets;
-		encoder_end();
+		/* (the screen's targets again: its parked pass goes on) */
+		if (park.active && color == park.main_pass.color && depth == park.main_pass.depth)
+		{
+			park_resume();
+			return;
+		}
+		if (park.enabled && !park.active && encoder && pass.width * pass.height >= PARK_LARGE_PIXELS &&
+			texture_small(color) && texture_small(depth))
+		{
+			park_begin();
+		}
+		else
+		{
+			pass_log.end_reason = _pass_end_targets;
+			encoder_end();
+		}
 	}
 	pass.color = color;
 	pass.depth = depth;
@@ -761,7 +1067,8 @@ void host_metal_set_targets(unsigned int color, unsigned int depth)
 }
 
 /* a blit encoder in the frame, after its draws: the render pass ended first
-(it is begun again, its targets' pixels loaded, by the next draw) */
+(it is begun again, its targets' pixels loaded, by the next draw), or, the
+screen's pass parked, hoisted (park_blit first) */
 static id<MTLBlitCommandEncoder> blit_begin(void)
 {
 	pass_flush();
@@ -907,6 +1214,7 @@ int host_metal_attach(unsigned int window)
 				return 0;
 			}
 			pass_log_initialize();
+			park_initialize();
 		}
 		metal.view = SDL_Metal_CreateView(object);
 		if (!metal.view)
@@ -1024,6 +1332,8 @@ void host_metal_texture_define(unsigned int handle, int type, unsigned int forma
 		texture = [metal.device newTextureWithDescriptor:descriptor];
 		if (!texture)
 			host_log("Metal: cannot make a %ux%ux%u texture (format %u)", width, height, depth, format);
+		if (park.active && (park.main_pass.color == handle || park.main_pass.depth == handle))
+			park_end();
 		if (pass.color == handle || pass.depth == handle)
 		{
 			/* (a target redefined: its pass is of the old texture) */
@@ -1031,6 +1341,7 @@ void host_metal_texture_define(unsigned int handle, int type, unsigned int forma
 			encoder_end();
 		}
 		handle_set(handle, texture);
+		handles[handle].commands_read = handles[handle].commands_written = 0;
 		handles[handle].private_storage = usage != _metal_usage_sampled;
 		handles[handle].fresh = usage != _metal_usage_sampled;
 		handles[handle].used_serial = 0;
@@ -1068,7 +1379,9 @@ void host_metal_texture_upload(unsigned int handle, unsigned int face, unsigned 
 			id<MTLBlitCommandEncoder> blit;
 
 			memcpy(staged, data, bytes);
+			park_blit(0, handle);
 			blit = blit_begin();
+			blit_mark(0, handle);
 			[blit copyFromBuffer:buffer sourceOffset:offset sourceBytesPerRow:bytes_per_row
 				sourceBytesPerImage:volume ? bytes_per_image : 0 sourceSize:MTLSizeMake(width, height, depth)
 				toTexture:texture destinationSlice:face destinationLevel:level destinationOrigin:MTLOriginMake(x, y, z)];
@@ -1085,6 +1398,8 @@ void host_metal_texture_delete(unsigned int handle)
 	{
 		if (metal.present_source == handle)
 			metal.present_source = 0;
+		if (park.active && (park.main_pass.color == handle || park.main_pass.depth == handle))
+			park_end();
 		if (pass.color == handle || pass.depth == handle)
 		{
 			encoder_end();
@@ -1121,7 +1436,9 @@ void host_metal_texture_copy_level(unsigned int source, unsigned int destination
 			width = (uint32_t)level_width;
 		if (height > level_height)
 			height = (uint32_t)level_height;
+		park_blit(source, destination);
 		blit = blit_begin();
+		blit_mark(source, destination);
 		[blit copyFromTexture:from sourceSlice:0 sourceLevel:0 sourceOrigin:MTLOriginMake(0, 0, 0)
 			sourceSize:MTLSizeMake(width, height, 1) toTexture:to destinationSlice:0 destinationLevel:level
 			destinationOrigin:MTLOriginMake(0, 0, 0)];
@@ -1138,8 +1455,11 @@ void host_metal_texture_generate_mipmaps(unsigned int handle, unsigned int first
 		return;
 	@autoreleasepool
 	{
-		id<MTLBlitCommandEncoder> blit = blit_begin();
+		id<MTLBlitCommandEncoder> blit;
 
+		park_blit(handle, handle);
+		blit = blit_begin();
+		blit_mark(handle, handle);
 		if (first)
 		{
 			id<MTLTexture> view = [texture newTextureViewWithPixelFormat:texture.pixelFormat
@@ -1586,6 +1906,8 @@ static id<MTLTexture> feedback_copy(id<MTLTexture> target)
 			profile_phase_copies[profile_phase]++;
 		profile_feedback_bytes += (uint64_t)target.width * target.height * 4;
 	}
+	/* (metal.feedback is one texture for the frame: not hoisted) */
+	park_end();
 	blit = blit_begin();
 	[blit copyFromTexture:target sourceSlice:0 sourceLevel:0 sourceOrigin:MTLOriginMake(0, 0, 0)
 		sourceSize:MTLSizeMake(target.width, target.height, 1) toTexture:metal.feedback destinationSlice:0
@@ -1647,6 +1969,24 @@ void host_metal_draw(const struct metal_draw *original)
 		if (metal.debug & 2)
 			memset(&adjusted.depth_stencil, 0, sizeof(adjusted.depth_stencil));
 		draw = &adjusted;
+	}
+	/* (a texture the screen's parked pass has drawn: not hoisted) */
+	if (park.active)
+	{
+		int stage;
+
+		for (stage = 0; stage < METAL_STAGES; stage++)
+		{
+			if (draw->textures[stage] && draw->textures[stage] < HANDLE_COUNT &&
+				handles[draw->textures[stage]].commands_written == park.generation)
+			{
+				@autoreleasepool
+				{
+					park_end();
+				}
+				break;
+			}
+		}
 	}
 	@autoreleasepool
 	{
@@ -1816,7 +2156,10 @@ void host_metal_draw(const struct metal_draw *original)
 				bound.samplers[index] = (__bridge void *)sampler;
 			}
 			if (draw->textures[index] && draw->textures[index] < HANDLE_COUNT)
+			{
 				handles[draw->textures[index]].used_serial = frame_serial;
+				handles[draw->textures[index]].commands_read = commands_generation;
+			}
 		}
 
 		/* the vertices, copied */
@@ -1981,7 +2324,10 @@ int host_metal_texture_read(unsigned int handle, unsigned int width, unsigned in
 	{
 		NSUInteger bytes = (NSUInteger)width * height * 4;
 		id<MTLBuffer> buffer = [metal.device newBufferWithLength:bytes options:MTLResourceStorageModeShared];
-		id<MTLBlitCommandEncoder> blit = blit_begin();
+		id<MTLBlitCommandEncoder> blit;
+
+		park_end();
+		blit = blit_begin();
 		id<MTLCommandBuffer> submitted = commands;
 
 		[blit copyFromTexture:texture sourceSlice:0 sourceLevel:0 sourceOrigin:MTLOriginMake(0, 0, 0)
@@ -1992,6 +2338,7 @@ int host_metal_texture_read(unsigned int handle, unsigned int width, unsigned in
 		frame: its ring and counters stay) */
 		[submitted commit];
 		commands = [metal.queue commandBuffer];
+		commands_generation = ++commands_generations;
 		if (host_frame_log_detail())
 		{
 			uint64_t waited = host_frame_log_now();
@@ -2034,6 +2381,7 @@ void host_metal_present(void)
 		uint64_t serial = frame_serial;
 
 		pass_flush();
+		park_end();
 		pass_log.end_reason = _pass_end_present;
 		encoder_end();
 		frame_begin();
@@ -2140,9 +2488,23 @@ void host_metal_present(void)
 		profile_feedback_copies = profile_feedback_bytes = 0;
 		frame = frame_current();
 		pass_log_clock();
+		NSArray *hoisted = frame->hoisted;
+		frame->hoisted = nil;
 		[commands addCompletedHandler:^(id<MTLCommandBuffer> buffer)
 		{
 			const uint64_t *counts = frame->visibility.contents;
+
+			/* (the passes hoisted ahead of the frame's: done before its
+			buffers are used again, and their GPU time the frame's) */
+			for (id<MTLCommandBuffer> early in hoisted)
+			{
+				[early waitUntilCompleted];
+				if (host_frame_log_level)
+					host_frame_log_gpu_hoisted(serial, early.GPUStartTime, early.GPUEndTime);
+				if (early.status == MTLCommandBufferStatusError)
+					host_log("Metal: frame %llu's hoisted passes failed on the GPU: %s", (unsigned long long)serial,
+						early.error.localizedDescription.UTF8String);
+			}
 
 			pass_log_resolve((uint32_t)(serial % FRAMES_IN_FLIGHT), serial);
 			uint32_t index;
@@ -2190,6 +2552,8 @@ void host_metal_present(void)
 		[commands commit];
 		commands = nil;
 		frame_serial++;
+		if (park.toggle && pass_log.timing != 2)
+			park.enabled = (frame_serial / park.toggle) % 2 == 0;
 		/* (the record's own: the present's host time, up to here, is the
 		frame's; the rest goes to the next) */
 		if (host_frame_log_level)

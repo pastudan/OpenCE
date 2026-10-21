@@ -40,6 +40,35 @@ def test_summary_counts_reentries_and_phase_times():
                                                           "end=present")
 
 
+def test_hoisting_unparks_before_everything_that_must_follow_the_screen():
+    metal = (ROOT / "port/macos/host/host_metal.m").read_text()
+
+    def body(signature):
+        start = metal.index(signature)
+        return metal[start:metal.index("\n}\n", start)]
+    # a readback, the present and a feedback copy see the screen's pass whole
+    assert "park_end();\n\t\tblit = blit_begin();" in body("int host_metal_texture_read(")
+    assert "pass_flush();\n\t\tpark_end();" in body("void host_metal_present(void)")
+    assert "park_end();\n\tblit = blit_begin();" in body("static id<MTLTexture> feedback_copy(")
+    # the parked targets redefined or deleted: unparked first
+    for signature in ("void host_metal_texture_define(", "void host_metal_texture_delete("):
+        assert "(park.main_pass.color == handle || park.main_pass.depth == handle))\n\t\t\tpark_end();" in body(signature)
+    # every blit says what it reads and writes
+    for signature in ("void host_metal_texture_copy_level(", "void host_metal_texture_generate_mipmaps(",
+                      "void host_metal_texture_upload("):
+        assert "park_blit(" in body(signature) and "blit_mark(" in body(signature)
+    # a draw that samples what the parked pass drew unparks; draws mark what they read
+    draw = body("void host_metal_draw(")
+    assert "commands_written == park.generation" in draw and "park_end();" in draw
+    assert ".commands_read = commands_generation;" in draw
+    # a hoisted target the frame has read is renamed or unparks; one it wrote unparks
+    check = body("static void park_check_targets(void)")
+    assert "commands_written == park.generation" in check and "park_rename(" in check
+    # the frame's completion waits for its hoisted buffers (its ring and samples are reused after)
+    assert "[early waitUntilCompleted];" in metal
+    assert 'getenv("HALO_METAL_HOIST")' in metal
+
+
 def test_pass_log_is_opt_in_and_does_not_wait():
     metal = (ROOT / "port/macos/host/host_metal.m").read_text()
     frame_log = (ROOT / "port/macos/host/host_frame_log.c").read_text()
