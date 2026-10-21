@@ -118,3 +118,14 @@ def test_shader_salt_is_diagnostic_and_off_by_default():
     metal = (ROOT / "port/macos/host/host_metal.m").read_text()
     assert 'getenv("HALO_METAL_SHADER_SALT")' in metal
     assert "if (salt)" in metal
+
+
+def test_shader_salt_changes_the_compiled_code_not_only_the_source():
+    # (a comment alone leaves the AIR as it was: the system's cache of
+    # pipelines still finds them, and a "cold" run is only half cold)
+    metal = (ROOT / "port/macos/host/host_metal.m").read_text()
+    shader = metal[metal.index("unsigned int host_metal_shader("):metal.index("unsigned int host_metal_vertex_layout(")]
+    assert "shader_entry_point(fragment)" in shader
+    assert "newFunctionWithName:shader_entry_point(fragment)" in shader
+    entry = metal[metal.index("static NSString *shader_entry_point("):metal.index("unsigned int host_metal_shader(")]
+    assert '@"fragment_main"' in entry and '@"vertex_main"' in entry

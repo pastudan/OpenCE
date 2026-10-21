@@ -950,6 +950,41 @@ void host_metal_texture_generate_mipmaps(unsigned int handle, unsigned int first
 
 /* ---------- shaders and vertex layouts */
 
+/* HALO_METAL_SHADER_SALT, or NULL */
+static const char *shader_salt(void)
+{
+	static const char *salt = (const char *)1;
+
+	if (salt == (const char *)1)
+		salt = getenv("HALO_METAL_SHADER_SALT") && *getenv("HALO_METAL_SHADER_SALT") ?
+			getenv("HALO_METAL_SHADER_SALT") : NULL;
+	return salt;
+}
+
+/* the name of a shader's function: the translator's, or with the salt's
+letters and digits after it */
+static NSString *shader_entry_point(int fragment)
+{
+	static NSString *names[2];
+
+	if (!names[0])
+	{
+		NSMutableString *suffix = [NSMutableString string];
+		const char *at;
+
+		for (at = shader_salt(); at && *at; at++)
+		{
+			if ((*at >= '0' && *at <= '9') || (*at >= 'a' && *at <= 'z') || (*at >= 'A' && *at <= 'Z'))
+				[suffix appendFormat:@"%c", *at];
+		}
+		if (suffix.length)
+			[suffix insertString:@"_salt_" atIndex:0];
+		names[1] = [@"fragment_main" stringByAppendingString:suffix];
+		names[0] = [@"vertex_main" stringByAppendingString:suffix];
+	}
+	return names[fragment ? 1 : 0];
+}
+
 unsigned int host_metal_shader(const char *source, int fragment)
 {
 	HOST_FRAME_LOG_SCOPE;
@@ -997,16 +1032,23 @@ unsigned int host_metal_shader(const char *source, int fragment)
 		}
 		/* HALO_METAL_SHADER_SALT (diagnostic, for measuring cold compiles):
 		a comment of its text at the end of every shader, so that none is
-		found in the system's compiled-shader cache of an earlier launch.
-		The code compiled is the same */
+		found in the system's compiled-shader cache of an earlier launch,
+		and its letters and digits in the name of the shader's function. A
+		comment alone changes only the source: its compiled code (AIR) is
+		the same as before, and the pipelines made of it are found in the
+		system's cache of them. The code compiled is the same */
 		{
-			static const char *salt = (const char *)1;
+			const char *salt = shader_salt();
 
-			if (salt == (const char *)1)
-				salt = getenv("HALO_METAL_SHADER_SALT") && *getenv("HALO_METAL_SHADER_SALT") ?
-					getenv("HALO_METAL_SHADER_SALT") : NULL;
 			if (salt)
+			{
+				NSRange name = [text rangeOfString:fragment ? @"fragment_main(" : @"vertex_main("];
+
+				if (name.location != NSNotFound)
+					text = [text stringByReplacingCharactersInRange:NSMakeRange(name.location, name.length - 1)
+						withString:shader_entry_point(fragment)];
 				text = [text stringByAppendingFormat:@"\n// salt %s\n", salt];
+			}
 		}
 		uint64_t compile_started = profile_enabled ? SDL_GetTicksNS() : 0;
 		uint64_t frame_log_started = host_frame_log_detail() ? host_frame_log_now() : 0;
@@ -1024,7 +1066,7 @@ unsigned int host_metal_shader(const char *source, int fragment)
 				error.localizedDescription.UTF8String, source);
 			return 0;
 		}
-		function = [library newFunctionWithName:fragment ? @"fragment_main" : @"vertex_main"];
+		function = [library newFunctionWithName:shader_entry_point(fragment)];
 		if (!function)
 			return 0;
 		handle = handle_new(_handle_shader);
