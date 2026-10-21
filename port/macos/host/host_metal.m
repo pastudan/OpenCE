@@ -345,6 +345,238 @@ static struct
 static id<MTLRenderCommandEncoder> encoder;
 static uint64_t encoder_serial;
 
+/* ---------- the pass log (HALO_PASS_LOG, host_frame_log.h): diagnostic
+
+Each pass's record, and its GPU time: the GPU's timestamps at the start and
+end of the pass's vertex and fragment stages (a counter sample buffer a
+frame in flight) where the device samples at stage boundaries, else with
+HALO_METAL_PASS_TIMING=buffers a command buffer a pass (which itself costs
+some time). HALO_METAL_PASS_SPLIT=phase ends a pass whenever the
+rasterizer's phase changes, to time the phases apart (it adds the passes'
+loads and stores: diagnostic only), and HALO_METAL_SKIP_PHASES (phase
+numbers, comma-separated) drops their draws, to measure what they cost.
+None changes anything unless set. */
+
+#define PASS_TIMING_PASSES 256
+
+enum
+{
+	_pass_end_other,
+	_pass_end_targets,
+	_pass_end_blit,
+	_pass_end_present,
+	_pass_end_phase,
+	_pass_end_flush,
+};
+
+static struct
+{
+	int timing; /* 0 none, 1 stage timestamps, 2 a command buffer a pass */
+	int split_phases;
+	uint32_t skip_phases;
+	int end_reason;
+	uint32_t index; /* the frame's passes so far */
+	struct host_pass_record *record;
+	struct host_pass_record *frame_records[FRAMES_IN_FLIGHT][PASS_TIMING_PASSES];
+	uint32_t frame_samples[FRAMES_IN_FLIGHT];
+	uint64_t frame_serials[FRAMES_IN_FLIGHT];
+	id<MTLCounterSampleBuffer> samples[FRAMES_IN_FLIGHT];
+} pass_log;
+
+static void pass_log_initialize(void)
+{
+	const char *setting;
+
+	setting = getenv("HALO_METAL_SKIP_PHASES");
+	while (setting && *setting)
+	{
+		int phase = atoi(setting);
+
+		if (phase >= 0 && phase < 29)
+			pass_log.skip_phases |= 1u << phase;
+		setting = strchr(setting, ',');
+		if (setting)
+			setting++;
+	}
+	if (pass_log.skip_phases)
+		host_log("Metal: HALO_METAL_SKIP_PHASES (diagnostic): the draws of phases %08x are not drawn",
+			pass_log.skip_phases);
+	if (!host_pass_log_enabled)
+		return;
+	pass_log.split_phases = getenv("HALO_METAL_PASS_SPLIT") && !strcmp(getenv("HALO_METAL_PASS_SPLIT"), "phase");
+	setting = getenv("HALO_METAL_PASS_TIMING");
+	if (setting && !strcmp(setting, "buffers"))
+	{
+		pass_log.timing = 2;
+	}
+	else if (!setting || strcmp(setting, "none"))
+	{
+		id<MTLCounterSet> timestamps = nil;
+
+		if (@available(macOS 11.0, iOS 14.0, tvOS 14.0, *))
+		{
+			for (id<MTLCounterSet> set in metal.device.counterSets)
+			{
+				if ([set.name isEqualToString:MTLCommonCounterSetTimestamp])
+					timestamps = set;
+			}
+			host_log("Metal: counter sampling: stage %d draw %d blit %d; timestamp counters %s",
+				[metal.device supportsCounterSampling:MTLCounterSamplingPointAtStageBoundary],
+				[metal.device supportsCounterSampling:MTLCounterSamplingPointAtDrawBoundary],
+				[metal.device supportsCounterSampling:MTLCounterSamplingPointAtBlitBoundary], timestamps ? "yes" : "no");
+			if (timestamps && [metal.device supportsCounterSampling:MTLCounterSamplingPointAtStageBoundary])
+			{
+				MTLCounterSampleBufferDescriptor *descriptor = [MTLCounterSampleBufferDescriptor new];
+				NSError *error = nil;
+				int frame;
+
+				descriptor.counterSet = timestamps;
+				descriptor.storageMode = MTLStorageModeShared;
+				descriptor.sampleCount = PASS_TIMING_PASSES * 4;
+				pass_log.timing = 1;
+				for (frame = 0; frame < FRAMES_IN_FLIGHT; frame++)
+				{
+					pass_log.samples[frame] = [metal.device newCounterSampleBufferWithDescriptor:descriptor error:&error];
+					if (!pass_log.samples[frame])
+					{
+						host_log("Metal: no counter sample buffer: %s", error.localizedDescription.UTF8String);
+						pass_log.timing = 0;
+					}
+				}
+			}
+		}
+	}
+	host_log("Metal: pass log on; GPU time a pass: %s%s", pass_log.timing == 1 ? "stage timestamps" :
+		pass_log.timing == 2 ? "a command buffer a pass" : "none (no stage counters: HALO_METAL_PASS_TIMING=buffers)",
+		pass_log.split_phases ? "; passes split at phases (diagnostic)" : "");
+}
+
+/* the GPU's clock against the CPU's, for converting counter ticks */
+static void pass_log_clock(void)
+{
+	if (pass_log.timing != 1)
+		return;
+	if (@available(macOS 10.15, iOS 14.0, tvOS 14.0, *))
+	{
+		MTLTimestamp cpu = 0, gpu = 0;
+		uint64_t before = host_frame_log_now(), after;
+
+		[metal.device sampleTimestamps:&cpu gpuTimestamp:&gpu];
+		after = host_frame_log_now();
+		host_frame_log_gpu_clock(before + (after - before) / 2, gpu);
+	}
+}
+
+/* a new pass's record, and its counter samples in the descriptor */
+static void pass_log_begin(MTLRenderPassDescriptor *descriptor)
+{
+	struct host_pass_record *record;
+	uint32_t slot = (uint32_t)(frame_serial % FRAMES_IN_FLIGHT);
+
+	pass_log.record = NULL;
+	if (!host_pass_log_enabled || !host_frame_log_main_thread())
+		return;
+	/* (a slot's samples are the frame's that uses it now: the one before
+	in it has completed, frame_begin waited for that) */
+	if (pass_log.frame_serials[slot] != frame_serial)
+	{
+		pass_log.frame_serials[slot] = frame_serial;
+		pass_log.frame_samples[slot] = 0;
+		pass_log.index = 0;
+	}
+	record = host_frame_log_pass_new(frame_serial, pass_log.index++);
+	if (!record)
+		return;
+	record->color = pass.color;
+	record->depth = pass.depth;
+	record->width = pass.width;
+	record->height = pass.height;
+	record->color_format = (uint32_t)descriptor.colorAttachments[0].texture.pixelFormat;
+	record->depth_format = (uint32_t)descriptor.depthAttachment.texture.pixelFormat;
+	record->color_load = (uint8_t)descriptor.colorAttachments[0].loadAction;
+	record->color_store = (uint8_t)descriptor.colorAttachments[0].storeAction;
+	if (descriptor.depthAttachment.texture)
+	{
+		record->depth_load = (uint8_t)descriptor.depthAttachment.loadAction;
+		record->depth_store = (uint8_t)descriptor.depthAttachment.storeAction;
+		record->stencil_load = (uint8_t)descriptor.stencilAttachment.loadAction;
+		record->stencil_store = (uint8_t)descriptor.stencilAttachment.storeAction;
+	}
+	pass_log.record = record;
+	if (pass_log.timing == 1 && pass_log.frame_samples[slot] < PASS_TIMING_PASSES)
+	{
+		if (@available(macOS 11.0, iOS 14.0, tvOS 14.0, *))
+		{
+			uint32_t at = pass_log.frame_samples[slot]++;
+			MTLRenderPassSampleBufferAttachmentDescriptor *attachment = descriptor.sampleBufferAttachments[0];
+
+			attachment.sampleBuffer = pass_log.samples[slot];
+			attachment.startOfVertexSampleIndex = at * 4;
+			attachment.endOfVertexSampleIndex = at * 4 + 1;
+			attachment.startOfFragmentSampleIndex = at * 4 + 2;
+			attachment.endOfFragmentSampleIndex = at * 4 + 3;
+			pass_log.frame_records[slot][at] = record;
+		}
+	}
+}
+
+/* the pass's end (before endEncoding): why, and its command buffer with
+HALO_METAL_PASS_TIMING=buffers */
+static void pass_log_end(void)
+{
+	struct host_pass_record *record = pass_log.record;
+
+	pass_log.record = NULL;
+	if (!record)
+		return;
+	record->reason = (uint8_t)pass_log.end_reason;
+	if (pass_log.timing == 2)
+	{
+		uint64_t serial = atomic_load(&record->serial);
+
+		/* (the frame goes on in a command buffer of its own: its ring and
+		counters stay, as host_metal_texture_read's) */
+		[commands addCompletedHandler:^(id<MTLCommandBuffer> buffer)
+		{
+			if (atomic_load(&record->serial) == serial && buffer.GPUEndTime > buffer.GPUStartTime)
+			{
+				atomic_store(&record->gpu_start_ns, (uint64_t)(buffer.GPUStartTime * 1e9));
+				atomic_store(&record->gpu_end_ns, (uint64_t)(buffer.GPUEndTime * 1e9));
+			}
+		}];
+		pass_log.end_reason = _pass_end_other;
+		return;
+	}
+	pass_log.end_reason = _pass_end_other;
+}
+
+/* the frame's counter samples, into its passes' records (its command
+buffer's completion; the next frame in this slot has not begun) */
+static void pass_log_resolve(uint32_t slot, uint64_t serial)
+{
+	uint32_t count = pass_log.frame_samples[slot], index;
+
+	if (pass_log.timing != 1 || !count)
+		return;
+	if (@available(macOS 10.15, iOS 14.0, tvOS 14.0, *))
+	{
+		NSData *data = [pass_log.samples[slot] resolveCounterRange:NSMakeRange(0, count * 4)];
+		const MTLCounterResultTimestamp *times = data.bytes;
+
+		for (index = 0; times && index < count && (index + 1) * 4 * sizeof(*times) <= data.length; index++)
+		{
+			struct host_pass_record *record = pass_log.frame_records[slot][index];
+
+			if (!record || atomic_load(&record->serial) != serial)
+				continue;
+			atomic_store(&record->vertex_start, times[index * 4].timestamp);
+			atomic_store(&record->vertex_end, times[index * 4 + 1].timestamp);
+			atomic_store(&record->fragment_start, times[index * 4 + 2].timestamp);
+			atomic_store(&record->fragment_end, times[index * 4 + 3].timestamp);
+		}
+	}
+}
+
 /* what the encoder has, to set only what changes */
 static struct
 {
@@ -382,8 +614,16 @@ static void encoder_end(void)
 {
 	if (encoder)
 	{
+		pass_log_end();
 		[encoder endEncoding];
 		encoder = nil;
+		/* (HALO_METAL_PASS_TIMING=buffers: the pass's command buffer
+		committed, the frame going on in another, as a readback does) */
+		if (pass_log.timing == 2 && commands)
+		{
+			[commands commit];
+			commands = [metal.queue commandBuffer];
+		}
 	}
 }
 
@@ -477,6 +717,8 @@ static BOOL encoder_begin(void)
 	descriptor.visibilityResultBuffer = frame_current()->visibility;
 	pass.color_format = color ? color.pixelFormat : MTLPixelFormatBGRA8Unorm;
 	pass.depth_format = depth ? depth.pixelFormat : MTLPixelFormatInvalid;
+	if (host_pass_log_enabled)
+		pass_log_begin(descriptor);
 	encoder = [commands renderCommandEncoderWithDescriptor:descriptor];
 	encoder_serial++;
 	host_frame_acc.passes++;
@@ -495,7 +737,10 @@ static void pass_flush(void)
 		pass.stencil_load == MTLLoadActionClear)
 	{
 		if (encoder_begin())
+		{
+			pass_log.end_reason = _pass_end_flush;
 			encoder_end();
+		}
 	}
 }
 
@@ -507,6 +752,7 @@ void host_metal_set_targets(unsigned int color, unsigned int depth)
 	@autoreleasepool
 	{
 		pass_flush();
+		pass_log.end_reason = _pass_end_targets;
 		encoder_end();
 	}
 	pass.color = color;
@@ -519,6 +765,7 @@ void host_metal_set_targets(unsigned int color, unsigned int depth)
 static id<MTLBlitCommandEncoder> blit_begin(void)
 {
 	pass_flush();
+	pass_log.end_reason = _pass_end_blit;
 	encoder_end();
 	frame_begin();
 	return [commands blitCommandEncoder];
@@ -659,6 +906,7 @@ int host_metal_attach(unsigned int window)
 				SDL_SetError("the Metal renderer cannot start");
 				return 0;
 			}
+			pass_log_initialize();
 		}
 		metal.view = SDL_Metal_CreateView(object);
 		if (!metal.view)
@@ -687,7 +935,7 @@ void host_metal_set_vsync(int interval)
 
 void host_metal_profile_phase(int profile, int begin)
 {
-	if (!profile_enabled && !host_frame_log_level)
+	if (!profile_enabled && !host_frame_log_level && !pass_log.skip_phases)
 		return;
 	if (begin)
 		profile_phase = profile >= 0 && profile < 29 ? profile : -1;
@@ -1274,6 +1522,8 @@ void host_metal_clear(const struct metal_clear *clear)
 
 		if (!encoder_begin())
 			return;
+		if (pass_log.record)
+			pass_log.record->clears++;
 		pipeline = clear_pipeline_get(color_mask);
 		if (!pipeline || !scissor_inside(clear->rectangle, &scissor))
 			return;
@@ -1386,6 +1636,9 @@ void host_metal_draw(const struct metal_draw *original)
 				return;
 		}
 	}
+	/* HALO_METAL_SKIP_PHASES (diagnostic): the draws of these phases not drawn */
+	if (pass_log.skip_phases && profile_phase >= 0 && (pass_log.skip_phases >> profile_phase & 1))
+		return;
 	if (metal.debug & 3)
 	{
 		adjusted = *original;
@@ -1428,11 +1681,34 @@ void host_metal_draw(const struct metal_draw *original)
 				textures[index] = dummy_texture(draw->texture_types[index]);
 			}
 		}
+		/* HALO_METAL_PASS_SPLIT=phase (diagnostic): a pass a phase */
+		if (pass_log.split_phases && encoder && pass_log.record && pass_log.record->draws &&
+			pass_log.record->last_phase != profile_phase)
+		{
+			pass_log.end_reason = _pass_end_phase;
+			encoder_end();
+		}
 		if (!encoder_begin())
 			return;
 		pipeline = pipeline_get(draw);
 		if (!pipeline || !scissor_inside(draw->scissor, &scissor))
 			return;
+		if (pass_log.record)
+		{
+			struct host_pass_record *record = pass_log.record;
+
+			record->draws++;
+			record->fog_draws += profile_phase == 17;
+			record->transparent_draws += profile_phase == 22;
+			record->target_samples += feedback_taken;
+			if (profile_phase >= 0)
+			{
+				if (record->first_phase < 0)
+					record->first_phase = (int8_t)profile_phase;
+				record->phase_mask |= 1u << profile_phase;
+			}
+			record->last_phase = (int8_t)profile_phase;
+		}
 
 		if (bound.pipeline != (__bridge void *)pipeline)
 		{
@@ -1758,6 +2034,7 @@ void host_metal_present(void)
 		uint64_t serial = frame_serial;
 
 		pass_flush();
+		pass_log.end_reason = _pass_end_present;
 		encoder_end();
 		frame_begin();
 		picture = texture_object(metal.present_source);
@@ -1862,9 +2139,12 @@ void host_metal_present(void)
 		profile_shader_ns = profile_pipeline_ns = 0;
 		profile_feedback_copies = profile_feedback_bytes = 0;
 		frame = frame_current();
+		pass_log_clock();
 		[commands addCompletedHandler:^(id<MTLCommandBuffer> buffer)
 		{
 			const uint64_t *counts = frame->visibility.contents;
+
+			pass_log_resolve((uint32_t)(serial % FRAMES_IN_FLIGHT), serial);
 			uint32_t index;
 			static int errors;
 

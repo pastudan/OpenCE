@@ -73,6 +73,36 @@ void host_frame_log_presented(uint64_t serial, double presented_seconds);
 /* something to find the frames by ("map-open", "a10.map") */
 void host_frame_log_event(const char *kind, const char *detail);
 
+/* HALO_PASS_LOG=1 (with HALO_FRAME_LOG=1): a record of every render pass,
+kept in a ring (HALO_PASS_LOG_PASSES, default 150000) and written at exit
+as CSV (HALO_PASS_LOG_PATH, else <data root>/pass_log.csv): its targets,
+load and store actions, why it ended, its draws and the rasterizer phases
+they were in, and its GPU time (host_metal.m: the GPU's timestamps at the
+pass's vertex and fragment stages where the device can sample them, else,
+with HALO_METAL_PASS_TIMING=buffers, a command buffer a pass). Diagnostic
+only: off by default. */
+struct host_pass_record
+{
+	_Atomic uint64_t serial;
+	uint32_t index;
+	uint32_t color, depth, width, height, color_format, depth_format;
+	uint8_t color_load, depth_load, stencil_load, color_store, depth_store, stencil_store;
+	uint8_t reason;
+	int8_t first_phase, last_phase;
+	uint32_t phase_mask;
+	uint32_t draws, clears, fog_draws, transparent_draws, target_samples;
+	/* a command buffer of its own (CLOCK_UPTIME_RAW ns), or the GPU's
+	counter ticks of its stages (converted when written) */
+	_Atomic uint64_t gpu_start_ns, gpu_end_ns;
+	_Atomic uint64_t vertex_start, vertex_end, fragment_start, fragment_end;
+};
+extern int host_pass_log_enabled;
+/* a new record of frame serial's (NULL with the log off) */
+struct host_pass_record *host_frame_log_pass_new(uint64_t serial, uint32_t index);
+/* a pair of the CPU's clock and the GPU's counter ticks, for converting the
+ticks (the first and the latest are kept) */
+void host_frame_log_gpu_clock(uint64_t now_ns, uint64_t gpu_ticks);
+
 /* the time of a host call, less what it waited and compiled: one at the
 top of each of the renderer's entry points */
 static inline void host_frame_log_scope_end(uint64_t *started)
