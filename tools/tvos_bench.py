@@ -35,11 +35,16 @@ Scenes (no controller input: the most repeatable):
   60 s from the second frame after the state is read.
 
 Cold and warm. cold: the first launch with a new HALO_METAL_SHADER_SALT (a
-comment added to every Metal shader: nothing is found in the system's
-compiled-shader caches of earlier launches, which otherwise survive app
-updates); its first-use compile stalls are in the numbers. warm: the next
+comment added to every Metal shader and its name in the shader's function:
+nothing is found in the system's compiled-shader caches of earlier launches,
+which otherwise survive app updates), and the Metal host's own shader cache
+emptied; its first-use compile stalls are in the numbers. warm: the next
 launch with the same salt (the system's caches now hold every shader the
-scene compiles). The "steady" window of a run also leaves out its first
+scene compiles). primed (--modes cold,warm,primed): a launch with a salt of
+its own again, so the system's caches miss, but with the host's shader cache
+as the cold launch left it: what a launch after a system or app update costs
+once the game has been played (the host compiles the recorded shaders on
+other threads from the start). The "steady" window of a run also leaves out its first
 WARMUP_SECONDS (5 s) of the scene.
 
 Every result is labelled with its target: "A12 device", "tvOS simulator" or
@@ -291,7 +296,8 @@ def write_results(out, results, meta):
 
 def plan(scenes, resolutions, modes, repeats):
     """the runs in order: for each repeat, scene and resolution a new salt,
-    its cold launch, then its warm launches"""
+    its cold launch, then its warm launches; a primed launch (after them)
+    has a salt of its own, and the shader cache's record the cold one made"""
     runs = []
     for repeat in range(1, repeats + 1):
         for scene in scenes:
@@ -299,13 +305,20 @@ def plan(scenes, resolutions, modes, repeats):
                 salt = uuid.uuid4().hex[:12]
                 for mode in modes:
                     runs.append({"scene": scene, "resolution": resolution, "mode": mode, "repeat": repeat,
-                                 "salt": salt})
+                                 "salt": salt + "p" if mode == "primed" else salt})
     return runs
+
+
+# the Metal host's shader cache (host_metal.m) of the runs, not the player's:
+# emptied by each cold launch, so that it is cold too
+SHADER_CACHE = "tvbench_shaders.manifest"
 
 
 def run_environment(run, frame_log="1", extra=None):
     environment = {"HALO_FRAME_LOG": frame_log, "HALO_FRAME_LOG_INTERVAL": "0",
                    "HALO_RESOLUTION_SCALING": str(run["resolution"]), "HALO_METAL_SHADER_SALT": run["salt"],
+                   "HALO_METAL_SHADER_CACHE": SHADER_CACHE,
+                   "HALO_METAL_SHADER_CACHE_RESET": "1" if run["mode"] == "cold" else "0",
                    "HALO_HIGH_RES_HUD": "true", "HALO_HIGH_RES_TEXT": "true"}
     environment.update(SCENES.get(run["scene"], {}).get("env", {}))
     environment.update(extra or {})

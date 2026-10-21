@@ -124,8 +124,20 @@ def test_shader_salt_changes_the_compiled_code_not_only_the_source():
     # (a comment alone leaves the AIR as it was: the system's cache of
     # pipelines still finds them, and a "cold" run is only half cold)
     metal = (ROOT / "port/macos/host/host_metal.m").read_text()
-    shader = metal[metal.index("unsigned int host_metal_shader("):metal.index("unsigned int host_metal_vertex_layout(")]
-    assert "shader_entry_point(fragment)" in shader
+    text = metal[metal.index("static NSString *shader_text("):metal.index("unsigned int host_metal_shader(")]
+    assert "withString:shader_entry_point(fragment)" in text
+    shader = metal[metal.index("unsigned int host_metal_shader("):metal.index("static MTLVertexDescriptor *vertex_descriptor_make(")]
     assert "newFunctionWithName:shader_entry_point(fragment)" in shader
-    entry = metal[metal.index("static NSString *shader_entry_point("):metal.index("unsigned int host_metal_shader(")]
-    assert '@"fragment_main"' in entry and '@"vertex_main"' in entry
+    settings = metal[metal.index("static void shader_settings_read("):metal.index("static const char *shader_salt(")]
+    assert '@"fragment_main"' in settings and '@"vertex_main"' in settings
+
+
+def test_cold_runs_empty_the_shader_cache_and_primed_runs_miss_the_system_cache():
+    runs = bench.plan(["b30"], [2160], ["cold", "warm", "primed"], 1)
+    cold, warm, primed = runs
+    assert cold["salt"] == warm["salt"] and primed["salt"] != cold["salt"]
+    environments = [bench.run_environment(run) for run in runs]
+    assert {e["HALO_METAL_SHADER_CACHE"] for e in environments} == {bench.SHADER_CACHE}
+    assert [e["HALO_METAL_SHADER_CACHE_RESET"] for e in environments] == ["1", "0", "0"]
+    metal = (ROOT / "port/macos/host/host_metal.m").read_text()
+    assert 'getenv("HALO_METAL_SHADER_CACHE_RESET")' in metal
