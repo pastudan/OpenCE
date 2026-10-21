@@ -461,7 +461,7 @@ def record_trace(device, trace, out, extra_env):
                 xctrace_output=(recorded.stdout or "")[-2000:], findings=findings)
 
 
-def run_device(runs, out, extra_env, device, core=None, traces=(), trace_results=None, maps=None):
+def run_device(runs, out, extra_env, device, core=None, traces=(), trace_results=None, maps=None, push=True):
     """the runs on the Apple TV: the owner's config.toml and init.txt backed
     up first and put back afterwards whatever happens (and checked)"""
     trace_results = [] if trace_results is None else trace_results
@@ -477,12 +477,12 @@ def run_device(runs, out, extra_env, device, core=None, traces=(), trace_results
     print(f"backed up the TV's config.toml and init.txt: {config_backup}, {init_backup}", flush=True)
     results = []
     try:
-        for map_name in sorted({SCENES[run["scene"]].get("map", "a10.map") for run in runs} - {"a10.map"}):
+        for map_name in sorted({SCENES[run["scene"]].get("map", "a10.map") for run in runs} - {"a10.map"}) if push else ():
             if not maps:
                 raise deploy.DeployError(f"{map_name} is needed on the TV: pass --maps")
             deploy.run(deploy.copy_args("to", device, Path(maps) / map_name, f"{container}/maps/{map_name}"),
                        timeout=1800)
-        for core_name in sorted({scene_core(run["scene"]) for run in runs} - {None}):
+        for core_name in sorted({scene_core(run["scene"]) for run in runs} - {None}) if push else ():
             source = Path(core if core and core_name == CORE_NAME else SCRATCH / "tvbench" / core_name)
             deploy.run(deploy.copy_args("to", device, source, f"{container}/core/{core_name}"), timeout=300)
         current_init = None
@@ -742,6 +742,8 @@ def main(argv=None):
     p.add_argument("--trace-scene", default="opening", help="the scene (at 4K, warm) the traces record")
     p.add_argument("--trace-attach-after", type=int, help="seconds after launch (default: from the scene's window)")
     p.add_argument("--no-lock", action="store_true")
+    p.add_argument("--no-push", action="store_true", help="device: the maps and saved states are already on the TV "
+                   "(an earlier run of this session copied them)")
     p = sub.add_parser("analyze")
     p.add_argument("csv")
     p.add_argument("--scene", choices=tuple(SCENES), required=True)
@@ -808,7 +810,8 @@ def main(argv=None):
                        "repeat": 0, "salt": salts[-1] if salts else "trace", "seconds": args.trace_seconds,
                        "attach_after": args.trace_attach_after} for template in args.traces.split(",") if template]
             trace_results = []
-            results = run_device(runs, out, extra, args.device, args.core, traces, trace_results, args.maps)
+            results = run_device(runs, out, extra, args.device, args.core, traces, trace_results, args.maps,
+                                 push=not args.no_push)
             meta["traces"] = trace_results
     meta["finished"] = datetime.datetime.now(datetime.timezone.utc).isoformat()
     write_results(out, results, meta)
