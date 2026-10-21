@@ -91,7 +91,7 @@ def test_markdown_labels_targets():
               "valid": True, "analysis": bench.analyze("opening", frame_log(
                   [(16.7 * (i + 1), 16.7, 9.0, 32, 0) for i in range(100)], [(0.0, 0, "map-open", "a10.map")]))}
     table = bench.markdown([result])
-    assert "| tvOS simulator | opening | 2160 | cold | 1 |" in table
+    assert "| tvOS simulator | a10 cutscene (partial) | 2160 | cold | 1 |" in table
     assert "A12" not in table
 
 

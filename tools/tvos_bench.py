@@ -2,8 +2,8 @@
 """Fixed-scene frame-time benchmark of the TV game (port/tvos/PERFORMANCE.md).
 
     export DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer
-    # the bridge scene's saved game state, made once on the Mac build (same guest as the TV's):
-    python3 tools/tvos_bench.py make-core --maps DIR
+    # the saved game states, made once on the Mac build (same guest as the TV's):
+    python3 tools/tvos_bench.py make-core --maps DIR [--scene b30]
     # runs (each target takes the heavy-job lock for its whole session; --no-lock if held):
     python3 tools/tvos_bench.py run --target simulator --maps DIR --out OUT
     python3 tools/tvos_bench.py run --target device --out OUT          # the Apple TV: ask its owner first
@@ -12,9 +12,10 @@
     python3 tools/tvos_bench.py analyze frame_log.csv --scene opening
     python3 tools/tvos_bench.py report OUT
 
-Scenes (both a10, no controller input: the most repeatable):
-- opening: a fresh launch into a10 (init.txt "map_name a10"), the opening
-  cinematic. Measured: the 30 s from the first frame of the first stretch of
+Scenes (no controller input: the most repeatable):
+- opening ("a10 cutscene (partial)"): a fresh launch into a10 (init.txt
+  "map_name a10"), the first part of the opening cinematic. NOT gameplay; kept
+  for comparison, no longer run by default. Measured: the 30 s from the first frame of the first stretch of
   >= 5 s in which every frame has >= 20 fog-plane draws (the fog sequence;
   found from the frame log's counts, not from times, so a slower load does
   not shift it; the moment of fog the first frames flash is skipped).
@@ -24,6 +25,14 @@ Scenes (both a10, no controller input: the most repeatable):
   out of the cryo tube and put at the scenario's cheat_bridge_flag). Measured:
   the 35 s from the second frame after the state is read (the frame that
   reads it is the load).
+- a10play ("a10 cryo bay"): a fresh launch into a10 left to run ~285 s: the
+  whole opening cinematic, then the cryo bay's first playable (tutorial)
+  section. Measured: 50 s from the first 5 s stretch of >= 40 fog-plane draws
+  a frame (only the cryo bay has that many; the cinematic has <= 32).
+- b30 ("b30 beach"): a launch that loads a saved state on The Silent
+  Cartographer's beach at the mission's start (made 55 s into a fresh b30
+  launch: the insertion cinematic over, the marines' firefight on). Measured:
+  60 s from the second frame after the state is read.
 
 Cold and warm. cold: the first launch with a new HALO_METAL_SHADER_SALT (a
 comment added to every Metal shader: nothing is found in the system's
@@ -62,7 +71,21 @@ SCENES = {
     "opening": {"init": ["map_name a10"], "seconds": 80, "window_seconds": 30.0},
     "bridge": {"init": ["map_name a10", f"core_load_name_at_startup {CORE_NAME}"], "seconds": 55,
                "window_seconds": 35.0},
+    # b30 (The Silent Cartographer): the beach at the mission's start (the
+    # Pelican has landed, the marines are out, the AI's firefight on the
+    # beach), a saved state made 55 s into a fresh b30 launch; no input. (A
+    # test_input bot was not repeatable: its motion is timed from the app's
+    # launch, so a slower load shifts it; with no input, draws per 10 s agree
+    # within about 5% between runs on the Mac.)
+    "b30": {"init": ["map_name b30", "core_load_name_at_startup tvbench_b30.bin"], "seconds": 80,
+            "window_seconds": 60.0, "core": "tvbench_b30.bin", "map": "b30.map",
+            "env": {}},
+    # a10 played from a fresh launch to the first playable section after the
+    # opening cinematic (the cryo bay's tutorial, ~215 s in), measured there
+    "a10play": {"init": ["map_name a10"], "seconds": 285, "window_seconds": 50.0},
 }
+SCENE_LABEL = {"opening": "a10 cutscene (partial)", "bridge": "a10 bridge (gameplay)",
+               "b30": "b30 beach (gameplay)", "a10play": "a10 cryo bay (first gameplay)"}
 FOG_START_DRAWS = 20
 FOG_SUSTAIN_SECONDS = 5.0
 SERIES = ("wall_ms", "gpu_ms", "guest_ms", "host_ms", "compile_ms", "wait_drawable_ms", "wait_inflight_ms",
@@ -119,14 +142,31 @@ def scene_window(scene, events, rows, window_seconds=None):
         if start is None:
             return [], "no frame with fog-plane draws (the opening's fog never appeared)"
         description = f"opening fog: {window_seconds:g} s from frame {rows[start]['serial']}"
-    elif scene == "bridge":
-        loaded = [e for e in events if e["kind"] == "core-open" and e["detail"] == CORE_NAME]
+    elif scene == "a10play":
+        # (the first stretch of 5 s whose frames all have >= 40 fog-plane
+        # draws: the cryo bay, after the cinematic; see PERFORMANCE.md)
+        start, run_start = None, None
+        for index, row in enumerate(rows):
+            if row.get("fog_draws", 0) < 40:
+                run_start = None
+                continue
+            if run_start is None:
+                run_start = index
+            if row["t_ms"] - rows[run_start]["t_ms"] >= 5000.0:
+                start = run_start
+                break
+        if start is None:
+            return [], "the cryo bay (>= 40 fog-plane draws) was never reached"
+        description = f"a10 cryo bay: {window_seconds:g} s from frame {rows[start]['serial']}"
+    elif scene in ("bridge", "b30"):
+        core = SCENES[scene].get("core", CORE_NAME)
+        loaded = [e for e in events if e["kind"] == "core-open" and e["detail"] == core]
         if not loaded:
-            return [], f"the saved state {CORE_NAME} was never read"
+            return [], f"the saved state {core} was never read"
         start = next((index for index, row in enumerate(rows) if row["serial"] >= loaded[0]["serial"] + 2), None)
         if start is None:
             return [], "no frames after the saved state was read"
-        description = f"bridge: {window_seconds:g} s from frame {rows[start]['serial']}"
+        description = f"{scene}: {window_seconds:g} s from frame {rows[start]['serial']}"
     else:
         raise ValueError(scene)
     begin = rows[start]["t_ms"]
@@ -215,7 +255,7 @@ def markdown(results):
         wall = (stats.get("series") or {}).get("wall_ms") or {}
         gpu = (stats.get("series") or {}).get("gpu_ms") or {}
         lines.append(
-            f"| {TARGET_LABEL.get(result['target'], result['target'])} | {result['scene']} | {result['resolution']} | "
+            f"| {TARGET_LABEL.get(result['target'], result['target'])} | {SCENE_LABEL.get(result['scene'], result['scene'])} | {result['resolution']} | "
             f"{result['mode']} | {result['repeat']} | {stats.get('frames', 0)} | {_fmt(wall.get('p50'))} | "
             f"{_fmt(wall.get('p95'))} | {_fmt(wall.get('p99'))} | {_fmt(wall.get('max'))} | "
             f"{wall.get('over_16.7', '—')} | {wall.get('over_33.3', '—')} | {wall.get('over_50', '—')} | "
@@ -232,7 +272,7 @@ def markdown(results):
         def mean(name):
             return _fmt((series.get(name) or {}).get("mean"), 2)
         lines.append(
-            f"| {TARGET_LABEL.get(result['target'], result['target'])} | {result['scene']} | {result['resolution']} | "
+            f"| {TARGET_LABEL.get(result['target'], result['target'])} | {SCENE_LABEL.get(result['scene'], result['scene'])} | {result['resolution']} | "
             f"{result['mode']} | {result['repeat']} | {mean('wall_ms')} | {mean('guest_ms')} | {mean('host_ms')} | "
             f"{mean('compile_ms')} | {mean('wait_drawable_ms')} | {mean('wait_inflight_ms')} | {mean('sleep_ms')} | "
             f"{mean('gpu_ms')} | {stats.get('mean_draws', '—')} | {stats.get('mean_fog_draws', '—')} | "
@@ -267,8 +307,14 @@ def run_environment(run, frame_log="1", extra=None):
     environment = {"HALO_FRAME_LOG": frame_log, "HALO_FRAME_LOG_INTERVAL": "0",
                    "HALO_RESOLUTION_SCALING": str(run["resolution"]), "HALO_METAL_SHADER_SALT": run["salt"],
                    "HALO_HIGH_RES_HUD": "true", "HALO_HIGH_RES_TEXT": "true"}
+    environment.update(SCENES.get(run["scene"], {}).get("env", {}))
     environment.update(extra or {})
     return environment
+
+
+def scene_core(scene):
+    """the saved state a scene loads, or None"""
+    return SCENES[scene].get("core", CORE_NAME) if any("core_load" in line for line in SCENES[scene]["init"]) else None
 
 
 def scene_data_root(scene, maps, core=None):
@@ -276,18 +322,19 @@ def scene_data_root(scene, maps, core=None):
     its init.txt, the saved state"""
     root = SCRATCH / "tvbench-data" / scene
     (root / "maps").mkdir(parents=True, exist_ok=True)
-    for name in ("ui.map", "a10.map"):
+    for name in ("ui.map", SCENES[scene].get("map", "a10.map")):
         link = root / "maps" / name
         if link.is_symlink() or link.exists():
             link.unlink()
         link.symlink_to(Path(maps).resolve() / name)
     (root / "init.txt").write_text("\r\n".join(SCENES[scene]["init"]) + "\r\n")
-    if scene == "bridge":
-        core = Path(core or SCRATCH / "tvbench" / CORE_NAME)
-        if not core.is_file():
-            raise deploy.DeployError(f"no saved state {core}: run tvos_bench.py make-core first")
+    core_name = scene_core(scene)
+    if core_name:
+        source = Path(core if core and scene == "bridge" else SCRATCH / "tvbench" / core_name)
+        if not source.is_file():
+            raise deploy.DeployError(f"no saved state {source}: run tvos_bench.py make-core first")
         (root / "core").mkdir(exist_ok=True)
-        shutil.copyfile(core, root / "core" / CORE_NAME)
+        shutil.copyfile(source, root / "core" / core_name)
     return root
 
 
@@ -419,9 +466,9 @@ def run_device(runs, out, extra_env, device, core=None, traces=(), trace_results
     print(f"backed up the TV's config.toml and init.txt: {config_backup}, {init_backup}", flush=True)
     results = []
     try:
-        if any(run["scene"] == "bridge" for run in runs):
-            core = Path(core or SCRATCH / "tvbench" / CORE_NAME)
-            deploy.run(deploy.copy_args("to", device, core, f"{container}/core/{CORE_NAME}"), timeout=300)
+        for core_name in sorted({scene_core(run["scene"]) for run in runs} - {None}):
+            source = Path(core if core and core_name == CORE_NAME else SCRATCH / "tvbench" / core_name)
+            deploy.run(deploy.copy_args("to", device, source, f"{container}/core/{core_name}"), timeout=300)
         current_init = None
         for index, run in enumerate(runs):
             name = f"{index:02d}-{run['scene']}-{run['resolution']}-{run['mode']}-{run['repeat']}"
@@ -487,6 +534,51 @@ def run_device(runs, out, extra_env, device, core=None, traces=(), trace_results
     return results
 
 
+def make_b30_core(maps, out_core):
+    """b30's saved state: a fresh b30 launch, saved 55 s in (the insertion
+    cinematic is over at about 45 s; global_mission_start is then true)"""
+    import socket
+    root = SCRATCH / "tvbench-data" / "make-core-b30"
+    (root / "maps").mkdir(parents=True, exist_ok=True)
+    for name in ("ui.map", "b30.map"):
+        link = root / "maps" / name
+        if not link.exists():
+            link.symlink_to(Path(maps).resolve() / name)
+    (root / "init.txt").write_text("map_name b30\r\n")
+    shutil.rmtree(root / "core", ignore_errors=True)
+    app = ROOT / "build/macos/OpenCE.app/Contents/MacOS/OpenCE"
+    environment = dict(os.environ, HALO_DATA_ROOT=str(root), HALO_SAVE_ROOT=str(root / "save"), HALO_HIDDEN_WINDOW="1",
+                       HALO_EXIT_AFTER="70", HALO_TELNET_CONSOLE="1", HALO_RESOLUTION_SCALING="480")
+    process = subprocess.Popen([str(app)], env=environment, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    started, connection, replies = time.monotonic(), None, ""
+    try:
+        for at, command in ((54, "global_mission_start"), (56, "(core_save_name tvbench_b30.bin)")):
+            while time.monotonic() - started < at:
+                time.sleep(0.1)
+            while connection is None:
+                try:
+                    connection = socket.create_connection(("127.0.0.1", 2323), timeout=2)
+                except OSError:
+                    time.sleep(0.25)
+            connection.sendall((command + "\r\n").encode("ascii"))
+            time.sleep(1.0)
+            connection.settimeout(1.0)
+            try:
+                replies += connection.recv(65536).decode("latin-1", "replace")
+            except socket.timeout:
+                pass
+        process.wait(timeout=120)
+    finally:
+        if process.poll() is None:
+            process.kill()
+    saved = root / "core" / "tvbench_b30.bin"
+    if not saved.is_file() or "saved 'tvbench_b30.bin'" not in replies or "true" not in replies:
+        raise deploy.DeployError(f"b30's state was not saved after the mission started: {replies[-500:]}")
+    Path(out_core).parent.mkdir(parents=True, exist_ok=True)
+    shutil.copyfile(saved, out_core)
+    print(f"saved b30's state: {out_core}")
+
+
 def make_core(maps, out_core):
     """the bridge scene's saved state, made with the Mac build (whose guest
     is the TV build's): a10's opening to its end, then the console puts the
@@ -544,7 +636,7 @@ def main(argv=None):
     sub = parser.add_subparsers(dest="command", required=True)
     p = sub.add_parser("run")
     p.add_argument("--target", choices=("mac", "simulator", "device"), required=True)
-    p.add_argument("--scenes", default="opening,bridge")
+    p.add_argument("--scenes", default="bridge,b30", help=f"of {', '.join(SCENES)}")
     p.add_argument("--resolutions", default="1080,2160")
     p.add_argument("--modes", default="cold,warm")
     p.add_argument("--repeats", type=int, default=2)
@@ -566,7 +658,8 @@ def main(argv=None):
     p.add_argument("out")
     p = sub.add_parser("make-core")
     p.add_argument("--maps", required=True)
-    p.add_argument("--out", default=SCRATCH / "tvbench" / CORE_NAME)
+    p.add_argument("--scene", choices=("bridge", "b30"), default="bridge")
+    p.add_argument("--out")
     args = parser.parse_args(argv)
 
     if args.command == "analyze":
@@ -577,7 +670,10 @@ def main(argv=None):
         print(markdown(data["results"]))
         return 0
     if args.command == "make-core":
-        make_core(args.maps, args.out)
+        if args.scene == "b30":
+            make_b30_core(args.maps, args.out or SCRATCH / "tvbench" / "tvbench_b30.bin")
+        else:
+            make_core(args.maps, args.out or SCRATCH / "tvbench" / CORE_NAME)
         return 0
 
     out = Path(args.out)
