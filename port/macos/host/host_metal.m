@@ -79,6 +79,9 @@ struct handle
 	/* the command buffer (park.generation) that last read it and wrote it:
 	whether a pass can be hoisted past what it has encoded (below) */
 	uint32_t commands_read, commands_written;
+	/* (HALO_METAL_DEPTH_DISCARD) a depth target whose last pass did not
+	store it */
+	int discarded;
 };
 
 static struct handle handles[HANDLE_COUNT];
@@ -357,6 +360,21 @@ static struct
 
 static id<MTLRenderCommandEncoder> encoder;
 static uint64_t encoder_serial, encoder_serials;
+
+/* HALO_METAL_DEPTH_DISCARD=present (experimental, off by default): the
+depth and stencil of the pass that ends at the present not stored (store
+actions decided at the pass's end). Correct only if every frame's first use
+of the depth target clears it, which the game's 3D windows do
+(rasterizer_window_begin) but nothing guarantees; a load of a depth target
+so discarded is counted and logged (depth_discard.misses), and turns it off */
+static struct
+{
+	int enabled, broken;
+	/* =toggle:N (diagnostic): on and off every N frames */
+	uint32_t toggle;
+	uint32_t depth;
+	uint64_t passes, misses;
+} depth_discard;
 
 /* ---------- the pass log (HALO_PASS_LOG, host_frame_log.h): diagnostic
 
@@ -650,6 +668,7 @@ static struct
 	uint32_t generation;
 	uint64_t encoder_serial;
 	struct host_pass_record *record;
+	uint32_t discard_depth;
 	__typeof__(pass) main_pass;
 	__typeof__(bound) main_bound;
 	/* renamed textures, free again once their frame is done */
@@ -677,6 +696,18 @@ static void encoder_end(void)
 {
 	if (encoder)
 	{
+		if (depth_discard.enabled && depth_discard.depth)
+		{
+			MTLStoreAction store = pass_log.end_reason == _pass_end_present ? MTLStoreActionDontCare :
+				MTLStoreActionStore;
+
+			[encoder setDepthStoreAction:store];
+			[encoder setStencilStoreAction:store];
+			handles[depth_discard.depth].discarded = store == MTLStoreActionDontCare;
+			depth_discard.passes += store == MTLStoreActionDontCare;
+			if (pass_log.record)
+				pass_log.record->depth_store = pass_log.record->stencil_store = (uint8_t)store;
+		}
 		pass_log_end();
 		[encoder endEncoding];
 		encoder = nil;
@@ -719,6 +750,15 @@ static void park_initialize(void)
 {
 	const char *setting = getenv("HALO_METAL_HOIST");
 
+	setting = getenv("HALO_METAL_DEPTH_DISCARD");
+	depth_discard.enabled = setting && !strcmp(setting, "present");
+	if (setting && !strncmp(setting, "toggle:", 7) && atoi(setting + 7) > 0)
+		depth_discard.toggle = (uint32_t)atoi(setting + 7);
+	setting = getenv("HALO_METAL_HOIST");
+	if (depth_discard.enabled || depth_discard.toggle)
+		host_log("Metal: HALO_METAL_DEPTH_DISCARD=present (experimental): the depth and stencil of the frame's last "
+			"pass are not stored");
+
 	park.enabled = !(setting && !strcmp(setting, "0")) && pass_log.timing != 2;
 	if (setting && !strncmp(setting, "toggle:", 7) && atoi(setting + 7) > 0)
 	{
@@ -742,6 +782,8 @@ buffer of its own */
 static void park_begin(void)
 {
 	park.encoder = encoder;
+	park.discard_depth = depth_discard.depth;
+	depth_discard.depth = 0;
 	park.main_pass = pass;
 	park.main_bound = bound;
 	park.record = pass_log.record;
@@ -778,6 +820,7 @@ static void park_resume(void)
 	park_commit_hoisted();
 	encoder = park.encoder;
 	park.encoder = nil;
+	depth_discard.depth = park.discard_depth;
 	pass = park.main_pass;
 	bound = park.main_bound;
 	pass_log.record = park.record;
@@ -796,6 +839,7 @@ static void park_end(void)
 	park_commit_hoisted();
 	encoder = park.encoder;
 	park.encoder = nil;
+	depth_discard.depth = park.discard_depth;
 	pass_log.record = park.record;
 	encoder_serial = park.encoder_serial;
 	pass_log.end_reason = _pass_end_unpark;
@@ -995,15 +1039,29 @@ static BOOL encoder_begin(void)
 	descriptor.colorAttachments[0].clearColor = pass.clear_color;
 	if (depth)
 	{
+		/* (HALO_METAL_DEPTH_DISCARD: a load of what was not stored) */
+		if (handles[pass.depth].discarded)
+		{
+			handles[pass.depth].discarded = 0;
+			if (pass.depth_load == MTLLoadActionLoad || pass.stencil_load == MTLLoadActionLoad)
+			{
+				if (depth_discard.misses++ < 10)
+					host_log("Metal: HALO_METAL_DEPTH_DISCARD: depth target %u loaded after a discard (frame %llu); "
+						"turned off", pass.depth, (unsigned long long)frame_serial);
+				depth_discard.enabled = 0;
+				depth_discard.broken = 1;
+			}
+		}
 		descriptor.depthAttachment.texture = depth;
 		descriptor.depthAttachment.loadAction = pass.depth_load;
-		descriptor.depthAttachment.storeAction = MTLStoreActionStore;
+		descriptor.depthAttachment.storeAction = depth_discard.enabled ? MTLStoreActionUnknown : MTLStoreActionStore;
 		descriptor.depthAttachment.clearDepth = pass.clear_depth;
 		descriptor.stencilAttachment.texture = depth;
 		descriptor.stencilAttachment.loadAction = pass.stencil_load;
-		descriptor.stencilAttachment.storeAction = MTLStoreActionStore;
+		descriptor.stencilAttachment.storeAction = depth_discard.enabled ? MTLStoreActionUnknown : MTLStoreActionStore;
 		descriptor.stencilAttachment.clearStencil = pass.clear_stencil;
 	}
+	depth_discard.depth = depth && depth_discard.enabled ? pass.depth : 0;
 	descriptor.renderTargetWidth = pass.width;
 	descriptor.renderTargetHeight = pass.height;
 	descriptor.visibilityResultBuffer = frame_current()->visibility;
@@ -3145,8 +3203,13 @@ void host_metal_present(void)
 		[commands commit];
 		commands = nil;
 		frame_serial++;
+		if ((depth_discard.enabled || depth_discard.toggle) && frame_serial % 3600 == 0)
+			host_log("Metal: HALO_METAL_DEPTH_DISCARD: %llu passes' depth not stored, %llu loads after a discard",
+				(unsigned long long)depth_discard.passes, (unsigned long long)depth_discard.misses);
 		if (park.toggle && pass_log.timing != 2)
 			park.enabled = (frame_serial / park.toggle) % 2 == 0;
+		if (depth_discard.toggle && !depth_discard.broken)
+			depth_discard.enabled = (frame_serial / depth_discard.toggle) % 2 == 0;
 		/* (the record's own: the present's host time, up to here, is the
 		frame's; the rest goes to the next) */
 		if (host_frame_log_level)

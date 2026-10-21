@@ -69,6 +69,17 @@ def test_hoisting_unparks_before_everything_that_must_follow_the_screen():
     assert 'getenv("HALO_METAL_HOIST")' in metal
 
 
+def test_depth_discard_is_opt_in_and_watched():
+    metal = (ROOT / "port/macos/host/host_metal.m").read_text()
+    # off unless HALO_METAL_DEPTH_DISCARD=present (or the diagnostic toggle)
+    assert 'depth_discard.enabled = setting && !strcmp(setting, "present");' in metal
+    # only the pass that ends at the present loses its depth and stencil
+    assert ("pass_log.end_reason == _pass_end_present ? MTLStoreActionDontCare :\n\t\t\t\tMTLStoreActionStore;"
+            in metal)
+    # a later load of a discarded depth target is caught, logged, and turns it off for good
+    assert "loaded after a discard" in metal and "depth_discard.broken = 1;" in metal
+
+
 def test_pass_log_is_opt_in_and_does_not_wait():
     metal = (ROOT / "port/macos/host/host_metal.m").read_text()
     frame_log = (ROOT / "port/macos/host/host_frame_log.c").read_text()
