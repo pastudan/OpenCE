@@ -28,6 +28,7 @@ typedef unsigned int guest_address;
 #define METAL_FORMAT_BC1 130
 #define METAL_FORMAT_BC2 132
 #define METAL_FORMAT_BC3 134
+#define METAL_FORMAT_ASTC_4X4 204
 
 #define METAL_VERTEX_FORMAT_INVALID 0
 #define METAL_VERTEX_FORMAT_FLOAT 28
@@ -130,6 +131,23 @@ enum
 	_metal_texture_2d,
 	_metal_texture_cube,
 	_metal_texture_3d,
+};
+
+/* the blocks of a DXT texture (host_metal_texture_bc) */
+enum
+{
+	_metal_bc1,
+	_metal_bc2,
+	_metal_bc3,
+};
+
+/* what a GPU without BC formats converts them into */
+enum
+{
+	/* the texels the guest's decoding gives */
+	_metal_bc_exact,
+	/* ASTC 4x4: a quarter of the bytes, not always the same texels */
+	_metal_bc_astc,
 };
 
 enum

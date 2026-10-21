@@ -40,6 +40,7 @@ indices keeps its latest count (host_metal_visibility_result).
 
 #include "host.h"
 #include "host_frame_log.h"
+#include "host_textures.h"
 #include "metal_protocol.h"
 
 SDL_Window *host_sdl_window(unsigned int window);
@@ -714,9 +715,204 @@ void host_metal_screen_effect(int type, int passes, float radius, int video)
 
 /* ---------- textures */
 
+/* (HALO_METAL_NO_BC=1: as a GPU without BC formats, the Apple TV's, would:
+the conversions on a Mac, to compare with its own BC) */
 int host_metal_supports_bc(void)
 {
-	return metal.device && metal.device.supportsBCTextureCompression ? 1 : 0;
+	static int no_bc = -1;
+
+	if (no_bc < 0)
+		no_bc = getenv("HALO_METAL_NO_BC") && atoi(getenv("HALO_METAL_NO_BC")) != 0;
+	return metal.device && metal.device.supportsBCTextureCompression && !no_bc ? 1 : 0;
+}
+
+/* ---------- textures: their memory, and DXT on a GPU without BC formats */
+
+/* each sampled texture's bytes (allocatedSize), and whether it was of DXT
+blocks converted here; the sums, and their most */
+static uint32_t texture_bytes[HANDLE_COUNT];
+static uint8_t texture_converted[HANDLE_COUNT];
+static uint64_t textures_total, textures_converted_total, textures_most;
+/* the conversions: how many, their blocks' bytes and the time */
+static uint64_t conversions, conversion_source_bytes, conversion_ns;
+/* a texture defined next is the GPU's alone (host_metal_texture_bc) */
+static int define_private;
+
+static void textures_report(void);
+
+static void texture_account(uint32_t handle, id<MTLTexture> texture, int converted)
+{
+	static int reported;
+
+	/* (the totals in the log at exit, with the frame log: HALO_FRAME_LOG) */
+	if (!reported && host_frame_log_level)
+	{
+		reported = 1;
+		atexit(textures_report);
+	}
+	textures_total -= texture_bytes[handle];
+	if (texture_converted[handle])
+		textures_converted_total -= texture_bytes[handle];
+	texture_bytes[handle] = texture ? (uint32_t)texture.allocatedSize : 0;
+	texture_converted[handle] = (uint8_t)(texture && converted);
+	textures_total += texture_bytes[handle];
+	if (texture_converted[handle])
+		textures_converted_total += texture_bytes[handle];
+	if (textures_total > textures_most)
+		textures_most = textures_total;
+	if (host_frame_log_level && texture && converted && conversions % 256 == 255)
+		textures_report();
+}
+
+static void textures_report(void)
+{
+	host_log("textures: %.1f MiB sampled (%.1f MiB of them DXT converted), at most %.1f MiB; %llu DXT textures "
+		"converted (%.1f MiB of blocks) in %.1f ms; the device's allocations %.1f MiB",
+		textures_total / 1048576.0, textures_converted_total / 1048576.0, textures_most / 1048576.0,
+		(unsigned long long)conversions, conversion_source_bytes / 1048576.0, conversion_ns / 1e6,
+		metal.device ? metal.device.currentAllocatedSize / 1048576.0 : 0.0);
+}
+
+/* (rows of blocks a conversion splits between threads, at most) */
+#define CONVERSION_ROWS 16
+
+void host_metal_texture_define(unsigned int handle, int type, unsigned int format, unsigned int width,
+	unsigned int height, unsigned int depth, unsigned int levels, int usage, unsigned int swizzle);
+
+void host_metal_texture_bc(unsigned int handle, int type, int kind, int into, unsigned int width,
+	unsigned int height, unsigned int depth, unsigned int levels, unsigned int swizzle, const void *data,
+	unsigned int face_bytes)
+{
+	HOST_FRAME_LOG_SCOPE;
+	static int shared = -1;
+	uint64_t started = host_frame_log_now();
+	unsigned int faces = type == _metal_texture_cube ? 6 : 1, block_bytes = host_textures_bc_block_bytes(kind);
+	unsigned int face, level, level_count;
+	id<MTLTexture> texture;
+
+	if (!metal.device || !data || !width || !height)
+		return;
+	if (shared < 0)
+	{
+		/* (HALO_METAL_TEXTURE_SHARED=1: the converted textures in memory the
+		CPU writes, as the guest's are, rather than the GPU's own, which it
+		may compress) */
+		shared = getenv("HALO_METAL_TEXTURE_SHARED") && atoi(getenv("HALO_METAL_TEXTURE_SHARED")) != 0;
+	}
+	/* (ASTC for 2D and cube textures, where the GPU has it) */
+	if (into == _metal_bc_astc && (type == _metal_texture_3d || ![metal.device supportsFamily:MTLGPUFamilyApple2]))
+		into = _metal_bc_exact;
+	if (type != _metal_texture_3d)
+		depth = 1;
+	define_private = !shared;
+	host_metal_texture_define(handle, type, into == _metal_bc_astc ? METAL_FORMAT_ASTC_4X4 : METAL_FORMAT_BGRA8,
+		width, height, depth, levels, _metal_usage_sampled, swizzle);
+	define_private = 0;
+	texture = texture_object(handle);
+	if (!texture)
+		return;
+	handles[handle].private_storage = !shared;
+	level_count = (unsigned int)texture.mipmapLevelCount;
+	@autoreleasepool
+	{
+		/* each face's and level's converted texels, one after another
+		(256-byte aligned) in a buffer the GPU copies from */
+		NSUInteger total = 0;
+		id<MTLBuffer> staging;
+		unsigned char *out;
+		id<MTLCommandBuffer> uploads = nil;
+		id<MTLBlitCommandEncoder> blit = nil;
+
+		for (face = 0; face < faces; face++)
+		{
+			for (level = 0; level < level_count; level++)
+			{
+				unsigned int w = width >> level ? width >> level : 1, h = height >> level ? height >> level : 1;
+				unsigned int d = depth >> level ? depth >> level : 1;
+
+				total += (into == _metal_bc_astc ? (NSUInteger)((w + 3) / 4) * ((h + 3) / 4) * 16 :
+					(NSUInteger)w * h * 4) * d;
+				total = (total + 255) & ~(NSUInteger)255;
+			}
+		}
+		staging = [metal.device newBufferWithLength:total options:MTLResourceStorageModeShared];
+		if (!staging)
+		{
+			host_log("Metal: no memory to convert a %ux%u DXT texture", width, height);
+			return;
+		}
+		out = staging.contents;
+		if (!shared)
+		{
+			uploads = [metal.queue commandBuffer];
+			uploads.label = @"texture uploads";
+			blit = [uploads blitCommandEncoder];
+		}
+		total = 0;
+		for (face = 0; face < faces; face++)
+		{
+			const unsigned char *source = (const unsigned char *)data + (NSUInteger)face * face_bytes;
+
+			for (level = 0; level < level_count; level++)
+			{
+				unsigned int w = width >> level ? width >> level : 1, h = height >> level ? height >> level : 1;
+				unsigned int d = depth >> level ? depth >> level : 1;
+				unsigned int blocks_x = (w + 3) / 4, blocks_y = (h + 3) / 4;
+				unsigned int source_row = blocks_x * block_bytes, source_image = source_row * blocks_y;
+				unsigned int row = into == _metal_bc_astc ? blocks_x * 16 : w * 4;
+				unsigned int image = into == _metal_bc_astc ? row * blocks_y : row * h;
+				unsigned char *level_out = out + total;
+				/* (large levels split by rows of blocks between threads) */
+				size_t chunks = d == 1 && blocks_x * blocks_y >= 4096 ? (blocks_y + CONVERSION_ROWS - 1) / CONVERSION_ROWS : 1;
+
+				dispatch_apply(chunks, dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^(size_t chunk)
+				{
+					unsigned int first = chunks > 1 ? (unsigned int)chunk * CONVERSION_ROWS : 0;
+					unsigned int rows = chunks > 1 ? (first + CONVERSION_ROWS > blocks_y ? blocks_y - first : CONVERSION_ROWS) :
+						blocks_y;
+
+					if (into == _metal_bc_astc)
+					{
+						host_textures_bc_to_astc(kind, source + (NSUInteger)first * source_row, source_row, source_image,
+							blocks_x, rows, d, level_out + (NSUInteger)first * row, NULL);
+					}
+					else
+					{
+						unsigned int texel_rows = chunks > 1 ? (first * 4 + rows * 4 > h ? h - first * 4 : rows * 4) : h;
+
+						host_textures_bc_to_bgra(kind, source + (NSUInteger)first * source_row, source_row, source_image,
+							w, texel_rows, d, (uint32_t *)(level_out + (NSUInteger)first * 4 * row));
+					}
+				});
+				if (blit)
+				{
+					[blit copyFromBuffer:staging sourceOffset:total sourceBytesPerRow:row
+						sourceBytesPerImage:type == _metal_texture_3d ? image : 0 sourceSize:MTLSizeMake(w, h, d)
+						toTexture:texture destinationSlice:face destinationLevel:level destinationOrigin:MTLOriginMake(0, 0, 0)];
+				}
+				else
+				{
+					/* (written now, as host_metal_texture_upload writes: the
+					texture is new, no frame reads it) */
+					[texture replaceRegion:MTLRegionMake3D(0, 0, 0, w, h, d) mipmapLevel:level slice:face
+						withBytes:level_out bytesPerRow:row bytesPerImage:type == _metal_texture_3d ? image : 0];
+				}
+				source += (NSUInteger)source_image * d;
+				total = (total + (NSUInteger)image * d + 255) & ~(NSUInteger)255;
+			}
+		}
+		if (blit)
+		{
+			/* (a command buffer of its own, committed now: before the frame's,
+			which draws with the texture, is) */
+			[blit endEncoding];
+			[uploads commit];
+		}
+	}
+	texture_account(handle, texture, 1);
+	conversions++;
+	conversion_source_bytes += (uint64_t)face_bytes * faces;
+	conversion_ns += host_frame_log_now() - started;
 }
 
 unsigned int host_metal_texture_new(void)
@@ -763,7 +959,7 @@ void host_metal_texture_define(unsigned int handle, int type, unsigned int forma
 		if (usage == _metal_usage_sampled)
 		{
 			descriptor.usage = MTLTextureUsageShaderRead;
-			descriptor.storageMode = MTLStorageModeShared;
+			descriptor.storageMode = define_private ? MTLStorageModePrivate : MTLStorageModeShared;
 			descriptor.swizzle = MTLTextureSwizzleChannelsMake((MTLTextureSwizzle)(swizzle & 0xff),
 				(MTLTextureSwizzle)((swizzle >> 8) & 0xff), (MTLTextureSwizzle)((swizzle >> 16) & 0xff),
 				(MTLTextureSwizzle)((swizzle >> 24) & 0xff));
@@ -786,6 +982,7 @@ void host_metal_texture_define(unsigned int handle, int type, unsigned int forma
 		handles[handle].private_storage = usage != _metal_usage_sampled;
 		handles[handle].fresh = usage != _metal_usage_sampled;
 		handles[handle].used_serial = 0;
+		texture_account(handle, usage == _metal_usage_sampled ? texture : nil, 0);
 	}
 }
 
@@ -846,6 +1043,7 @@ void host_metal_texture_delete(unsigned int handle)
 				pass.depth = 0;
 			pass.color_load = pass.depth_load = pass.stencil_load = MTLLoadActionLoad;
 		}
+		texture_account(handle, nil, 0);
 		handle_set(handle, nil);
 		handles[handle].type = _handle_free;
 	}

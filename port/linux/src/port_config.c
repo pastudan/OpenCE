@@ -159,6 +159,14 @@ static const struct config_setting config_settings[] =
 		_platform_all,
 		"The size the objects' shadows are drawn at, in pixels each way: 128 as\n"
 		"on the Xbox, or 256, 512 or 1024 for smoother edges, as soft." },
+	{ "display.texture_format", _config_string, "\"exact\"", "HALO_TEXTURE_FORMAT", _environment_value,
+		_platform_desktop,
+		"Metal builds whose GPU cannot sample the maps' DXT textures (the Apple TV;\n"
+		"not a Mac, which draws them as they are): \"exact\"\n"
+		"converts them to 32-bit colour, as they look on the Xbox; \"astc\" to\n"
+		"ASTC, a quarter of the memory, with some texels a little off (a\n"
+		"transparent edge's colours, an alpha's steps). \"guest\" decodes them in\n"
+		"the game as before (for comparisons)." },
 	{ "display.menus", _config_string, "\"pc\"", "HALO_MENUS", _environment_value, _platform_all,
 		"The menus: \"pc\" for the PC version's main menu (port/assets/menus,\n"
 		"and a menus folder here for your own), \"xbox\" for the Xbox's." },
