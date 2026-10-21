@@ -153,8 +153,17 @@ source.
   transfer in the simulator. It reports no BC compression support and a
   256 MiB maximum Metal buffer. Those are simulator results, not physical
   Apple TV capabilities or gameplay measurements.
-- Local device probe compilation also passes. Development provisioning,
-  physical TV runtime checks and gameplay validation are still pending.
+- Development signing/provisioning and installation succeeded on an Apple TV
+  4K (2nd generation), tvOS 27.0. Its A12 GPU passes buffer work; atomic
+  wait/wake and the verified TCP fixture pass. BC compression is unavailable;
+  max Metal buffer is 1536 MiB. The Mac's 8 GiB guard reservation fails with
+  ENOMEM, but the TV target's explicit-bounds 2.5 GiB reservation and Xbox
+  offset page test pass. This does not measure peak resident memory.
+- The signed game menu and a10 rendered on that physical TV, with timed
+  exit code 0 and no skipped shaders after warm-up. Only the owner's ui.map
+  and a10.map were copied into the app cache for this development test.
+  Controller mapping, visual correctness, the full campaign and extended
+  memory/stability checks remain unverified.
 
 ## Remaining gates
 
@@ -167,7 +176,8 @@ source.
   has synthetic bounds/name/cycle/header tests, but is not wired into the
   existing importer yet), HTTP range and verified-piece adapters, import UI,
   cancellation, resume and cache/save recovery.
-- Development signing and physical Apple TV gameplay tests.
+- Repeatable development-signing/install tooling, controller/visual checks,
+  extended physical-TV gameplay and memory validation.
 
 The macOS branch and its notarization work remain independent. No store
 submission or upstream pull request is performed by this feasibility work.

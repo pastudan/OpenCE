@@ -53,24 +53,34 @@ static NSString *probe(BOOL *passed)
             device.supportsBCTextureCompression ? @"yes" : @"decode fallback required",
             (unsigned long long)(device.maxBufferLength / (1024 * 1024))];
     }
-    // Same reservation size as wasm2c uses on the Mac. Do not interpret
-    // this as a physical-memory stress test or install a signal handler.
+    // The Mac's 8 GiB guard reservation is optional on TV: the game target
+    // uses explicit bounds checks and reserves only its 2.5 GiB guest size.
+    // Neither test measures peak physical memory or installs a fault handler.
     stage("virtual address reservation");
-    size_t reserved = (size_t)8 * 1024 * 1024 * 1024;
+    size_t guard_size = (size_t)8 * 1024 * 1024 * 1024;
+    void *guard = mmap(NULL, guard_size, PROT_NONE, MAP_PRIVATE | MAP_ANON, -1, 0);
+    if (guard == MAP_FAILED) {
+        [report appendFormat:@"Mac guard reservation: unavailable (%d); explicit bounds required\n", errno];
+    } else {
+        [report appendString:@"Mac guard reservation: available (not used by TV target)\n"];
+        munmap(guard, guard_size);
+    }
+    size_t reserved = 0xA0000000ull;
     void *memory = mmap(NULL, reserved, PROT_NONE, MAP_PRIVATE | MAP_ANON, -1, 0);
     if (memory == MAP_FAILED) {
-        [report appendFormat:@"8 GiB address reservation: FAILED (%d)\n", errno];
+        [report appendFormat:@"2.5 GiB guest reservation: FAILED (%d)\n", errno];
     } else {
-        size_t page = (size_t)sysconf(_SC_PAGESIZE);
-        int result = mprotect((char *)memory + 0x80000000ull, page, PROT_READ | PROT_WRITE);
+        // Match wasm2c's commitment, then touch just one Xbox-window page.
+        int result = mprotect(memory, reserved, PROT_READ | PROT_WRITE);
         if (!result) *((volatile unsigned char *)memory + 0x80000000ull) = 0x42;
-        [report appendFormat:@"8 GiB reservation / Xbox offset page: %@\n", result ? @"FAILED" : @"passed"];
+        [report appendFormat:@"2.5 GiB guest / Xbox offset page: %@\n", result ? @"FAILED" : @"passed"];
         munmap(memory, reserved);
     }
     stage("atomic wait/wake");
     pthread_t thread;
     atomic_store(&wait_word, 0);
     if (pthread_create(&thread, NULL, wake_thread, NULL) == 0) {
+        errno = 0;
         int status = os_sync_wait_on_address_with_timeout(&wait_word, 0, 4, OS_SYNC_WAIT_ON_ADDRESS_NONE,
             OS_CLOCK_MACH_ABSOLUTE_TIME, 1000000000ull);
         int saved_error = errno;
