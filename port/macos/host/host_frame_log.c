@@ -215,12 +215,126 @@ static void summarize(void)
 	free(gpu);
 }
 
+/* ---------- the pass log (HALO_PASS_LOG, host_frame_log.h) */
+
+int host_pass_log_enabled;
+static struct host_pass_record *pass_records;
+static uint32_t pass_capacity;
+static uint64_t pass_count;
+static char pass_path[1024];
+static _Atomic uint64_t gpu_clock_first_ns, gpu_clock_first_ticks, gpu_clock_last_ns, gpu_clock_last_ticks;
+
+struct host_pass_record *host_frame_log_pass_new(uint64_t serial, uint32_t index)
+{
+	struct host_pass_record *record;
+
+	if (!host_pass_log_enabled || !pass_records)
+		return NULL;
+	record = &pass_records[pass_count++ % pass_capacity];
+	atomic_store(&record->serial, 0);
+	memset((char *)record + sizeof(record->serial), 0, sizeof(*record) - sizeof(record->serial));
+	record->index = index;
+	record->first_phase = record->last_phase = -1;
+	atomic_store(&record->serial, serial);
+	return record;
+}
+
+void host_frame_log_gpu_clock(uint64_t now_ns, uint64_t gpu_ticks)
+{
+	if (!gpu_ticks)
+		return;
+	if (!atomic_load(&gpu_clock_first_ticks))
+	{
+		atomic_store(&gpu_clock_first_ns, now_ns);
+		atomic_store(&gpu_clock_first_ticks, gpu_ticks);
+	}
+	atomic_store(&gpu_clock_last_ns, now_ns);
+	atomic_store(&gpu_clock_last_ticks, gpu_ticks);
+}
+
+static void write_pass_csv(void)
+{
+	FILE *file;
+	uint64_t index, first = pass_count > pass_capacity ? pass_count - pass_capacity : 0;
+	uint64_t first_ns = atomic_load(&gpu_clock_first_ns), first_ticks = atomic_load(&gpu_clock_first_ticks);
+	uint64_t last_ns = atomic_load(&gpu_clock_last_ns), last_ticks = atomic_load(&gpu_clock_last_ticks);
+	/* (ns a counter tick: from the first and latest pairs, else 1) */
+	double ratio = last_ticks > first_ticks + 1000 ? (double)(last_ns - first_ns) / (double)(last_ticks - first_ticks) :
+		1.0;
+
+	if (!pass_path[0] || !pass_records)
+		return;
+	file = fopen(pass_path, "w");
+	if (!file)
+	{
+		host_log("pass log: cannot write %s", pass_path);
+		return;
+	}
+	fprintf(file, "# OpenCE pass log, %llu passes, gpu tick %.6f ns\n", (unsigned long long)pass_count, ratio);
+	fprintf(file, "serial,index,color,depth,width,height,color_format,depth_format,color_load,depth_load,stencil_load,"
+		"color_store,depth_store,stencil_store,reason,draws,clears,fog_draws,transparent_draws,target_samples,"
+		"first_phase,last_phase,phase_mask,gpu_ms,vertex_start_ms,vertex_ms,fragment_start_ms,fragment_ms\n");
+	for (index = first; index < pass_count; index++)
+	{
+		struct host_pass_record *record = &pass_records[index % pass_capacity];
+		uint64_t serial = atomic_load(&record->serial);
+		uint64_t gpu_start = atomic_load(&record->gpu_start_ns), gpu_end = atomic_load(&record->gpu_end_ns);
+		uint64_t vertex_start = atomic_load(&record->vertex_start), vertex_end = atomic_load(&record->vertex_end);
+		uint64_t fragment_start = atomic_load(&record->fragment_start);
+		uint64_t fragment_end = atomic_load(&record->fragment_end);
+		/* (a stage's times: both valid, in order) */
+		int vertex = vertex_start && vertex_end >= vertex_start && vertex_end != ~0ull;
+		int fragment = fragment_start && fragment_end >= fragment_start && fragment_end != ~0ull;
+
+		if (!serial)
+			continue;
+		fprintf(file, "%llu,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%d,%d,%u,%.4f,%.4f,%.4f,%.4f,%.4f\n",
+			(unsigned long long)serial, record->index, record->color, record->depth, record->width, record->height,
+			record->color_format, record->depth_format, record->color_load, record->depth_load, record->stencil_load,
+			record->color_store, record->depth_store, record->stencil_store, record->reason, record->draws,
+			record->clears, record->fog_draws, record->transparent_draws, record->target_samples, record->first_phase,
+			record->last_phase, record->phase_mask, gpu_end > gpu_start && gpu_start ? ms(gpu_end - gpu_start) : 0.0,
+			vertex && first_ticks ? ((double)vertex_start - (double)first_ticks) * ratio / 1e6 +
+				ms(first_ns > start_ns ? first_ns - start_ns : 0) : 0.0,
+			vertex ? (double)(vertex_end - vertex_start) * ratio / 1e6 : 0.0,
+			fragment && first_ticks ? ((double)fragment_start - (double)first_ticks) * ratio / 1e6 +
+				ms(first_ns > start_ns ? first_ns - start_ns : 0) : 0.0,
+			fragment ? (double)(fragment_end - fragment_start) * ratio / 1e6 : 0.0);
+	}
+	fclose(file);
+	host_log("pass log: %s", pass_path);
+}
+
+static void pass_log_start(void)
+{
+	const char *setting = getenv("HALO_PASS_LOG");
+	const char *value;
+
+	if (!setting || !*setting || !strcmp(setting, "0"))
+		return;
+	value = getenv("HALO_PASS_LOG_PASSES");
+	pass_capacity = value && atoi(value) > 0 ? (uint32_t)atoi(value) : 150000;
+	pass_records = calloc(pass_capacity, sizeof(*pass_records));
+	if (!pass_records)
+		return;
+	value = getenv("HALO_PASS_LOG_PATH");
+	if (value && *value)
+		snprintf(pass_path, sizeof(pass_path), "%s", value);
+	else if (path[0] && strlen(path) > 4 && !strcmp(path + strlen(path) - 4, ".csv"))
+		snprintf(pass_path, sizeof(pass_path), "%.*s-passes.csv", (int)strlen(path) - 4, path);
+	else if (getenv("HALO_DATA_ROOT"))
+		snprintf(pass_path, sizeof(pass_path), "%s/pass_log.csv", getenv("HALO_DATA_ROOT"));
+	host_pass_log_enabled = 1;
+	host_log("pass log: %u passes kept, to %s", pass_capacity, pass_path[0] ? pass_path : "(nowhere)");
+}
+
 static void finish(void)
 {
 	if (!host_frame_log_level || !records)
 		return;
 	summarize();
 	write_csv();
+	write_pass_csv();
 	fflush(stderr);
 }
 
@@ -250,6 +364,8 @@ void host_frame_log_start(void)
 		snprintf(path, sizeof(path), "%s/frame_log.csv", getenv("HALO_DATA_ROOT"));
 	start_ns = last_present_ns = host_frame_log_now();
 	memset(&host_frame_acc, 0, sizeof(host_frame_acc));
+	if (host_frame_log_level >= 2)
+		pass_log_start();
 	atexit(finish);
 	host_log("frame log: level %d, %u frames kept, a line every %u, to %s", host_frame_log_level, capacity,
 		interval, path[0] ? path : "(nowhere)");
