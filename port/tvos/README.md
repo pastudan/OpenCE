@@ -195,7 +195,8 @@ source.
 ## Opening fog and scope performance
 
 See [PERFORMANCE.md](PERFORMANCE.md) for the opening-a10 investigation and
-measurement limits. The owner's scope-pass optimization has been imported
+measurement limits, and its "Baseline (A12 device)" for fixed-scene frame
+times on the TV (tools/tvos_deploy.py, tools/tvos_bench.py, HALO_FRAME_LOG). The owner's scope-pass optimization has been imported
 without merging unrelated upstream work. Opt-in `HALO_METAL_PROFILE=1`
 records effect invocation totals, fog/transparent draw attempts, feedback
 snapshots, CPU shader/pipeline compilation, and sampled command-buffer GPU

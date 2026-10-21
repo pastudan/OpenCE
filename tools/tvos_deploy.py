@@ -29,6 +29,18 @@ entitlements, port/tvos/game-development.entitlements (no secrets: the
 application and team identifiers and get-task-allow). Missing pieces are
 reported with what to do, not worked around.
 
+xctrace on this TV (Xcode 27.1, tvOS 27.0, network-paired CoreDevice):
+NOT WORKING. `xctrace list devices` puts it under "Devices Offline" while
+devicectl reaches it; `record --attach OpenCETV` fails "Cannot find process
+matching name", `--attach <pid>` (pid from devicectl) fails "Cannot find
+process for provided pid", and `--all-processes` fails "Timed out waiting
+for device to boot", for both Metal System Trace and Time Profiler. The
+trace subcommand is kept for when Instruments can reach the device.
+
+A launch that tvOS refuses because the TV is asleep ("System is asleep -
+foreground app launch forbidden") is reported as such; devicectl cannot
+wake it.
+
 A launch is cold or warm only as its caller makes it so (tools/tvos_bench.py
 decides): this reports what it saw. A launch while the TV shows another app,
 or is asleep, fails on the GPU ("Insufficient Permission (to submit GPU work
