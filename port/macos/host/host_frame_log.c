@@ -501,7 +501,17 @@ void host_frame_log_gpu_hoisted(uint64_t serial, double start_seconds, double en
 	start = ns_of_seconds(start_seconds);
 	end = ns_of_seconds(end_seconds);
 	if (end > start && start)
+	{
+		uint64_t previous = atomic_load(&record->gpu_start_ns);
+
 		atomic_fetch_add(&record->hoisted_ns, end - start);
+		/* (in the frame's GPU interval, gpu_start_ms to gpu_end_ms, whose
+		union over a run is the GPU's busy time) */
+		if (!previous || start < previous)
+			atomic_store(&record->gpu_start_ns, start);
+		if (end > atomic_load(&record->gpu_end_ns))
+			atomic_store(&record->gpu_end_ns, end);
+	}
 	atomic_fetch_add(&record->hoisted_buffers, 1);
 }
 
