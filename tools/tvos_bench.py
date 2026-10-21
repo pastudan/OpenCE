@@ -435,7 +435,11 @@ def record_trace(device, trace, out, extra_env):
         launched = subprocess.Popen(command, stdout=log, stderr=subprocess.STDOUT, text=True,
                                     env=deploy.developer_environment())
         time.sleep(trace["attach_after"])
-        recorded = deploy.run(deploy.trace_args(trace["template"], output, trace["seconds"], udid, "attach", "OpenCETV"),
+        # (by pid: xctrace did not find the process by its name on the TV)
+        pid = deploy.device_pid(device, "OpenCETV.app/OpenCETV")
+        print(f"OpenCETV pid on the TV: {pid}", flush=True)
+        recorded = deploy.run(deploy.trace_args(trace["template"], output, trace["seconds"], udid, "attach",
+                                                str(pid) if pid else "OpenCETV"),
                               check=False, capture=True, timeout=trace["seconds"] + 600)
         try:
             launched.wait(timeout=trace["attach_after"] + trace["seconds"] + 180)
@@ -450,7 +454,7 @@ def record_trace(device, trace, out, extra_env):
                 xctrace_output=(recorded.stdout or "")[-2000:], findings=findings)
 
 
-def run_device(runs, out, extra_env, device, core=None, traces=(), trace_results=None):
+def run_device(runs, out, extra_env, device, core=None, traces=(), trace_results=None, maps=None):
     """the runs on the Apple TV: the owner's config.toml and init.txt backed
     up first and put back afterwards whatever happens (and checked)"""
     trace_results = [] if trace_results is None else trace_results
@@ -466,6 +470,11 @@ def run_device(runs, out, extra_env, device, core=None, traces=(), trace_results
     print(f"backed up the TV's config.toml and init.txt: {config_backup}, {init_backup}", flush=True)
     results = []
     try:
+        for map_name in sorted({SCENES[run["scene"]].get("map", "a10.map") for run in runs} - {"a10.map"}):
+            if not maps:
+                raise deploy.DeployError(f"{map_name} is needed on the TV: pass --maps")
+            deploy.run(deploy.copy_args("to", device, Path(maps) / map_name, f"{container}/maps/{map_name}"),
+                       timeout=1800)
         for core_name in sorted({scene_core(run["scene"]) for run in runs} - {None}):
             source = Path(core if core and core_name == CORE_NAME else SCRATCH / "tvbench" / core_name)
             deploy.run(deploy.copy_args("to", device, source, f"{container}/core/{core_name}"), timeout=300)
@@ -499,12 +508,14 @@ def run_device(runs, out, extra_env, device, core=None, traces=(), trace_results
                 # plus the app's start-up before the frame log's clock, ~3 s)
                 measured = [r for r in results if r["scene"] == trace["scene"] and r.get("analysis", {}).get("full", {})
                             .get("frames")]
-                trace["attach_after"] = 30
-                if measured:
+                if trace.get("attach_after"):
+                    pass
+                elif measured:
                     events, rows = parse_frame_log(Path(measured[-1]["frame_log"]).read_text())
                     window, _ = scene_window(trace["scene"], events, rows)
-                    if window:
-                        trace["attach_after"] = int(window[0]["t_ms"] / 1000.0 + 3 + 5)
+                    trace["attach_after"] = int(window[0]["t_ms"] / 1000.0 + 3 + 5) if window else 30
+                else:
+                    trace["attach_after"] = 30
                 init = "\r\n".join(SCENES[trace["scene"]]["init"]) + "\r\n"
                 if init != current_init:
                     init_path = out / f"init-{trace['scene']}.txt"
@@ -637,6 +648,8 @@ def main(argv=None):
     p = sub.add_parser("run")
     p.add_argument("--target", choices=("mac", "simulator", "device"), required=True)
     p.add_argument("--scenes", default="bridge,b30", help=f"of {', '.join(SCENES)}")
+    p.add_argument("--plan", help="instead of --scenes/--resolutions/--repeats: SCENE/RES/REPEATS entries, "
+                   "comma-separated, e.g. b30/1080/2,b30/2160/2,a10play/2160/1 (each cold then warm)")
     p.add_argument("--resolutions", default="1080,2160")
     p.add_argument("--modes", default="cold,warm")
     p.add_argument("--repeats", type=int, default=2)
@@ -650,6 +663,8 @@ def main(argv=None):
     p.add_argument("--traces", default="", help="device: xctrace templates to record after the runs, comma-separated "
                    "(the opening at 4K, warm), e.g. 'Metal System Trace,Time Profiler'")
     p.add_argument("--trace-seconds", type=int, default=20)
+    p.add_argument("--trace-scene", default="opening", help="the scene (at 4K, warm) the traces record")
+    p.add_argument("--trace-attach-after", type=int, help="seconds after launch (default: from the scene's window)")
     p.add_argument("--no-lock", action="store_true")
     p = sub.add_parser("analyze")
     p.add_argument("csv")
@@ -678,8 +693,16 @@ def main(argv=None):
 
     out = Path(args.out)
     out.mkdir(parents=True, exist_ok=True)
-    runs = plan(args.scenes.split(","), [int(r) for r in args.resolutions.split(",")], args.modes.split(","),
-                args.repeats)
+    if args.plan:
+        runs = []
+        entries = [entry.split("/") for entry in args.plan.split(",")]
+        for repeat in range(1, max(int(e[2]) for e in entries) + 1):
+            for scene, resolution, repeats in entries:
+                if repeat <= int(repeats):
+                    runs += [dict(run, repeat=repeat) for run in plan([scene], [int(resolution)], args.modes.split(","), 1)]
+    else:
+        runs = plan(args.scenes.split(","), [int(r) for r in args.resolutions.split(",")], args.modes.split(","),
+                    args.repeats)
     extra = deploy.parse_env(args.env)
     commit = subprocess.run(["git", "-C", str(ROOT), "rev-parse", "--short=8", "HEAD"], capture_output=True,
                             text=True).stdout.strip()
@@ -701,12 +724,12 @@ def main(argv=None):
                 deploy.run(["xcrun", "devicectl", "device", "install", "app", "--device", args.device,
                             deploy.SIGNED], timeout=900)
             # (the traces reuse the salt of the last 4K opening runs: warm)
-            salts = [r["salt"] for r in runs if r["scene"] == "opening" and r["resolution"] == 2160]
-            traces = [{"template": template, "scene": "opening", "resolution": 2160, "mode": "warm",
+            salts = [r["salt"] for r in runs if r["scene"] == args.trace_scene and r["resolution"] == 2160]
+            traces = [{"template": template, "scene": args.trace_scene, "resolution": 2160, "mode": "warm",
                        "repeat": 0, "salt": salts[-1] if salts else "trace", "seconds": args.trace_seconds,
-                       "attach_after": None} for template in args.traces.split(",") if template]
+                       "attach_after": args.trace_attach_after} for template in args.traces.split(",") if template]
             trace_results = []
-            results = run_device(runs, out, extra, args.device, args.core, traces, trace_results)
+            results = run_device(runs, out, extra, args.device, args.core, traces, trace_results, args.maps)
             meta["traces"] = trace_results
     meta["finished"] = datetime.datetime.now(datetime.timezone.utc).isoformat()
     write_results(out, results, meta)

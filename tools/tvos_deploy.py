@@ -479,6 +479,22 @@ def device_udid(device):
     raise DeployError(f"no device {device}")
 
 
+def device_pid(device, executable_suffix):
+    """the pid of a running process on the device whose executable path ends so, or None"""
+    path = SCRATCH / "tv-deploy" / "processes.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    run(["xcrun", "devicectl", "device", "info", "processes", "--device", device, "--json-output", path],
+        capture=True, timeout=60, check=False)
+    try:
+        processes = json.loads(path.read_text())["result"]["runningProcesses"]
+    except (OSError, ValueError, KeyError):
+        return None
+    for process in processes:
+        if process.get("executable", "").endswith(executable_suffix):
+            return process.get("processIdentifier")
+    return None
+
+
 def command_trace(args):
     environment = parse_env(args.env)
     with HeavyLock(f"xctrace {args.template}", enabled=not args.no_lock):
