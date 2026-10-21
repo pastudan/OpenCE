@@ -1783,6 +1783,8 @@ void host_metal_present(void)
 			{
 				drawable = [metal.layer nextDrawable];
 			}
+#ifndef HALO_TVOS
+			/* (tvOS's SDK has no presented handler: presented_ms stays 0 there) */
 			if (drawable && host_frame_log_level)
 			{
 				[drawable addPresentedHandler:^(id<MTLDrawable> shown)
@@ -1790,6 +1792,7 @@ void host_metal_present(void)
 					host_frame_log_presented(serial, shown.presentedTime);
 				}];
 			}
+#endif
 			if (drawable)
 			{
 				MTLRenderPassDescriptor *descriptor = [MTLRenderPassDescriptor renderPassDescriptor];

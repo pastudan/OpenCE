@@ -12,7 +12,8 @@ read a frame. HALO_FRAME_LOG=1 (level 2) also splits the frame: Metal
 encoding (host), shader/pipeline compiles, the waits for a free frame, a
 drawable and a readback, the main thread's sleeps, real GPU time
 (GPUStartTime/GPUEndTime of the frame's command buffers) and when the frame
-reached the display (the drawable's presented handler). What is left of the
+reached the display (the drawable's presented handler; not on tvOS, whose
+SDK does not have it: 0 there). What is left of the
 wall time is the guest's own work (the translated game, SDL, audio, files).
 */
 
