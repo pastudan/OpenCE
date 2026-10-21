@@ -3,7 +3,7 @@
 
     export DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer
     # the saved game states, made once on the Mac build (same guest as the TV's):
-    python3 tools/tvos_bench.py make-core --maps DIR [--scene b30]
+    python3 tools/tvos_bench.py make-core --maps DIR [--scene b30|cryo]
     # runs (each target takes the heavy-job lock for its whole session; --no-lock if held):
     python3 tools/tvos_bench.py run --target simulator --maps DIR --out OUT
     python3 tools/tvos_bench.py run --target device --out OUT          # the Apple TV: ask its owner first
@@ -88,9 +88,15 @@ SCENES = {
     # a10 played from a fresh launch to the first playable section after the
     # opening cinematic (the cryo bay's tutorial, ~215 s in), measured there
     "a10play": {"init": ["map_name a10"], "seconds": 285, "window_seconds": 50.0},
+    # the same cryo bay from a saved state (make-core --scene cryo: a fresh a10
+    # launch saved as the bay's fog comes up, the tutorial's screen blur about
+    # to start): ~60 s a run instead of ~285 s
+    "cryo": {"init": ["map_name a10", "core_load_name_at_startup tvbench_cryo.bin"], "seconds": 70,
+             "window_seconds": 50.0, "core": "tvbench_cryo.bin"},
 }
 SCENE_LABEL = {"opening": "a10 cutscene (partial)", "bridge": "a10 bridge (gameplay)",
-               "b30": "b30 beach (gameplay)", "a10play": "a10 cryo bay (first gameplay)"}
+               "b30": "b30 beach (gameplay)", "a10play": "a10 cryo bay (first gameplay)",
+               "cryo": "a10 cryo bay (saved state)"}
 FOG_START_DRAWS = 20
 FOG_SUSTAIN_SECONDS = 5.0
 SERIES = ("wall_ms", "gpu_ms", "guest_ms", "host_ms", "compile_ms", "wait_drawable_ms", "wait_inflight_ms",
@@ -163,7 +169,7 @@ def scene_window(scene, events, rows, window_seconds=None):
         if start is None:
             return [], "the cryo bay (>= 40 fog-plane draws) was never reached"
         description = f"a10 cryo bay: {window_seconds:g} s from frame {rows[start]['serial']}"
-    elif scene in ("bridge", "b30"):
+    elif scene in ("bridge", "b30", "cryo"):
         core = SCENES[scene].get("core", CORE_NAME)
         loaded = [e for e in events if e["kind"] == "core-open" and e["detail"] == core]
         if not loaded:
@@ -603,6 +609,68 @@ def make_b30_core(maps, out_core):
     print(f"saved b30's state: {out_core}")
 
 
+def make_cryo_core(maps, out_core, at_seconds=224.0):
+    """the cryo bay's saved state: a fresh a10 launch (no input) saved
+    at_seconds in, as the bay's fog (>= 40 fog-plane draws) comes up and the
+    tutorial's screen convolution starts; the frame log of the launch is
+    checked for both, so a slower load that misses the moment is an error"""
+    import socket
+    root = SCRATCH / "tvbench-data" / "make-core-cryo"
+    (root / "maps").mkdir(parents=True, exist_ok=True)
+    for name in ("ui.map", "a10.map"):
+        link = root / "maps" / name
+        if not link.exists():
+            link.symlink_to(Path(maps).resolve() / name)
+    (root / "init.txt").write_text("map_name a10\r\n")
+    shutil.rmtree(root / "core", ignore_errors=True)
+    frame_log = root / "make-core-frames.csv"
+    app = ROOT / "build/macos/OpenCE.app/Contents/MacOS/OpenCE"
+    environment = dict(os.environ, HALO_DATA_ROOT=str(root), HALO_SAVE_ROOT=str(root / "save"), HALO_HIDDEN_WINDOW="1",
+                       HALO_EXIT_AFTER=str(int(at_seconds) + 8), HALO_TELNET_CONSOLE="1",
+                       HALO_RESOLUTION_SCALING="480", HALO_FRAME_LOG="1", HALO_FRAME_LOG_INTERVAL="0",
+                       HALO_FRAME_LOG_PATH=str(frame_log))
+    with socket.socket() as check:
+        check.bind(("127.0.0.1", 2323))
+    process = subprocess.Popen([str(app)], env=environment, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    started, connection, replies = time.monotonic(), None, ""
+    try:
+        while time.monotonic() - started < at_seconds:
+            time.sleep(0.1)
+            if connection is None and time.monotonic() - started > 20:
+                try:
+                    connection = socket.create_connection(("127.0.0.1", 2323), timeout=2)
+                except OSError:
+                    pass
+        while connection is None:
+            try:
+                connection = socket.create_connection(("127.0.0.1", 2323), timeout=2)
+            except OSError:
+                time.sleep(0.25)
+        connection.sendall(b"(core_save_name tvbench_cryo.bin)\r\n")
+        time.sleep(1.0)
+        connection.settimeout(1.0)
+        try:
+            replies += connection.recv(65536).decode("latin-1", "replace")
+        except socket.timeout:
+            pass
+        process.wait(timeout=120)
+    finally:
+        if process.poll() is None:
+            process.kill()
+    saved = root / "core" / "tvbench_cryo.bin"
+    if not saved.is_file() or "saved 'tvbench_cryo.bin'" not in replies:
+        raise deploy.DeployError(f"the cryo bay's state was not saved: {replies[-500:]}")
+    _, rows = parse_frame_log(frame_log.read_text())
+    last = rows[-12:] if rows else []
+    fog = min((row["fog_draws"] for row in last), default=0)
+    if fog < 40:
+        raise deploy.DeployError(f"the state was saved before the cryo bay's fog ({fog} fog-plane draws a frame at the "
+                                 f"end): try a later --at")
+    Path(out_core).parent.mkdir(parents=True, exist_ok=True)
+    shutil.copyfile(saved, out_core)
+    print(f"saved the cryo bay's state: {out_core} ({saved.stat().st_size} bytes; {fog}+ fog-plane draws a frame)")
+
+
 def make_core(maps, out_core):
     """the bridge scene's saved state, made with the Mac build (whose guest
     is the TV build's): a10's opening to its end, then the console puts the
@@ -686,7 +754,8 @@ def main(argv=None):
     p.add_argument("out")
     p = sub.add_parser("make-core")
     p.add_argument("--maps", required=True)
-    p.add_argument("--scene", choices=("bridge", "b30"), default="bridge")
+    p.add_argument("--scene", choices=("bridge", "b30", "cryo"), default="bridge")
+    p.add_argument("--at", type=float, default=224.0, help="cryo: seconds after launch to save")
     p.add_argument("--out")
     args = parser.parse_args(argv)
 
@@ -700,6 +769,8 @@ def main(argv=None):
     if args.command == "make-core":
         if args.scene == "b30":
             make_b30_core(args.maps, args.out or SCRATCH / "tvbench" / "tvbench_b30.bin")
+        elif args.scene == "cryo":
+            make_cryo_core(args.maps, args.out or SCRATCH / "tvbench" / "tvbench_cryo.bin", args.at)
         else:
             make_core(args.maps, args.out or SCRATCH / "tvbench" / CORE_NAME)
         return 0
