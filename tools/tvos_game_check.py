@@ -63,6 +63,14 @@ def main():
                     try:
                         with socket.create_connection(("127.0.0.1", 2323), timeout=1) as console:
                             console.sendall(f"map_name {args.map}\r\n".encode("ascii"))
+                            # The game's polling console can discard buffered
+                            # text on peer close; keep it open while it consumes
+                            # the command instead of closing immediately.
+                            console.settimeout(2)
+                            try:
+                                console.recv(4096)
+                            except socket.timeout:
+                                pass
                         break
                     except OSError:
                         if process.poll() is not None or time.monotonic() >= deadline:

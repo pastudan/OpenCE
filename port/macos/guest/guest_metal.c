@@ -30,3 +30,8 @@ void metal_device_screen_effect(int type, int passes, float radius, int video)
 {
 	host_metal_screen_effect(type, passes, radius, video);
 }
+
+void metal_device_profile_phase(int profile, int begin)
+{
+	host_metal_profile_phase(profile, begin);
+}

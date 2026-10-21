@@ -125,6 +125,7 @@ int host_metal_attach(unsigned int window);
 int host_metal_supports_bc(void);
 void host_metal_set_vsync(int interval);
 void host_metal_screen_effect(int type, int passes, float radius, int video);
+void host_metal_profile_phase(int profile, int begin);
 /* the frame drawn so far, shown: the picture last given to
 host_metal_present_target, letterboxed in the window */
 void host_metal_present(void);

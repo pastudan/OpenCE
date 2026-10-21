@@ -192,6 +192,18 @@ source.
   windows, not matching fixed scenes or percentile frame-time measurements.
   4K is a working experiment, not a demonstrated 60 fps setting.
 
+## Opening fog and scope performance
+
+See [PERFORMANCE.md](PERFORMANCE.md) for the opening-a10 investigation and
+measurement limits. The owner's scope-pass optimization has been imported
+without merging unrelated upstream work. Opt-in `HALO_METAL_PROFILE=1`
+records effect invocation totals, fog/transparent draw attempts, feedback
+snapshots, CPU shader/pipeline compilation, and sampled command-buffer GPU
+time. It does not time individual fog phases or establish A12 gains from
+simulator measurements. Duplicate target snapshots within a draw have been
+reduced; the fog's appearance is unchanged. These changes are not yet
+installed over the owner's running TV session.
+
 ## Remaining gates
 
 - Native WebRTC-only interoperability with the existing WebTorrent seeder,

@@ -141,6 +141,11 @@ symbols in this file:
 #include <xtl.h>
 
 #include "rasterizer_xbox.h"
+#ifdef HALO_METAL
+/* port: tag existing phases for opt-in host counters without enabling the
+   Xbox callback profiler or waiting for the GPU. */
+void metal_device_profile_phase(int profile, int begin);
+#endif
 
 /* ---------- constants */
 
@@ -391,6 +396,9 @@ void _rasterizer_profile_enable(
 void rasterizer_profile_begin(
 	short profile)
 {
+#ifdef HALO_METAL
+	metal_device_profile_phase(profile, 1); /* port: diagnostic only */
+#endif
 	match_assert(
 		"c:\\halo\\SOURCE\\rasterizer\\xbox\\rasterizer_xbox_profile.c",
 		259,
@@ -427,6 +435,9 @@ void rasterizer_profile_begin(
 void rasterizer_profile_end(
 	short profile)
 {
+#ifdef HALO_METAL
+	metal_device_profile_phase(profile, 0); /* port: diagnostic only */
+#endif
 	match_assert(
 		"c:\\halo\\SOURCE\\rasterizer\\xbox\\rasterizer_xbox_profile.c",
 		294,

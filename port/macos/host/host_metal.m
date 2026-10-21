@@ -241,6 +241,13 @@ static uint64_t profile_effect_frame;
 static int profile_effect_type, profile_effect_passes, profile_effect_video;
 static float profile_effect_radius;
 static _Atomic uint64_t profile_last_completion_ns;
+static _Atomic uint64_t profile_last_completion_serial;
+static uint64_t profile_effect_calls, profile_convolution_frames, profile_interval_copies;
+static uint64_t profile_last_convolution_frame;
+static int profile_phase = -1;
+static uint32_t profile_phase_draws[29];
+static uint32_t profile_phase_copies[29];
+static uint64_t profile_shader_ns, profile_pipeline_ns;
 
 /* each test index's latest count, and whether it has one */
 static _Atomic uint32_t index_count[METAL_VISIBILITY_SLOTS];
@@ -664,10 +671,26 @@ void host_metal_set_vsync(int interval)
 #endif
 }
 
+void host_metal_profile_phase(int profile, int begin)
+{
+	if (!profile_enabled)
+		return;
+	if (begin)
+		profile_phase = profile >= 0 && profile < 29 ? profile : -1;
+	else if (profile_phase == profile)
+		profile_phase = -1;
+}
+
 void host_metal_screen_effect(int type, int passes, float radius, int video)
 {
 	if (!profile_enabled)
 		return;
+	profile_effect_calls++;
+	if (type != 0 && profile_last_convolution_frame != frame_serial)
+	{
+		profile_convolution_frames++;
+		profile_last_convolution_frame = frame_serial;
+	}
 	profile_effect_frame = frame_serial;
 	profile_effect_type = type;
 	profile_effect_passes = passes;
@@ -923,7 +946,10 @@ unsigned int host_metal_shader(const char *source, int fragment)
 				text = [[text substringToIndex:end.location] stringByAppendingString:probe];
 			}
 		}
+		uint64_t compile_started = profile_enabled ? SDL_GetTicksNS() : 0;
 		library = [metal.device newLibraryWithSource:text options:options error:&error];
+		if (profile_enabled)
+			profile_shader_ns += SDL_GetTicksNS() - compile_started;
 		if (!library)
 		{
 			host_log("Metal: a %s shader does not build:\n%s\n%s", fragment ? "pixel" : "vertex",
@@ -1025,8 +1051,11 @@ static id<MTLRenderPipelineState> pipeline_get(const struct metal_draw *draw)
 	descriptor.colorAttachments[0].alphaBlendOperation = (MTLBlendOperation)key.blend.operation;
 	descriptor.depthAttachmentPixelFormat = pass.depth_format;
 	descriptor.stencilAttachmentPixelFormat = pass.depth_format;
+	uint64_t compile_started = profile_enabled ? SDL_GetTicksNS() : 0;
 	state = descriptor.vertexFunction && descriptor.fragmentFunction && descriptor.vertexDescriptor ?
 		[metal.device newRenderPipelineStateWithDescriptor:descriptor error:&error] : nil;
+	if (profile_enabled)
+		profile_pipeline_ns += SDL_GetTicksNS() - compile_started;
 	if (!state)
 	{
 		host_log("Metal: no pipeline for shaders %u/%u: %s", draw->vertex_shader, draw->fragment_shader,
@@ -1253,6 +1282,8 @@ static id<MTLTexture> feedback_copy(id<MTLTexture> target)
 	if (profile_enabled)
 	{
 		profile_feedback_copies++;
+		if (profile_phase >= 0 && profile_phase < 29)
+			profile_phase_copies[profile_phase]++;
 		profile_feedback_bytes += (uint64_t)target.width * target.height * 4;
 	}
 	blit = blit_begin();
@@ -1317,6 +1348,8 @@ void host_metal_draw(const struct metal_draw *original)
 		id<MTLTexture> feedback_snapshot = nil;
 		BOOL feedback_taken = NO;
 
+		if (profile_enabled && profile_phase >= 0 && profile_phase < 29)
+			profile_phase_draws[profile_phase]++;
 		/* the textures first: a copy of one that is the target ends the pass.
 		   All matching stages read the SAME pre-draw target: snapshot once
 		   for this draw, never cache its contents across draws. */
@@ -1707,13 +1740,33 @@ void host_metal_present(void)
 				[commands presentDrawable:drawable];
 			}
 		}
+		profile_interval_copies += profile_feedback_copies;
 		const BOOL sample_profile = profile_enabled && serial % 30 == 0;
+		if (sample_profile)
+		{
+			host_log("Metal interval frame %llu: effect calls %llu convolution frames %llu feedback snapshots %llu",
+				(unsigned long long)serial, (unsigned long long)profile_effect_calls,
+				(unsigned long long)profile_convolution_frames, (unsigned long long)profile_interval_copies);
+			profile_effect_calls = profile_convolution_frames = profile_interval_copies = 0;
+		}
 		const uint64_t feedback_copies = profile_feedback_copies;
 		const uint64_t feedback_bytes = profile_feedback_bytes;
 		const int effect_type = profile_effect_frame == serial ? profile_effect_type : -1;
 		const int effect_passes = profile_effect_frame == serial ? profile_effect_passes : 0;
 		const float effect_radius = profile_effect_frame == serial ? profile_effect_radius : 0.0f;
 		const int effect_video = profile_effect_frame == serial ? profile_effect_video : 0;
+		if (profile_enabled && (sample_profile || profile_shader_ns > 2000000 || profile_pipeline_ns > 2000000))
+		{
+			host_log("Metal phases frame %llu: fog-plane %u/%u fog-screen %u/%u transparents %u/%u "
+				"screen-effect %u/%u (draw attempts/feedback snapshots); shader CPU %.3f ms pipeline CPU %.3f ms",
+				(unsigned long long)serial, profile_phase_draws[17], profile_phase_copies[17],
+				profile_phase_draws[18], profile_phase_copies[18], profile_phase_draws[22], profile_phase_copies[22],
+				profile_phase_draws[26], profile_phase_copies[26], profile_shader_ns / 1000000.0,
+				profile_pipeline_ns / 1000000.0);
+		}
+		memset(profile_phase_draws, 0, sizeof(profile_phase_draws));
+		memset(profile_phase_copies, 0, sizeof(profile_phase_copies));
+		profile_shader_ns = profile_pipeline_ns = 0;
 		profile_feedback_copies = profile_feedback_bytes = 0;
 		frame = frame_current();
 		[commands addCompletedHandler:^(id<MTLCommandBuffer> buffer)
@@ -1732,11 +1785,13 @@ void host_metal_present(void)
 			{
 				uint64_t now = SDL_GetTicksNS();
 				uint64_t before = atomic_exchange(&profile_last_completion_ns, now);
+				uint64_t previous_serial = atomic_exchange(&profile_last_completion_serial, serial);
 				double gpu_ms = buffer.GPUEndTime > buffer.GPUStartTime ?
 					(buffer.GPUEndTime - buffer.GPUStartTime) * 1000.0 : 0.0;
 				host_log("Metal profile frame %llu: GPU %.3f ms, completion avg %.3f ms; effect %d passes %d "
 					"radius %.4f video %d; feedback %llu copies %.2f MiB",
-					(unsigned long long)serial, gpu_ms, before ? (now - before) / 30000000.0 : 0.0,
+					(unsigned long long)serial, gpu_ms, before && serial > previous_serial ?
+						(now - before) / (1000000.0 * (serial - previous_serial)) : 0.0,
 					effect_type, effect_passes, effect_radius, effect_video,
 					(unsigned long long)feedback_copies, feedback_bytes / 1048576.0);
 			}
