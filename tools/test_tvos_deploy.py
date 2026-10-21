@@ -132,6 +132,13 @@ def test_log_findings_flag_background_gpu_work():
     assert findings["frame_log_path"].endswith("frame_log.csv")
 
 
+def test_log_findings_asleep():
+    text = ('ERROR: The application failed to launch. (com.apple.dt.CoreDeviceError error 10002 (0x2712))\n'
+            '  NSLocalizedFailureReason = Transaction failed. (System is asleep - foreground app launch forbidden)\n')
+    findings = deploy.log_findings(text)
+    assert findings["asleep"] and not findings["valid"] and "asleep" in findings["invalid_reason"]
+
+
 def test_log_findings_valid_run():
     findings = deploy.log_findings(DEVICE_LOG.replace("Insufficient Permission (to submit GPU work from background) "
                                                       "(00000006:kIOGPUCommandBufferCallbackErrorBackgroundExecutionNotPermitted)",

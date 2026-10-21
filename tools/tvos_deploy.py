@@ -268,8 +268,10 @@ def log_findings(text):
         findings["resolution"] = match.group(1)
     findings["valid"] = (findings["background_gpu_errors"] == 0 and not findings["trap"]
                          and findings["metal_device"] is not None)
+    findings["asleep"] = "System is asleep" in text
     findings["invalid_reason"] = (
-        "GPU work refused in the background (the TV was not showing the app)" if findings["background_gpu_errors"]
+        "the TV is asleep: tvOS refused a foreground launch (wake it with the remote)" if findings["asleep"]
+        else "GPU work refused in the background (the TV was not showing the app)" if findings["background_gpu_errors"]
         else "the game trapped" if findings["trap"]
         else "no Metal device logged (the app did not start)" if findings["metal_device"] is None else None)
     return findings
