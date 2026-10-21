@@ -114,6 +114,13 @@ void host_sdl_main_thread_set(void)
 {
 	/* (the game's main runs on the process's main thread: host_main.c) */
 	SDL_SetHint(SDL_HINT_APP_NAME, "Halo");
+#ifdef HALO_TVOS
+	/* The Siri Remote is navigation, not player 1's two-stick controller.
+	   Otherwise connection order can put the real pad on Xbox port 2. */
+	SDL_SetHint(SDL_HINT_TV_REMOTE_AS_JOYSTICK, "0");
+	SDL_SetHint(SDL_HINT_TOUCH_MOUSE_EVENTS, "0");
+	SDL_SetHint(SDL_HINT_APPLE_TV_CONTROLLER_UI_EVENTS, "0");
+#endif
 }
 
 int host_sdl_init(unsigned int flags)

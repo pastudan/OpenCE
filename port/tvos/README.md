@@ -120,6 +120,26 @@ The existing WebTorrent browser importer is on the separate
 `read_at` source: first read the image directory, then request pieces
 intersecting the maps. Its browser runtime/storage is not portable tvOS code.
 
+## HUD, text and saved render settings
+
+The TV app embeds the shared Xbox high-resolution HUD, controller glyphs,
+fonts and menu titles, plus the gap-filling hint/weapon assets. No separate
+TV asset import is required. Initial hardware tests explicitly disabled
+`display.high_res_hud` and `display.high_res_text`; that was a test setting,
+not an absent feature. Both are now enabled in the owner's device config
+and 4K launch session. The device reports high-resolution HUD registration
+and Overpass text, and continues rendering a10. Visual correctness and peak
+memory still need validation.
+
+Startup no longer supplies the initial `HALO_RESOLUTION_SCALING=720`
+override: saved `display.resolution_scaling` is respected (explicit launch
+overrides remain possible). High-resolution HUD/text keep their shared
+config defaults and remain user-selectable rather than being forced on.
+
+The newer upstream HUD changes reviewed here add Custom Edition bitmap
+aliases and asynchronous PNG decoding, not replacement Xbox PNG artwork.
+Those code changes have not been merged into this TV branch.
+
 ## Planned import and storage behavior
 
 The eventual controller-friendly launcher will accept a user-supplied
@@ -162,8 +182,15 @@ source.
 - The signed game menu and a10 rendered on that physical TV, with timed
   exit code 0 and no skipped shaders after warm-up. Only the owner's ui.map
   and a10.map were copied into the app cache for this development test.
-  Controller mapping, visual correctness, the full campaign and extended
-  memory/stability checks remain unverified.
+  The owner confirmed Xbox-mode 8BitDo input and 1080p work after excluding
+  the Siri Remote from SDL's gamepad list and disabling touch-to-mouse
+  synthesis. This is now set before SDL initialization on TV builds; Mac
+  initialization is unchanged. Full controller mapping, the campaign and
+  extended memory/stability checks remain incomplete.
+- Live a10 samples on the A12 TV: about 59–60 fps at 1920x1080 and about
+  35 fps at 3840x2160. These use 60-frame log increments over short live-play
+  windows, not matching fixed scenes or percentile frame-time measurements.
+  4K is a working experiment, not a demonstrated 60 fps setting.
 
 ## Remaining gates
 

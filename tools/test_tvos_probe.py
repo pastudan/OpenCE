@@ -76,3 +76,45 @@ def test_probe_scene_manifest_matches_delegate():
     source = (root / "port/tvos/probe/platform_probe.m").read_text()
     assert f'@interface {config["UISceneDelegateClassName"]} :' in source
     assert 'initWithWindowScene:' in source
+
+
+@pytest.mark.parametrize('tv', [False, True])
+def test_tv_remote_cannot_take_gamepad_slot(tmp_path, tv):
+    import subprocess
+    root = Path(__file__).resolve().parent.parent
+    source = (root / 'port/macos/host/host_sdl.c').read_text()
+    start = source.index('void host_sdl_main_thread_set(void)')
+    end = source.index('\n}\n', start) + 3
+    setup = source[start:end]
+    harness = '''
+#include <assert.h>
+#include <string.h>
+#define SDL_HINT_APP_NAME "app"
+#define SDL_HINT_TV_REMOTE_AS_JOYSTICK "remote"
+#define SDL_HINT_TOUCH_MOUSE_EVENTS "touch"
+#define SDL_HINT_APPLE_TV_CONTROLLER_UI_EVENTS "ui"
+static int calls;
+static int SDL_SetHint(const char *name, const char *value) {
+    if (!strcmp(name, "app")) assert(!strcmp(value, "Halo"));
+    else assert(!strcmp(value, "0"));
+    calls++;
+    return 1;
+}
+'''
+    harness += setup
+    harness += '\nint main(void) { host_sdl_main_thread_set(); assert(calls == %d); }\n' % (4 if tv else 1)
+    code = tmp_path / 'hints.c'
+    code.write_text(harness)
+    executable = tmp_path / 'hints'
+    subprocess.run(['cc', '-std=c11', '-Wall', '-Wextra', '-Werror', *(['-DHALO_TVOS'] if tv else []),
+                    str(code), '-o', str(executable)], check=True)
+    subprocess.run([str(executable)], check=True)
+
+
+def test_tv_startup_respects_saved_visual_settings():
+    root = Path(__file__).resolve().parent.parent
+    source = (root / 'port/tvos/tv_main.m').read_text()
+    assert 'setenv("HALO_RESOLUTION_SCALING"' not in source
+    assert 'setenv("HALO_HIGH_RES_HUD"' not in source
+    assert 'setenv("HALO_HIGH_RES_TEXT"' not in source
+    assert 'setenv("HALO_NET_JOIN_FROM_CLIPBOARD", "false", 1)' in source

@@ -30,8 +30,9 @@ int main(int argc, char **argv)
         setenv("HALO_SAVE_ROOT", save.fileSystemRepresentation, 1);
         setenv("HALO_DISPLAY_MODE", "borderless", 1);
         setenv("HALO_FULLSCREEN", "true", 1);
-        setenv("HALO_RESOLUTION_SCALING", "720", 0);
-        setenv("HALO_CLIPBOARD_JOIN", "false", 1);
+        /* Keep display.resolution_scaling in config.toml authoritative;
+           the initial 720p bring-up override hid the player's saved choice. */
+        setenv("HALO_NET_JOIN_FROM_CLIPBOARD", "false", 1);
         fprintf(stderr, "TV game entry: data at %s (purgeable cache)\n", getenv("HALO_DATA_ROOT"));
         fflush(stderr);
         return opence_guest_main(argc, argv);
