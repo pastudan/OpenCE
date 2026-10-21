@@ -233,6 +233,15 @@ static id<MTLCommandBuffer> commands;
 static uint64_t frame_serial = 1;
 static _Atomic uint64_t completed_serial;
 
+/* HALO_METAL_PROFILE: command-buffer GPU time and feedback-copy bandwidth,
+   sampled without forcing CPU/GPU synchronization. Off by default. */
+static int profile_enabled;
+static uint64_t profile_feedback_copies, profile_feedback_bytes;
+static uint64_t profile_effect_frame;
+static int profile_effect_type, profile_effect_passes, profile_effect_video;
+static float profile_effect_radius;
+static _Atomic uint64_t profile_last_completion_ns;
+
 /* each test index's latest count, and whether it has one */
 static _Atomic uint32_t index_count[METAL_VISIBILITY_SLOTS];
 static _Atomic uint32_t index_known[METAL_VISIBILITY_SLOTS];
@@ -614,6 +623,7 @@ int host_metal_attach(unsigned int window)
 			return 0;
 		if (!metal.device)
 		{
+			profile_enabled = getenv("HALO_METAL_PROFILE") && atoi(getenv("HALO_METAL_PROFILE")) != 0;
 			metal.device = MTLCreateSystemDefaultDevice();
 			if (!metal.device)
 			{
@@ -652,6 +662,17 @@ void host_metal_set_vsync(int interval)
 	if (metal.layer)
 		metal.layer.displaySyncEnabled = metal.vsync ? YES : NO;
 #endif
+}
+
+void host_metal_screen_effect(int type, int passes, float radius, int video)
+{
+	if (!profile_enabled)
+		return;
+	profile_effect_frame = frame_serial;
+	profile_effect_type = type;
+	profile_effect_passes = passes;
+	profile_effect_radius = radius;
+	profile_effect_video = video;
 }
 
 /* ---------- textures */
@@ -1229,6 +1250,11 @@ static id<MTLTexture> feedback_copy(id<MTLTexture> target)
 		descriptor.storageMode = MTLStorageModePrivate;
 		metal.feedback = [metal.device newTextureWithDescriptor:descriptor];
 	}
+	if (profile_enabled)
+	{
+		profile_feedback_copies++;
+		profile_feedback_bytes += (uint64_t)target.width * target.height * 4;
+	}
 	blit = blit_begin();
 	[blit copyFromTexture:target sourceSlice:0 sourceLevel:0 sourceOrigin:MTLOriginMake(0, 0, 0)
 		sourceSize:MTLSizeMake(target.width, target.height, 1) toTexture:metal.feedback destinationSlice:0
@@ -1288,13 +1314,24 @@ void host_metal_draw(const struct metal_draw *original)
 		id<MTLTexture> textures[METAL_STAGES];
 		MTLScissorRect scissor;
 		uint32_t index;
+		id<MTLTexture> feedback_snapshot = nil;
+		BOOL feedback_taken = NO;
 
-		/* the textures first: a copy of one that is the target ends the pass */
+		/* the textures first: a copy of one that is the target ends the pass.
+		   All matching stages read the SAME pre-draw target: snapshot once
+		   for this draw, never cache its contents across draws. */
 		for (index = 0; index < METAL_STAGES; index++)
 		{
 			textures[index] = texture_object(draw->textures[index]);
 			if (textures[index] && draw->textures[index] == pass.color && pass.color)
-				textures[index] = feedback_copy(textures[index]);
+			{
+				if (!feedback_taken)
+				{
+					feedback_snapshot = feedback_copy(textures[index]);
+					feedback_taken = YES;
+				}
+				textures[index] = feedback_snapshot;
+			}
 			if (!textures[index] || (textures[index].textureType == MTLTextureTypeCube) !=
 				(draw->texture_types[index] == _metal_texture_cube) || (textures[index].textureType ==
 				MTLTextureType3D) != (draw->texture_types[index] == _metal_texture_3d))
@@ -1670,6 +1707,14 @@ void host_metal_present(void)
 				[commands presentDrawable:drawable];
 			}
 		}
+		const BOOL sample_profile = profile_enabled && serial % 30 == 0;
+		const uint64_t feedback_copies = profile_feedback_copies;
+		const uint64_t feedback_bytes = profile_feedback_bytes;
+		const int effect_type = profile_effect_frame == serial ? profile_effect_type : -1;
+		const int effect_passes = profile_effect_frame == serial ? profile_effect_passes : 0;
+		const float effect_radius = profile_effect_frame == serial ? profile_effect_radius : 0.0f;
+		const int effect_video = profile_effect_frame == serial ? profile_effect_video : 0;
+		profile_feedback_copies = profile_feedback_bytes = 0;
 		frame = frame_current();
 		[commands addCompletedHandler:^(id<MTLCommandBuffer> buffer)
 		{
@@ -1682,6 +1727,18 @@ void host_metal_present(void)
 				errors++;
 				host_log("Metal: frame %llu failed on the GPU: %s", (unsigned long long)serial,
 					buffer.error.localizedDescription.UTF8String);
+			}
+			if (sample_profile && buffer.status == MTLCommandBufferStatusCompleted)
+			{
+				uint64_t now = SDL_GetTicksNS();
+				uint64_t before = atomic_exchange(&profile_last_completion_ns, now);
+				double gpu_ms = buffer.GPUEndTime > buffer.GPUStartTime ?
+					(buffer.GPUEndTime - buffer.GPUStartTime) * 1000.0 : 0.0;
+				host_log("Metal profile frame %llu: GPU %.3f ms, completion avg %.3f ms; effect %d passes %d "
+					"radius %.4f video %d; feedback %llu copies %.2f MiB",
+					(unsigned long long)serial, gpu_ms, before ? (now - before) / 30000000.0 : 0.0,
+					effect_type, effect_passes, effect_radius, effect_video,
+					(unsigned long long)feedback_copies, feedback_bytes / 1048576.0);
 			}
 			memset(frame->sums, 0, frame->test_count * sizeof(frame->sums[0]));
 			for (index = 0; index < frame->counter_count; index++)

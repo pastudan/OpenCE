@@ -27,6 +27,8 @@ def main():
     parser.add_argument("app", type=Path)
     parser.add_argument("--data-root", type=Path, required=True)
     parser.add_argument("--map", choices=("a10", "bloodgulch"))
+    parser.add_argument("--profile", action="store_true", help="opt-in Metal/effect timing; simulator numbers are not TV timings")
+    parser.add_argument("--resolution", choices=("720", "1080", "2160"), default="720")
     args = parser.parse_args()
     data = args.data_root.resolve()
     if not (data / "maps/ui.map").is_file():
@@ -49,7 +51,8 @@ def main():
         subprocess.run(["xcrun", "simctl", "bootstatus", identifier, "-b"], check=True, timeout=180)
         subprocess.run(["xcrun", "simctl", "install", identifier, str(app)], check=True, timeout=60)
         environment = dict(os.environ, SIMCTL_CHILD_HALO_DATA_ROOT=str(data), SIMCTL_CHILD_HALO_EXIT_AFTER="30",
-            SIMCTL_CHILD_HALO_GPU_STATS="1", SIMCTL_CHILD_HALO_HIGH_RES_HUD="false",
+            SIMCTL_CHILD_HALO_GPU_STATS="1", SIMCTL_CHILD_HALO_METAL_PROFILE="1" if args.profile else "0",
+            SIMCTL_CHILD_HALO_RESOLUTION_SCALING=args.resolution, SIMCTL_CHILD_HALO_HIGH_RES_HUD="false",
             SIMCTL_CHILD_HALO_HIGH_RES_TEXT="false", SIMCTL_CHILD_HALO_TELNET_CONSOLE="1" if args.map else "0")
         with (diagnostics / "console.txt").open("w") as log:
             process = subprocess.Popen(["xcrun", "simctl", "launch", "--console", identifier,

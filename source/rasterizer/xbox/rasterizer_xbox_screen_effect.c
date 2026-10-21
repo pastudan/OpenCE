@@ -108,6 +108,10 @@ symbols in this file:
 #include <xtl.h>
 #include "rasterizer_xbox.h"
 #include "rasterizer_xbox_pixel_shader.h"
+#ifdef HALO_METAL
+/* port: opt-in screen-effect diagnostics, port/macos/guest/guest_metal.c */
+void metal_device_screen_effect(int type, int passes, float radius, int video);
+#endif
 
 /* ---------- constants */
 
@@ -515,6 +519,12 @@ void _rasterizer_screen_effect(
 			}
 		}
 
+#ifdef HALO_METAL
+		/* port: report actual cinematic/weapon parameters, not an assumed
+		   link between a scene's visible fog and its screen convolution. */
+		metal_device_screen_effect(parameters->convolution_type, pass_count,
+			parameters->convolution_radius, parameters->video_on);
+#endif
 		if (parameters->video_on)
 		{
 			match_vassert(

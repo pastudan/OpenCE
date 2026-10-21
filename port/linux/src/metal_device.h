@@ -18,5 +18,7 @@ int metal_device_attach(SDL_Window *window);
 void metal_device_set_vsync(int vsync);
 /* the frame drawn so far, shown */
 void metal_device_present(void);
+/* Opt-in diagnostic marker; does not change the effect or draw state. */
+void metal_device_screen_effect(int type, int passes, float radius, int video);
 
 #endif
