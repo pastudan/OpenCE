@@ -14,9 +14,10 @@
 
 Scenes (both a10, no controller input: the most repeatable):
 - opening: a fresh launch into a10 (init.txt "map_name a10"), the opening
-  cinematic. Measured: the 30 s from the first frame with >= 20 fog-plane
-  draws (the fog sequence; frame counts from the frame log, not times, so a
-  slower load does not shift it).
+  cinematic. Measured: the 30 s from the first frame of the first stretch of
+  >= 5 s in which every frame has >= 20 fog-plane draws (the fog sequence;
+  found from the frame log's counts, not from times, so a slower load does
+  not shift it; the moment of fog the first frames flash is skipped).
 - bridge: a launch that loads a saved game state at the bridge (BSP 1)
   (init.txt "map_name a10" + "core_load_name_at_startup tvbench_bridge.bin";
   the state is made by make-core: a10's opening run to its end, the player
@@ -42,6 +43,7 @@ import io
 import json
 import os
 from pathlib import Path
+import re
 import shutil
 import subprocess
 import sys
@@ -62,6 +64,7 @@ SCENES = {
                "window_seconds": 35.0},
 }
 FOG_START_DRAWS = 20
+FOG_SUSTAIN_SECONDS = 5.0
 SERIES = ("wall_ms", "gpu_ms", "guest_ms", "host_ms", "compile_ms", "wait_drawable_ms", "wait_inflight_ms",
           "wait_readback_ms", "sleep_ms", "present_interval_ms")
 THRESHOLDS = (16.7, 33.3, 50.0)
@@ -101,8 +104,18 @@ def scene_window(scene, events, rows, window_seconds=None):
     if scene == "opening":
         opened = [e for e in events if e["kind"] == "map-open" and e["detail"].lower() == "a10.map"]
         after = opened[0]["serial"] if opened else 0
-        start = next((index for index, row in enumerate(rows)
-                      if row["serial"] > after and row.get("fog_draws", 0) >= FOG_START_DRAWS), None)
+        # (the fog held for FOG_SUSTAIN_SECONDS: the opening's first frames
+        # flash it for a moment before a black interval)
+        start, run_start = None, None
+        for index, row in enumerate(rows):
+            if row["serial"] <= after or row.get("fog_draws", 0) < FOG_START_DRAWS:
+                run_start = None
+                continue
+            if run_start is None:
+                run_start = index
+            if row["t_ms"] - rows[run_start]["t_ms"] >= FOG_SUSTAIN_SECONDS * 1000.0:
+                start = run_start
+                break
         if start is None:
             return [], "no frame with fog-plane draws (the opening's fog never appeared)"
         description = f"opening fog: {window_seconds:g} s from frame {rows[start]['serial']}"
@@ -281,8 +294,16 @@ def scene_data_root(scene, maps, core=None):
 def finish_run(run, target, log_path, csv_path, findings):
     result = dict(run, target=target, log=str(log_path), frame_log=str(csv_path), **{
         "valid": findings["valid"], "invalid_reason": findings["invalid_reason"], "findings": findings})
-    if Path(csv_path).is_file():
-        result["analysis"] = analyze(run["scene"], Path(csv_path).read_text())
+    text = Path(csv_path).read_text() if Path(csv_path).is_file() else ""
+    # (a frame log copied off the TV is the run's own only if its frame count
+    # is the one this launch's summary gave: else it is an earlier run's)
+    summary = findings.get("frame_log_summary")
+    match = re.match(r"# OpenCE frame log, level \d+, (\d+) frames", text)
+    if text and summary and match and int(match.group(1)) not in (summary["frames"], summary["frames"] + 1):
+        result["valid"], result["invalid_reason"] = False, "the frame log copied is not this run's"
+        return result
+    if text:
+        result["analysis"] = analyze(run["scene"], text)
         if not result["analysis"]["full"]["frames"]:
             result["valid"] = False
             result["invalid_reason"] = result["analysis"]["window"]
@@ -350,9 +371,42 @@ def file_digest(path):
     return hashlib.sha256(Path(path).read_bytes()).hexdigest()
 
 
-def run_device(runs, out, extra_env, device, core=None):
+def record_trace(device, trace, out, extra_env):
+    """an xctrace recording of a launch: devicectl launches the app (with
+    its environment and console), xctrace attaches by process name after
+    trace["attach_after"] seconds and records trace["seconds"]"""
+    name = f"trace-{trace['template'].replace(' ', '_')}-{trace['scene']}-{trace['resolution']}"
+    output, log_path = out / f"{name}.trace", out / f"{name}.log"
+    if output.exists():
+        shutil.rmtree(output)
+    udid = deploy.device_udid(device)
+    environment = run_environment(trace, extra=extra_env)
+    environment["HALO_EXIT_AFTER"] = str(trace["attach_after"] + trace["seconds"] + 15)
+    command = deploy.launch_args(device, environment)
+    print(f"== {name}\n+ {' '.join(command)}", flush=True)
+    with log_path.open("w") as log:
+        launched = subprocess.Popen(command, stdout=log, stderr=subprocess.STDOUT, text=True,
+                                    env=deploy.developer_environment())
+        time.sleep(trace["attach_after"])
+        recorded = deploy.run(deploy.trace_args(trace["template"], output, trace["seconds"], udid, "attach", "OpenCETV"),
+                              check=False, capture=True, timeout=trace["seconds"] + 600)
+        try:
+            launched.wait(timeout=trace["attach_after"] + trace["seconds"] + 180)
+        except subprocess.TimeoutExpired:
+            launched.send_signal(2)
+            launched.wait(timeout=30)
+    (out / f"{name}.xctrace.txt").write_text(recorded.stdout or "")
+    findings = deploy.log_findings(log_path.read_text(errors="replace"))
+    print(f"xctrace exit {recorded.returncode}; trace {'written' if output.exists() else 'MISSING'}: "
+          f"{(recorded.stdout or '')[-400:]}", flush=True)
+    return dict(trace, name=name, trace=str(output), trace_written=output.exists(), xctrace_exit=recorded.returncode,
+                xctrace_output=(recorded.stdout or "")[-2000:], findings=findings)
+
+
+def run_device(runs, out, extra_env, device, core=None, traces=(), trace_results=None):
     """the runs on the Apple TV: the owner's config.toml and init.txt backed
     up first and put back afterwards whatever happens (and checked)"""
+    trace_results = [] if trace_results is None else trace_results
     backups = SCRATCH / "tv-config-backups"
     backups.mkdir(parents=True, exist_ok=True)
     stamp = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
@@ -388,9 +442,33 @@ def run_device(runs, out, extra_env, device, core=None):
             results.append(finish_run(run, "device", log_path, csv_path, findings))
             print(markdown(results[-1:]).splitlines()[2], flush=True)
             write_results(out, results, {"label": "partial (device)"})
-            if findings["background_gpu_errors"]:
-                print("the TV is not showing the app (GPU work refused in the background): stopping", flush=True)
+            if not findings["valid"] and findings["invalid_reason"] != "the game trapped":
+                print(f"stopping the batch: {findings['invalid_reason']} (the TV may be in use or asleep)", flush=True)
                 break
+        if traces and all(result["valid"] for result in results):
+            for trace in traces:
+                # (attach when the opening's fog is up: the frame log's time of
+                # the window's start in this session's first valid run of it,
+                # plus the app's start-up before the frame log's clock, ~3 s)
+                measured = [r for r in results if r["scene"] == trace["scene"] and r.get("analysis", {}).get("full", {})
+                            .get("frames")]
+                trace["attach_after"] = 30
+                if measured:
+                    events, rows = parse_frame_log(Path(measured[-1]["frame_log"]).read_text())
+                    window, _ = scene_window(trace["scene"], events, rows)
+                    if window:
+                        trace["attach_after"] = int(window[0]["t_ms"] / 1000.0 + 3 + 5)
+                init = "\r\n".join(SCENES[trace["scene"]]["init"]) + "\r\n"
+                if init != current_init:
+                    init_path = out / f"init-{trace['scene']}.txt"
+                    init_path.write_text(init)
+                    deploy.run(deploy.copy_args("to", device, init_path, f"{container}/init.txt"), timeout=120)
+                    current_init = init
+                results_trace = record_trace(device, trace, out, extra_env)
+                trace_results.append(results_trace)
+                if not results_trace["findings"]["valid"]:
+                    print(f"stopping: trace run invalid ({results_trace['findings']['invalid_reason']})", flush=True)
+                    break
     finally:
         deploy.run(deploy.copy_args("to", device, init_backup, f"{container}/init.txt"), timeout=120, check=False)
         deploy.run(deploy.copy_args("to", device, config_backup, f"{container}/config.toml"), timeout=120, check=False)
@@ -476,6 +554,10 @@ def main(argv=None):
     p.add_argument("--out", required=True)
     p.add_argument("--env", action="append", default=[], help="extra KEY=VALUE for every run")
     p.add_argument("--device", default=deploy.DEVICE)
+    p.add_argument("--install", action="store_true", help="device: install the signed build first (in the session)")
+    p.add_argument("--traces", default="", help="device: xctrace templates to record after the runs, comma-separated "
+                   "(the opening at 4K, warm), e.g. 'Metal System Trace,Time Profiler'")
+    p.add_argument("--trace-seconds", type=int, default=20)
     p.add_argument("--no-lock", action="store_true")
     p = sub.add_parser("analyze")
     p.add_argument("csv")
@@ -519,7 +601,17 @@ def main(argv=None):
         elif args.target == "simulator":
             results = run_simulator(runs, args.maps, out, extra, args.app, args.core)
         else:
-            results = run_device(runs, out, extra, args.device, args.core)
+            if args.install:
+                deploy.run(["xcrun", "devicectl", "device", "install", "app", "--device", args.device,
+                            deploy.SIGNED], timeout=900)
+            # (the traces reuse the salt of the last 4K opening runs: warm)
+            salts = [r["salt"] for r in runs if r["scene"] == "opening" and r["resolution"] == 2160]
+            traces = [{"template": template, "scene": "opening", "resolution": 2160, "mode": "warm",
+                       "repeat": 0, "salt": salts[-1] if salts else "trace", "seconds": args.trace_seconds,
+                       "attach_after": None} for template in args.traces.split(",") if template]
+            trace_results = []
+            results = run_device(runs, out, extra, args.device, args.core, traces, trace_results)
+            meta["traces"] = trace_results
     meta["finished"] = datetime.datetime.now(datetime.timezone.utc).isoformat()
     write_results(out, results, meta)
     print(markdown(results))
