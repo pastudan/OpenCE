@@ -123,6 +123,14 @@ int host_sdl_glob_directory(const char *path, const char *pattern, unsigned int 
 /* the window's CAMetalLayer made, and the device's state with it */
 int host_metal_attach(unsigned int window);
 int host_metal_supports_bc(void);
+/* a DXT texture on a GPU without BC formats: its blocks (one face's levels
+after another's, face_bytes apart) converted on the host (host_textures.h)
+into what into names (_metal_bc_*), and the texture defined and filled as
+host_metal_texture_define and host_metal_texture_upload would; kind is
+_metal_bc1 to _metal_bc3 */
+void host_metal_texture_bc(unsigned int texture, int type, int kind, int into, unsigned int width,
+	unsigned int height, unsigned int depth, unsigned int levels, unsigned int swizzle, const void *data,
+	unsigned int face_bytes);
 void host_metal_set_vsync(int interval);
 void host_metal_screen_effect(int type, int passes, float radius, int video);
 void host_metal_profile_phase(int profile, int begin);

@@ -696,10 +696,31 @@ void halo_custom_edition_texels_forget(void)
 }
 
 #ifdef HALO_METAL
+/* display.texture_format, for a GPU without BC formats: _metal_bc_exact or
+_metal_bc_astc, converted on the host; -1 ("guest"), decoded here */
+static int bc_conversion(void)
+{
+	static int conversion = -2;
+
+	if (conversion == -2)
+	{
+		const char *name = config_string("display.texture_format");
+
+		conversion = !strcmp(name, "astc") ? _metal_bc_astc : !strcmp(name, "guest") ? -1 : _metal_bc_exact;
+		if (!host_metal_supports_bc())
+		{
+			platform_log("textures: the GPU has no BC formats: DXT textures %s", conversion == _metal_bc_astc ?
+				"converted to ASTC on the host" : conversion < 0 ? "decoded in the game" : "decoded on the host");
+		}
+	}
+	return conversion;
+}
+
 /* The macOS build's textures are the host's Metal ones (handles), made
 again at each upload (a frame on the GPU keeps drawing with the old one):
-DXT as Metal's BC formats, the rest decoded into BGRA, each with its
-channels as the Custom Edition order samples them. */
+DXT as Metal's BC formats, or where the GPU has none, the blocks converted
+on the host (host_metal_texture_bc), the rest decoded into BGRA, each with
+its channels as the Custom Edition order samples them. */
 static void upload(GLuint texture, GLenum target, const struct xgpu_texture_description *description,
 	const unsigned char *base, const D3DCOLOR *palette, unsigned char channel_order)
 {
@@ -712,6 +733,17 @@ static void upload(GLuint texture, GLenum target, const struct xgpu_texture_desc
 	unsigned int format = METAL_FORMAT_BGRA8, swizzle = 0, channel;
 	BOOL compressed_upload = description->compressed && host_metal_supports_bc();
 
+	for (channel = 0; channel < 4; channel++)
+		swizzle |= (unsigned int)(METAL_SWIZZLE_RED + custom_edition_channel_sources[channel_order][channel]) << (channel * 8);
+	if (description->compressed && !compressed_upload && bc_conversion() >= 0)
+	{
+		host_metal_texture_bc(texture, description->cube_map ? _metal_texture_cube :
+			target == GL_TEXTURE_3D ? _metal_texture_3d : _metal_texture_2d, information.kind == _texel_dxt1 ?
+			_metal_bc1 : information.kind == _texel_dxt3 ? _metal_bc2 : _metal_bc3, bc_conversion(),
+			(unsigned int)description->width, (unsigned int)description->height, (unsigned int)description->depth,
+			(unsigned int)description->levels, swizzle, base, (unsigned int)face_size);
+		return;
+	}
 	if (compressed_upload)
 	{
 		format = information.kind == _texel_dxt1 ? METAL_FORMAT_BC1 : information.kind == _texel_dxt3 ?
@@ -727,8 +759,6 @@ static void upload(GLuint texture, GLenum target, const struct xgpu_texture_desc
 			return;
 		}
 	}
-	for (channel = 0; channel < 4; channel++)
-		swizzle |= (unsigned int)(METAL_SWIZZLE_RED + custom_edition_channel_sources[channel_order][channel]) << (channel * 8);
 	host_metal_texture_define(texture, description->cube_map ? _metal_texture_cube :
 		target == GL_TEXTURE_3D ? _metal_texture_3d : _metal_texture_2d, format, (unsigned int)description->width,
 		(unsigned int)description->height, (unsigned int)description->depth, (unsigned int)description->levels,
