@@ -534,3 +534,170 @@ GPU queueing, not compile, pipeline creation or texture upload.**
 - ARC throughout, as before. Device and simulator builds compile clean.
 - Mac and simulator runs: 0 prepare failures. On the TV: 0 shaders and 0
   pipelines failed to prepare.
+
+# GPU bandwidth (A12)
+
+Branch `tv/bandwidth` (on `tv/bench` `be9c4a19`). **Everything in this
+section so far is measured on the Mac (M4) or the tvOS simulator, not on the
+A12.** The device session (below, "Device: pending") will replace the
+expectations with TV numbers. Scratch results:
+`<scratch>/bw/` (Mac/simulator), `<scratch>/tvbench-out/device-bandwidth`
+(device, when run).
+
+## Tools added
+
+- `HALO_PASS_LOG=1` (with `HALO_FRAME_LOG=1`): one record per render pass
+  (targets, size, load/store actions, why it ended, draws, the rasterizer
+  phases in it) and its GPU time from `MTLCounterSampleBuffer` timestamps at
+  the pass's vertex and fragment stage boundaries; written as
+  `<frame log>-passes.csv`. `tools/metal_pass_log.py PASSES.csv --frames
+  FRAMES.csv --scene b30` sums it per phase and per pass index for the
+  steady window. Stage sampling: M4 yes; **tvOS simulator no** (draw and blit
+  boundaries only, so no per-pass time there); A12 unknown until the device
+  session (the fallback, `HALO_METAL_PASS_TIMING=buffers`, gives a command
+  buffer per pass).
+- Diagnostics, inert unless set: `HALO_METAL_PASS_SPLIT=phase` (end a pass
+  at every phase change, to time phases apart: adds loads/stores, so it
+  overstates), `HALO_METAL_SKIP_PHASES=17,22,...` (drop a phase's draws: an
+  upper bound on what it costs), `HALO_METAL_HOIST=0|toggle:N`,
+  `HALO_METAL_DEPTH_DISCARD=toggle:N`.
+- Scene `cryo` (`tvos_bench.py make-core --scene cryo`): the cryo bay from a
+  saved state, ~70 s a run instead of ~285 s. The tutorial's 6-pass screen
+  convolution runs ~5-13 s into it, then the fogged room (43 fog planes).
+- `tvos_bench.py run --signed APP` (install a private signed copy) and
+  `--no-push`; the pass log is copied off the TV with the frame log.
+
+## What the passes were (Mac, 3840x2160, steady window, before)
+
+The Mac draws the same frames as the TV at 3840x2160 when its window is
+16:9 (`HALO_WINDOW_SIZE=1920x1080`; the default 4:3 window gives 2880x2160).
+Pass counts agree with the A12 baseline (bridge 9.8, b30 18, cryo 13).
+
+| scene | passes/frame | screen target (c1+d2, 3840x2160 BGRA8 + D32S8) passes | attachment loads + stores a frame |
+|---|---|---|---|
+| a10 bridge | 9.8 | 4 (1 clear + 3 reloads) | 208 + 283 MB |
+| b30 beach | 18 | 7 (1 clear + 6 reloads) | 448 + 523 MB |
+| a10 cryo bay | 13.5 | 5 (1 clear + 4 reloads); 20 during the convolution | 317 + 392 MB |
+
+Why the screen pass was broken: every small offscreen pass Halo draws
+between its phases ended it, and the next screen draw loaded colour, depth
+and stencil again (~75 MB in, ~75 MB out at 4K): the shadow maps (128x128,
+2-3 lights, each a pair of passes), the water's bump map and its 4 mips
+(b30), a 64x64 HUD meter, a mip-composite blit. No same-target consecutive
+passes, no empty passes, no feedback copies (all ~0). The depth/stencil
+store was always Store. Full per-pass listings:
+`<scratch>/bw/mac-pass-169/*`, `<scratch>/bw/mac-pass-cryo/*`.
+
+## Per-phase GPU time (Mac M4, 3840x2160, pass per phase: diagnostic)
+
+Fragment-stage ms a frame with `HALO_METAL_PASS_SPLIT=phase` (hoisting off).
+The split adds a 4K load+store per phase (22-31 passes a frame), so
+absolute numbers are inflated and the first pass after a wait carries it;
+use them for the ranking, not as A12 milliseconds. The A12 table comes from
+the device session.
+
+| scene | top phases (ms/frame) | sum | frame GPU span |
+|---|---|---|---|
+| bridge | shadows 1.29, diffuse lights 0.96, reflections 0.77, queued transparents 0.67, textures 0.61, lightmaps 0.57, fog planes 0.56, reflection masks 0.55, specular 0.47, sky 0.41 | 7.4 | 6.6 |
+| b30 | queued transparents 2.15, shadows 1.90, lightmaps 0.62, textures 0.60, fog planes 0.56, water 0.48, sky 0.44, models 0.43, HUD 0.40 | 7.9 | 6.4 |
+| cryo | shadows 2.06, reflections 1.22, textures 0.90, lightmaps 0.88, fog planes 0.81, reflection masks 0.77, models 0.43, transparents 0.30 | 7.6 | 6.6 |
+| cryo, convolution frames | the 6 screen-effect passes 3.26 of 9.2 | 9.2 | |
+
+Ceilings by dropping phases (`HALO_METAL_SKIP_PHASES`, diagnostic, Mac at
+7680x4320 uncapped, where the M4 is GPU-bound; fps, hoisting on):
+
+| dropped | cryo | b30 |
+|---|---|---|
+| nothing | 96.7 | 66.1 |
+| fog planes (17) | 100.7 (+4%) | 70.4 (+7%) |
+| queued transparents (22) | 99.2 (+3%) | 118.8 (CPU-capped: +80% or more) |
+| screen effect (26) | 92.6 (noise) | 66.0 |
+| 17 + 22 | 109.0 (+13%) | 119.6 |
+| 17 + 22 + 26 | 115.3 (+19%) | 119.6 |
+
+So in b30 the transparents (marines' and covenant effects, particles) are
+the largest single cost; in the cryo bay the fog planes and transparents
+together are ~13% and the rest is the ordinary opaque scene. Removing fog
+or transparents is not an option (quality); these bound what any fog or
+transparent optimisation can win.
+
+## Change 1: hoisting small passes out of the screen's pass (default on)
+
+`d9ebe84f`. The screen's pass is parked (encoder left open) while the small
+passes and blits are encoded into their own command buffer, committed
+ahead of the frame's; the screen pass then continues. Dependency rules
+(per-handle "read/written by command buffer N"; a shadow map the screen
+pass already sampled is renamed to a pooled texture; readbacks, present,
+feedback copies, redefinitions unpark first) are in host_metal.m's comment.
+`HALO_METAL_HOIST=0` restores the old behaviour.
+
+| scene (Mac, 3840x2160) | passes/frame | loads + stores a frame |
+|---|---|---|
+| bridge | 9.8 -> 7.2 | 208 + 283 -> 13 + 88 MB |
+| b30 | 18 -> 12 | 448 + 523 -> 0.3 + 75 MB |
+| cryo | 13.5 -> 9.5 | 317 + 392 -> 20 + 95 MB |
+
+Throughput, Mac at 7680x4320 (GPU-bound there; at 3840x2160 the Mac runs
+~119 fps either way, capped by CPU), steady window, two runs each:
+
+| scene | before fps | after fps | wall p95 before -> after |
+|---|---|---|---|
+| bridge | 67.7 / 63.6 | 68.2 / 68.0 | 19.3 / 20.6 -> 19.4 / 19.5 ms |
+| b30 | 57.4 / 55.7 | 67.1 / 67.2 (+18%) | 19.2 / 19.9 -> 16.7 / 16.7 ms |
+| cryo | 79.1 / 78.8 | 91.4 / 91.7 (+16%) | 12.5 / 12.5 -> 11.4 / 11.3 ms |
+
+The M4 has far more bandwidth per pixel than the A12, so the TV's gain may
+be larger; it is not measured yet.
+
+Visual check (numeric; images not viewed): Mac, the game's time frozen
+(`game_speed 0` over telnet) on the bridge, b30 and cryo states, back buffer
+read every 30 frames with `HALO_METAL_HOIST=toggle:30` (hoisting on and off
+in alternate 30-frame blocks of the same run): **every compared pair of
+3840x2160 frames, hoisted vs not, is byte-identical (max diff 0, mean 0)**
+in all three scenes. (Two separate launches of the same build differ by up
+to max 177 / mean 1.1 on the bridge from animation not stopped by
+game_speed, so cross-launch comparisons are not a usable check; the
+in-run toggle is.)
+
+## Change 2: depth/stencil not stored at the present (opt-in)
+
+`38b96a59`, `HALO_METAL_DEPTH_DISCARD=present`. The last pass of the frame
+stores depth and stencil as DontCare (store action chosen at pass end).
+Nothing reads the screen's depth after the frame: the guest never samples a
+depth target, readbacks/screenshots are colour only, and every 3D window
+clears depth+stencil first (`rasterizer_window_begin`). That last part is
+the game's behaviour, not a guarantee, so it is off by default and watched:
+a load of a discarded depth target is logged and turns it off. Mac: 0 such
+loads in bridge, b30, cryo; stores a frame 88 -> 46 / 75 -> 34 / 95 -> 54 MB;
+frozen-frame toggle check byte-identical in all three. Menus, cinematics
+and split screen not checked. Memoryless depth is not possible as long as
+any pass after the first reloads the screen depth (cryo's convolution and
+the unhoistable cases still do).
+
+## Not done, and why
+
+- **Memoryless attachments**: the screen's depth is reloaded by passes that
+  cannot be hoisted (the convolution passes ping-pong through the screen
+  colour target; the screen-effect target is 4K too); small targets are
+  sampled later. Nothing qualifies safely yet.
+- **Framebuffer fetch**: the only same-pixel reads (feedback copies) are 0
+  in every scene measured; the convolution samples at offsets, so it does
+  not qualify.
+- **Fog/transparent cost**: measured (above) but not reduced; any reduction
+  is a quality trade-off for the owner.
+
+## Simulator sanity (tvOS simulator, not a TV)
+
+tv/bandwidth `c3ad3460` simulator build, warm, 3840x2160, pass log on:
+bridge, b30 and cryo all ran their windows with no GPU errors; passes
+7.4 / 12.0 / 9.6 a frame (as the Mac); the simulator cannot sample at stage
+boundaries, so no per-pass times there. Its frame times are the Mac GPU's.
+
+## Device: pending
+
+Batch prepared (`<scratch>/bw/device-session.sh`): one install of the
+private signed copy (`<scratch>/tv-deploy-bandwidth/OpenCETV.app`, commit
+c3ad3460), then on the same binary: hoisting off vs on vs on + depth
+discard, warm, bridge/b30/cryo at 3840x2160, two repeats in alternating
+order, plus the pass log (phase split, and hoisted) for the A12 per-phase
+table. Waiting for the owner.
