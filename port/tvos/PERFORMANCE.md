@@ -701,3 +701,156 @@ c3ad3460), then on the same binary: hoisting off vs on vs on + depth
 discard, warm, bridge/b30/cryo at 3840x2160, two repeats in alternating
 order, plus the pass log (phase split, and hoisted) for the A12 per-phase
 table. Waiting for the owner.
+
+# Texture formats (A12)
+
+Branch `tv/textures`. **No device numbers yet**: everything below was
+measured on the Mac mini (M4) or in the tvOS simulator. It shows correctness,
+memory and fidelity, not A12 GPU time. The device A/B (guest / exact / astc,
+warm x2 and one cold each, 4K bridge and b30) is planned but has not been run.
+
+## What changed
+
+The A12 has no BC formats (`supportsBCTextureCompression` is NO, and so is
+the tvOS simulator's). Before this branch, `xbox_textures.c` decoded every
+DXT1/3/5 level to BGRA8 **inside the wasm2c guest** (bounds-checked
+loads), and uploaded it into shared-storage textures.
+
+- **Default `display.texture_format = "exact"`.** The guest passes the
+  map's blocks to a new host import, `host_metal_texture_bc`. The host
+  decodes them natively (`port/macos/host/host_textures.c`; large levels
+  are split across cores with `dispatch_apply`) and blits them into a
+  **private-storage** texture. A12-and-later GPUs compress private
+  textures losslessly; shared ones are not compressed. The texels are
+  bit-identical to the guest's decode (`tools/test_texture_formats.py`
+  compiles the guest's decoder from `xbox_textures.c` and compares).
+  Same-frame Mac screenshots with `HALO_METAL_NO_BC=1` are byte-identical
+  between `guest` and `exact`.
+- **Opt-in `"astc"`.** ASTC 4x4 LDR: 16 bytes per 4x4 block, a quarter of
+  BGRA8 and twice BC1. It is lossy on some textures (below), so it is not
+  the default.
+- **`"guest"`.** The old path, for A/B on one build.
+- **A Mac with BC is unchanged**: BC1/2/3 are uploaded as they are.
+  `HALO_METAL_NO_BC=1` forces the TV's path on a Mac.
+  `HALO_METAL_TEXTURE_SHARED=1` keeps the converted textures in shared
+  storage, to separate the storage effect from the format effect.
+- **Logging.** With `HALO_FRAME_LOG` on, the host logs `host: textures: ...`
+  at exit: sampled-texture MiB (the converted DXT part separately), the
+  peak, the conversion count and time.
+
+No on-disk transcode cache was added. Conversion costs tens of ms per
+scene for `exact` (below), so a cache in Library/Caches would not pay for
+its space.
+
+## Formats a10 and b30 actually use (map survey)
+
+| | DXT1 | DXT3 | DXT5 |
+|---|---|---|---|
+| textures (2D + cube; no DXT 3D) | 607 | 254 | 15 |
+| MiB in the maps (all levels) | 24.7 | 19.3 | 3.9 |
+| as BGRA8 | 197.2 | 77.1 | 15.8 |
+| as ASTC 4x4 | 49.3 | 19.3 | 3.9 |
+
+DXT is 44% of a10's 48.7 MiB of bitmap data and 61% of b30's 35.3 MiB.
+Of the DXT1 textures, 552 of 607 contain transparent (3-colour, index 3)
+texels. That rules out a 16-bit B5G6R5 fallback for most of them, and it is
+why DXT1 is not an exact ASTC mapping everywhere.
+
+## ASTC fidelity vs the exact decode (Mac, all DXT blocks of a10 + b30)
+
+Measured with `python3 tools/texture_formats.py a10.map b30.map`. The
+reference is the exact BGRA8 decode; errors are in 255ths, per channel, and
+alpha is included.
+
+| format | ASTC PSNR dB | blocks max err <=2 | 3-4 | >4 | per-texture PSNR p1/p5/p25/p50 | textures with a block err >4 | >32 |
+|---|---|---|---|---|---|---|---|
+| DXT1 | 35.9 | 83.2% | 10.2% | 6.5% | 28.0/31.1/35.0/39.4 | 83% | 81% |
+| DXT3 | 31.3 | 19.5% | 6.2% | 74.3% | 28.3/28.9/30.1/32.2 | 98% | 89% |
+| DXT5 | 31.2 | 29.3% | 13.8% | 56.9% | 28.5/28.5/30.0/31.9 | 100% | 100% |
+
+What the numbers mean:
+
+- **Exact up to rounding (<=2/255).** These blocks map onto one ASTC
+  colour line:
+  - DXT1 blocks of 4 colours, 3 colours without transparency, or
+    transparency plus one colour;
+  - DXT3/5 blocks of one alpha.
+- **Over 4/255, DXT1 (6.5% of blocks).** All of the larger errors are in
+  the **colour** of opaque texels in blocks that mix transparency with
+  several colours, where no ASTC 2-partition pattern separates them.
+  - Alpha is never off by more than 4.
+  - Two-partition endpoints lose 1-2 bits.
+- **DXT3/DXT5 alpha.** Varying alpha gets 3-4 levels on a dual plane,
+  against DXT3's 16 and DXT5's 8. That is the error in 74% / 57% of their
+  blocks, typically 16-32/255 on alpha gradients.
+- **Verdict: not near-lossless.** Most textures have at least one block
+  that is visibly off, so `astc` stays **opt-in**.
+  - A near-lossless DXT3/5 mode would need ASTC 4x4 at higher weight
+    precision, which does not fit 128 bits with 4-bit alpha; or an
+    alpha-only second texture, which needs shader changes.
+  - A per-texture policy (ASTC only for opaque DXT1, BGRA8 for the rest)
+    is possible but was not built or measured.
+- **Validation of the ASTC encoder.** Every ASTC block it produced for the
+  4.95M real blocks, plus 200k random ones, was decoded by ARM's `astcenc`
+  (Apache-2.0; compiled in scratch, not vendored). 0 structural
+  mismatches; only ±1 rounding where astcenc's float path rounds
+  differently. Same-frame Mac screenshots of `astc` diverge from `guest`
+  from the first frame that draws the level (PSNR 13.9 dB on that bridge
+  frame, which is largely a frame-timing difference, so it is not a
+  fidelity figure). Use the per-block table above.
+
+## Texture memory and conversion time (Mac M4, `HALO_METAL_NO_BC=1`, 1080p, 25 s from the saved state)
+
+Sampled textures are all sampled textures, not only DXT. The size is
+Metal's `allocatedSize`, or the computed size where that is 0.
+
+| scene | path | sampled MiB | of it converted DXT | DXT textures converted | conversion time | Metal device allocations |
+|---|---|---|---|---|---|---|
+| a10 bridge | Mac BC (reference) | 16.9 | 0 | 0 | 0 | 234.5 MiB |
+| a10 bridge | guest | 40.3 | (BGRA8 in guest) | 69 | not timed (in guest) | 257.8 MiB |
+| a10 bridge | exact | 40.3 | 29.2 | 69 (5.4 MiB blocks) | 14.3 ms | 257.8 MiB |
+| a10 bridge | astc | 18.6 | 7.5 | 69 | 76.0 ms | 236.0 MiB |
+| b30 beach | Mac BC (reference) | 93.5 | 0 | 0 | 0 | 311.2 MiB |
+| b30 beach | guest | 137.9 | (BGRA8 in guest) | 175 | not timed | 355.6 MiB |
+| b30 beach | exact | 137.9 | 53.1 | 175 (7.7 MiB blocks) | 20.3 ms | 355.5 MiB |
+| b30 beach | astc | 98.9 | 14.0 | 175 | 89.6 ms | 316.6 MiB |
+
+So at these scenes the BGRA8 fallback costs +23 MiB (bridge) and +44 MiB
+(b30) of texture memory over BC. ASTC gives back 22 MiB and 39 MiB of
+that.
+
+Conversion speed on one M4 core is ~900 Mtexels/s to BGRA8 and ~37
+Mtexels/s to ASTC (68 Mtexels/s for DXT1 alone). In the tvOS simulator
+(conversion on the host CPU, timed the same way), exact takes 34.6 ms
+(bridge) and 50.5 ms (b30) for the whole load, and ASTC 346 ms (bridge).
+A12 CPU times are not measured.
+
+## Simulator (tvOS simulator on the M4, 2160, warm, 1 run each; not A12 numbers)
+
+| scene | path | frames | wall p50 | p95 | max | GPU p50 | GPU p95 |
+|---|---|---|---|---|---|---|---|
+| a10 bridge | guest | 4517 | 5.1 | 20.4 | 249.1 | 0.3 | 0.5 |
+| a10 bridge | exact | 4674 | 5.1 | 20.3 | 229.7 | 0.3 | 0.5 |
+| a10 bridge | astc | 4822 | 5.0 | 20.3 | 247.8 | 0.3 | 0.5 |
+| b30 beach | guest | 9308 | 5.1 | 19.7 | 386.8 | 0.3 | 0.5 |
+| b30 beach | exact | 9381 | 5.1 | 19.7 | 350.8 | 0.3 | 0.5 |
+
+The simulator confirms the path:
+- it reports no BC;
+- the log says `DXT textures decoded on the host` or `converted to ASTC`;
+- all runs are valid.
+
+Its GPU is the Mac's, so these timings cannot show A12 texture bandwidth.
+Each path's largest frame is the state-load frame: `exact` is 20-36 ms
+shorter than `guest` (one run each, indicative only).
+
+## Planned device runs (not yet run)
+
+    python3 tools/tvos_deploy.py sign --output <scratch>/tv-deploy-textures/OpenCETV.app
+    python3 tools/tvos_bench.py run --target device --install --signed <scratch>/tv-deploy-textures/OpenCETV.app \
+        --maps <scratch>/halo_data/maps --plan bridge/2160/2,b30/2160/2 --modes warm --env HALO_TEXTURE_FORMAT=guest --out OUT-guest
+    # likewise without --env (exact) and with HALO_TEXTURE_FORMAT=astc; then one cold launch of each
+
+Label the cold runs **tv/bench-salt cold**: on this branch
+`HALO_METAL_SHADER_SALT` changes only a comment, so the system's pipeline
+cache may still hit. The real salt fix is on tv/shaders.
