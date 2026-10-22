@@ -333,3 +333,204 @@ substitute.
    is guest work (load), a one-off.
 5. **Lifecycle**: the TV asleep refuses launches; background GPU work is
    refused. Tooling detects both; no performance effect measured.
+
+# Shader compile stalls (A12)
+
+Branch `tv/shaders`. Measured 2026-10-21 on the owner's Apple TV 4K (2nd gen,
+A12, tvOS 27.0, CoreDevice `443953B8-…`), app built from **`aa7fd613`**.
+"Before" is the same build with the changes switched off by environment
+(`HALO_METAL_LANGUAGE_VERSION=default HALO_METAL_SHADER_CACHE=0`), so both
+use the corrected salt (below). 4K, 2 repeats, 20 runs, all valid. The TV's
+`config.toml` and `init.txt` were backed up and restored, and verified
+identical, after each batch. Raw logs: `<scratch>/shaders/device-before`,
+`device-after`. Mac/simulator data: `<scratch>/shaders/mac-*`, `sim-cache1`.
+
+## What was changed (3 commits + bench tooling)
+
+1. **MSL 2.2 instead of the SDK's default (4.0)** (`compile_options`,
+   `host_metal.m`). Most of a runtime compile was spent in the newest
+   `metal_stdlib`'s texture templates, not in the shader. A trivial pixel
+   shader with one `texture2d` argument costs 95 ms at 4.0, 4 ms at 2.0 and
+   27 ms at 2.2 on an M4. The translated shaders need only 2.1 (invariant
+   positions).
+   - Mac, a10 and b30's 228 dumped pixel shaders: 47 ms → 8.8 ms each.
+     Vertex shaders: 8 ms either way.
+   - Rendering is **bit-identical**: all 228 pixel shaders × 4 random trials
+     into RGBA32F, and all 56 vertex shaders' outputs captured in a buffer,
+     4.0 vs 2.2 (also vs 2.4 and 3.0).
+   - Negative control: safe math in place of fast math changes 191 of 228
+     pixel shaders and 56 of 56 vertex shaders, so the comparison does detect
+     a change.
+   - `HALO_METAL_LANGUAGE_VERSION` selects another version for A/B.
+2. **The salt was only half cold.** `HALO_METAL_SHADER_SALT` was a comment,
+   which leaves the AIR unchanged, so the system's *pipeline* cache still
+   hit.
+   - It now also renames the entry point (`fragment_main_salt_<salt>`).
+   - Mac b30 cold pipeline CPU: 0.30 → 0.54 s.
+   - **The "Baseline (A12 device)" cold numbers above undercount pipeline
+     compile by about that much.**
+3. **A shader cache with background preparation.**
+   - What it stores (`host_shader_manifest.c`, `Library/Caches/<bundle id>/metal_shaders.manifest`):
+     - the source of every shader the game asked for, and what each draw
+       pipeline was made of;
+     - never compiled code.
+   - At the next launch, two threads compile those shaders, then those
+     pipelines, from the moment the device exists.
+   - A draw whose shader text is exactly a prepared one takes that function,
+     waiting if a thread is mid-compile. Any other draw compiles on the main
+     thread as before.
+   - The prepared pipelines fill the system's pipeline cache, so the draws'
+     own `newRenderPipelineState` calls hit it.
+   - The file key:
+     - GPU, MSL version and record layout must match, else the file is not
+       read;
+     - executable UUID and OS version must match, else the file is read and
+       prepared, then started again. So an app or OS update is covered.
+   - Records are checksummed; a bad or partial record ends the read and is
+     cut off. The file is flock'd and capped at 32 MiB.
+   - `HALO_METAL_SHADER_CACHE=0` turns it off;
+     `HALO_METAL_SHADER_CACHE_RESET=1` empties it.
+   - `tools/tvos_bench.py` uses its own file (`tvbench_shaders.manifest`) and
+     empties it on every cold run. New mode **primed**: a new salt, so the
+     system caches miss, with the record the cold run left. This is a launch
+     after an OS update, by someone who has played before.
+
+## A12 results (4K, per run; "in play" = after the load frame)
+
+| build | scene | mode | rep | load frame s | run >50 ms | run >100 ms | in-play >50 | in-play >100 | worst in-play ms | in-play compile frames (>5 ms) | worst compile frame ms | run compile s |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| before | a10 bridge | cold | 1 | 7.06 | 9 | 7 | 7 | 5 | 696 | 5 | 689 | 8.28 |
+| before | a10 bridge | cold | 2 | 7.16 | 9 | 6 | 8 | 5 | 692 | 5 | 685 | 8.27 |
+| before | a10 bridge | warm | 1 | 0.57 | 16 | 5 | 15 | 4 | 686 | 4 | 618 | 1.33 |
+| before | a10 bridge | warm | 2 | 0.57 | 18 | 5 | 17 | 4 | 655 | 4 | 584 | 1.26 |
+| before | b30 beach | cold | 1 | 9.07 | 6 | 6 | 4 | 4 | 376 | 4 | 367 | 9.79 |
+| before | b30 beach | cold | 2 | 9.06 | 7 | 7 | 5 | 5 | 608 | 5 | 596 | 10.25 |
+| before | b30 beach | warm | 1 | 0.63 | 4 | 2 | 2 | 0 | 67 | 0 | 1 | 0.03 |
+| before | b30 beach | warm | 2 | 0.68 | 3 | 2 | 1 | 0 | 72 | 0 | 1 | 0.03 |
+| after | a10 bridge | cold | 1 | 2.56 | 25 | 6 | 23 | 4 | 255 | 9 | 194 | 2.95 |
+| after | a10 bridge | cold | 2 | 2.58 | 26 | 5 | 25 | 4 | 267 | 9 | 193 | 2.96 |
+| after | a10 bridge | warm | 1 | 0.56 | 17 | 1 | 16 | 0 | 85 | 0 | 3 | 0.02 |
+| after | a10 bridge | warm | 2 | 0.56 | 15 | 1 | 14 | 0 | 79 | 0 | 3 | 0.03 |
+| after | a10 bridge | primed | 1 | 1.75 | 14 | 1 | 13 | 0 | 72 | 0 | 3 | 1.15 |
+| after | a10 bridge | primed | 2 | 1.75 | 16 | 1 | 15 | 0 | 81 | 0 | 3 | 1.15 |
+| after | b30 beach | cold | 1 | 3.55 | 7 | 4 | 5 | 2 | 104 | 6 | 91 | 3.40 |
+| after | b30 beach | cold | 2 | 3.18 | 4 | 3 | 2 | 1 | 103 | 4 | 91 | 3.00 |
+| after | b30 beach | warm | 1 | 0.58 | 3 | 2 | 1 | 0 | 70 | 0 | 1 | 0.02 |
+| after | b30 beach | warm | 2 | 0.59 | 3 | 2 | 1 | 0 | 55 | 0 | 1 | 0.02 |
+| after | b30 beach | primed | 1 | 1.99 | 3 | 2 | 1 | 0 | 58 | 0 | 1 | 1.31 |
+| after | b30 beach | primed | 2 | 1.94 | 4 | 2 | 2 | 0 | 71 | 1 | 47 | 1.30 |
+
+("Run" columns include the load frames and the frame after a saved state
+is read, which is guest work, about 220 ms.)
+
+**Cold (first launch ever, or a new GPU or compiler).**
+- Compile per run: 8.3 → 3.0 s (bridge), 9.8–10.2 → 3.0–3.4 s (b30).
+- Load frame: 7.1 → 2.6 s, and 9.1 → 3.2–3.6 s.
+- Worst in-play frame: 692–696 → 255–267 ms, and 376–608 → 103–104 ms.
+- In-play stalls are **reduced, not eliminated**: there are still 1–4 frames
+  over 100 ms, all compile.
+
+**Warm (same build and OS).**
+- Before, a10 bridge still compiled 1.3 s in 4 frames late in the run, up to
+  686 ms. The same happened in the tv/bench baseline (1.2 s): the system cache
+  does not always keep what was compiled shortly before the previous run
+  exited. With the cache they are prepared at launch: 0 compile frames.
+
+**Primed (OS or app update, the game played before).**
+- 0 in-play frames over 100 ms.
+- 0 compile frames over 5 ms, except one of 47 ms.
+- Worst in-play frame 58–81 ms. All the remaining compile, 1.15–1.31 s, is in
+  the load frame. On the TV the threads prepared the 76–82 shaders in about
+  1.6 s and the 56–62 pipelines in about 0.45 s.
+
+**Load time.**
+- Cold: −4.5 to −5.9 s.
+- Warm: unchanged.
+- Primed vs warm: +1.2–1.4 s, because the main thread waits for prepared
+  compiles. That is the cost of having them out of play.
+
+The remaining in-play frames over 50 ms in warm and primed runs have **no
+compile**. They wait about 35–55 ms for a drawable with the GPU sum at 90–110
+ms (bridge about 50 s in; b30's frame after the state read). That is GPU-bound
+work for the bandwidth item. After-cold bridge shows more frames over 50 ms
+(25 vs 9) because that same GPU-bound stretch is no longer hidden behind the
+compile stalls; warm runs before and after have the same count (15–18).
+
+**The cryo bay (from the baseline logs, not rerun).** None of its 45 cold / 28
+warm frames over 50 ms in the first 5 s compile (compile 0.0–0.8 ms) or copy
+(0 feedback copies). Host time (encoding plus uploads) is 4.7–6.3 ms. In the
+cold run they wait for a drawable (37 ms mean); in the warm run, for a frame
+in flight (36 ms mean). The command-buffer GPU sum is 77–122 ms. **They are
+GPU queueing, not compile, pipeline creation or texture upload.**
+
+## Variant structure (a10 bridge + b30 beach, Mac dump)
+
+- **Library variant:** one `newLibraryWithSource` per guest shader key.
+  - A pixel shader per `nv2a_pixel_shader_key`: combiner state, texture
+    modes, sampler types, alpha kill/test, fog, per-pixel lighting, …
+  - A vertex shader per (program, immediate/stream, lit/unlit), with the
+    packed-attribute mask in its text.
+  - Bridge: 27 VS + 111 PS handles (49 distinct PS sources). b30: 29 VS + 117
+    PS handles (51 distinct). 112 distinct sources in total, 1.5 MB.
+- **Pipeline variant:** `pipeline_key` = (VS handle, PS handle, vertex-layout
+  handle, colour format, depth format, blend enable/src/dst/op/write mask).
+  56 (bridge) and 61 (b30) pipelines.
+  - Vertex layout = attribute formats, offsets and buffers, plus strides and
+    the constant step.
+- Duplicate PS sources (same text, another handle) compile again. The
+  system's cache makes that cheap within a run.
+
+## Options evaluated
+
+- **Async compile with a fallback.** Not built. A draw whose shader has
+  never been seen needs it in that frame. Without a fallback, the wait is
+  only moved; with one (skip the draw, or draw a generic shader) the picture
+  changes, which needs the owner's approval. The record plus background
+  preparation gives the asynchronous benefit with no visual change, for every
+  launch except the first.
+- **Library batching** (Mac): N shaders in one library, each in its own
+  namespace.
+  - At MSL 4.0: 47 ms/shader alone, 10.9 batched by 8, 6.4 by 32.
+  - At 2.2: 8.8, 4.2 and 3.5.
+  - 4 parallel compiles: 2.9 ms/shader wall.
+  - Batching needs the variants known in advance, i.e. the record. It could
+    shorten the primed load frame further (follow-up).
+  - Function constants would mean rewriting the translator
+    (`nv2a_psh.c`/`nv2a_vsh.c`); not attempted.
+- **Precompiled `.metallib`.** The Metal Toolchain is not installed on this
+  Mac (`xcrun metal` says to run `xcodebuild -downloadComponent
+  MetalToolchain`), and I did not install it. The variant set is
+  data-dependent: 77 distinct PS sources in two scenes, and more key
+  combinations over the campaign and Custom Edition maps. So `default.metallib`
+  cannot enumerate it. Not pursued.
+- **MTLBinaryArchive.** Not measured. For the same build and OS the system
+  cache already makes warm compile about 0, and an OS update can invalidate
+  an archive (the SDK header says so). That is the case primed covers. It
+  also skips only the back end; the source compile is the larger part (Mac
+  b30 cold: shader 0.77 s, pipeline 0.54 s). Not ruled out; untested.
+- **Other compile options.** `preserveInvariance` off: no change (8.8 ms).
+  `optimizationLevel = Size`: slower (9.6 ms). Narrower `#include`s in place
+  of `metal_stdlib`: no change at either version. The cost is the language
+  version's library, not the includes.
+
+## Correctness
+
+- Variant keys are unchanged. A prepared function is used only for the
+  identical compiled text: the same `shader_text()` applied to the same
+  source, the same kind and the same options. Otherwise the main thread
+  compiles from the game's source as before.
+- Prepared pipelines are dropped. Draws still make their own, keyed as
+  before.
+- Threads:
+  - only the main thread writes the record and its tables;
+  - prepared shaders are shared under one `NSCondition`;
+  - shader diagnostics' environment is read once on the main thread.
+- The file (C harness `tools/test_metal_shader_manifest.py`):
+  - absent or another device's: nothing prepared;
+  - another build's: prepared, then restarted;
+  - damaged or partial records: cut off;
+  - locked by another copy: not kept;
+  - unwritable folder: the renderer goes on without a record.
+- ARC throughout, as before. Device and simulator builds compile clean.
+- Mac and simulator runs: 0 prepare failures. On the TV: 0 shaders and 0
+  pipelines failed to prepare.
