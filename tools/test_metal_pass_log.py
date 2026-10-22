@@ -44,7 +44,10 @@ def test_hoisting_unparks_before_everything_that_must_follow_the_screen():
     metal = (ROOT / "port/macos/host/host_metal.m").read_text()
 
     def body(signature):
+        # the definition, not a forward declaration (a prototype ends in ';' before any '{')
         start = metal.index(signature)
+        while metal.index(";", start) < metal.index("{", start):
+            start = metal.index(signature, start + 1)
         return metal[start:metal.index("\n}\n", start)]
     # a readback, the present and a feedback copy see the screen's pass whole
     assert "park_end();\n\t\tblit = blit_begin();" in body("int host_metal_texture_read(")
