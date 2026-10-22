@@ -749,6 +749,8 @@ def main(argv=None):
     p.add_argument("--env", action="append", default=[], help="extra KEY=VALUE for every run")
     p.add_argument("--device", default=deploy.DEVICE)
     p.add_argument("--install", action="store_true", help="device: install the signed build first (in the session)")
+    p.add_argument("--signed", default=str(deploy.SIGNED), help="device: the signed app to install (default the shared "
+                   "tv-deploy copy; children working in parallel should sign to a path of their own)")
     p.add_argument("--traces", default="", help="device: xctrace templates to record after the runs, comma-separated "
                    "(the opening at 4K, warm), e.g. 'Metal System Trace,Time Profiler'")
     p.add_argument("--trace-seconds", type=int, default=20)
@@ -804,7 +806,7 @@ def main(argv=None):
             "started": datetime.datetime.now(datetime.timezone.utc).isoformat(), "warmup_seconds": WARMUP_SECONDS,
             "scenes": SCENES, "extra_env": extra}
     if args.target == "device":
-        build_info = SCRATCH / "tv-deploy" / "build-info.json"
+        build_info = Path(args.signed).parent / "build-info.json"
         meta["installed_build"] = json.loads(build_info.read_text()) if build_info.is_file() else None
     print(f"{len(runs)} runs:", ", ".join(f"{r['scene']}/{r['resolution']}/{r['mode']}/{r['repeat']}" for r in runs))
     task = f"tvos_bench {args.target}: {len(runs)} runs"
@@ -816,7 +818,7 @@ def main(argv=None):
         else:
             if args.install:
                 deploy.run(["xcrun", "devicectl", "device", "install", "app", "--device", args.device,
-                            deploy.SIGNED], timeout=900)
+                            args.signed], timeout=900)
             # (the traces reuse the salt of the last 4K opening runs: warm)
             salts = [r["salt"] for r in runs if r["scene"] == args.trace_scene and r["resolution"] == 2160]
             traces = [{"template": template, "scene": args.trace_scene, "resolution": 2160, "mode": "warm",
