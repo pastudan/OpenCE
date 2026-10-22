@@ -1402,6 +1402,33 @@ static int define_private;
 
 static void textures_report(void);
 
+/* a texture's bytes: what Metal allocated, or (where it says 0, as the
+simulator does) its levels' texels in its format */
+static uint32_t texture_size(id<MTLTexture> texture)
+{
+	uint64_t bytes = texture.allocatedSize;
+	NSUInteger level;
+
+	if (bytes)
+		return (uint32_t)bytes;
+	for (level = 0; level < texture.mipmapLevelCount; level++)
+	{
+		uint64_t w = texture.width >> level ? texture.width >> level : 1;
+		uint64_t h = texture.height >> level ? texture.height >> level : 1;
+		uint64_t d = texture.depth >> level ? texture.depth >> level : 1;
+
+		switch ((unsigned int)texture.pixelFormat)
+		{
+		case METAL_FORMAT_BC1: bytes += ((w + 3) / 4) * ((h + 3) / 4) * 8 * d; break;
+		case METAL_FORMAT_BC2:
+		case METAL_FORMAT_BC3:
+		case METAL_FORMAT_ASTC_4X4: bytes += ((w + 3) / 4) * ((h + 3) / 4) * 16 * d; break;
+		default: bytes += w * h * d * 4; break;
+		}
+	}
+	return (uint32_t)(bytes * texture.arrayLength * (texture.textureType == MTLTextureTypeCube ? 6 : 1));
+}
+
 static void texture_account(uint32_t handle, id<MTLTexture> texture, int converted)
 {
 	static int reported;
@@ -1415,7 +1442,7 @@ static void texture_account(uint32_t handle, id<MTLTexture> texture, int convert
 	textures_total -= texture_bytes[handle];
 	if (texture_converted[handle])
 		textures_converted_total -= texture_bytes[handle];
-	texture_bytes[handle] = texture ? (uint32_t)texture.allocatedSize : 0;
+	texture_bytes[handle] = texture ? texture_size(texture) : 0;
 	texture_converted[handle] = (uint8_t)(texture && converted);
 	textures_total += texture_bytes[handle];
 	if (texture_converted[handle])
