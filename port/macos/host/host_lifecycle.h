@@ -1,7 +1,8 @@
 /*
 HOST_LIFECYCLE.H
 
-The app leaving the foreground and coming back (host_lifecycle.m).
+The app leaving the foreground and coming back, and the system short of
+memory (host_lifecycle.m).
 
 On the Apple TV the app stops being active for its Home button, Control
 Center, a screensaver, the TV going to sleep, or a launch while another app
@@ -20,7 +21,9 @@ threads (the vertical blank's, the audio's, the network's) run on through a
 stop, and a clock moved back under them would stall them.
 
 The Mac's app is never stopped (SDL sends no such events there): the gate is
-one atomic load.
+one atomic load. Memory pressure is watched on both, logged (and in the play
+telemetry, an "event" of kind "memory" with the footprint then), and answered
+by a trim of a step a frame (host_lifecycle_frame).
 */
 
 #ifndef __HALO_MACOS_HOST_LIFECYCLE_H
@@ -29,7 +32,7 @@ one atomic load.
 #include <stdint.h>
 
 /* the app's state watched (host_metal_attach, the main thread, once): SDL's
-app events */
+app events, the memory pressure */
 void host_lifecycle_start(void);
 
 /* before GPU work is committed: returns at once while the app is active;
@@ -37,7 +40,8 @@ otherwise, on the main thread, stops the game here until it is (1), and on
 another thread waits for it */
 int host_lifecycle_gate(void);
 
-/* at the end of a present (main thread) */
+/* at the end of a present (main thread): a memory warning's telemetry event,
+and a step of the trim it asked for */
 void host_lifecycle_frame(void);
 
 /* how many times the game has been stopped (the guest's: it compares) */

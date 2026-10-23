@@ -91,6 +91,19 @@ def test_report_of_no_lag_and_no_sessions(tmp_path):
     assert tele.report([]).endswith("No sessions.\n")
 
 
+def test_report_lists_lifecycle_and_memory_events(tmp_path):
+    lines = [second(t) for t in range(20)]
+    lines.insert(10, {"k": "event", "t": 9.5, "kind": "lifecycle", "detail": "will-resign-active"})
+    lines.insert(11, {"k": "event", "t": 9.6, "kind": "memory", "detail": "warning footprint 1180 MB avail 90 MB"})
+    (tmp_path / "b.jsonl").write_text("\n".join(json.dumps(line) for line in lines))
+    text = tele.report(tele.load_sessions([tmp_path]))
+    section = text[text.index("## Lifecycle and memory events"):]
+    assert "| 9.5 | lifecycle | will-resign-active | 901 |" in section
+    assert "| 9.6 | memory | warning footprint 1180 MB avail 90 MB | 901 |" in section
+    (tmp_path / "b.jsonl").write_text("\n".join(json.dumps(second(t)) for t in range(20)))
+    assert "## Lifecycle and memory events\n\nNone." in tele.report(tele.load_sessions([tmp_path]))
+
+
 def test_hitch_cause_is_the_largest_part():
     assert tele.hitch_cause({"compile_ms": 40, "guest_ms": 12})[0] == "shader compile"
     assert tele.hitch_cause({"guest_ms": 70, "file_ms": 3})[0] == "the game's own work (guest)"

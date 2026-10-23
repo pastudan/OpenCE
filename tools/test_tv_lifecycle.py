@@ -73,14 +73,21 @@ def test_no_blocking_gpu_wait_on_the_frame_path():
 def test_lifecycle_watches_sdl_app_events_and_the_launch_state():
     text = read("port/macos/host/host_lifecycle.m")
     for event in ("SDL_EVENT_WILL_ENTER_BACKGROUND", "SDL_EVENT_DID_ENTER_BACKGROUND",
-                  "SDL_EVENT_WILL_ENTER_FOREGROUND", "SDL_EVENT_DID_ENTER_FOREGROUND", "SDL_EVENT_TERMINATING"):
+                  "SDL_EVENT_WILL_ENTER_FOREGROUND", "SDL_EVENT_DID_ENTER_FOREGROUND", "SDL_EVENT_TERMINATING",
+                  "SDL_EVENT_LOW_MEMORY"):
         assert event in text
     assert "SDL_AddEventWatch" in text and "applicationState" in text
+    assert "DISPATCH_SOURCE_TYPE_MEMORYPRESSURE" in text
     stop = function_bodies(text)["stop"]
     # audio paused, the GPU drained, before the wait; time away skipped after
     order = [stop.index(call) for call in ("host_sdl_audio_pause_all(1)", "host_metal_drain()", "while (atomic_load(&away))",
                                            "host_frame_log_skip", "host_sdl_audio_pause_all(0)")]
     assert order == sorted(order)
+    # the memory warning: a telemetry event with the footprint, and a trim of a
+    # step a frame (host_lifecycle_frame), not all at once
+    frame = function_bodies(text)["host_lifecycle_frame"]
+    assert 'host_frame_log_event("memory"' in frame and "footprint" in frame
+    assert "host_metal_trim(trim_step, 0)" in frame and "for (" not in frame
 
 
 def test_the_game_is_paused_and_its_first_frame_clamped():

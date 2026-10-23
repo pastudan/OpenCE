@@ -3953,6 +3953,31 @@ int64_t host_metal_trim(int step, int stopped)
 					}
 				}
 			}
+			else if (prepared.condition)
+			{
+				/* the shader cache's prepared shaders no draw has taken yet:
+				one asked for later is compiled then (a memory warning's only:
+				they are what keeps a level's first draws from compiling) */
+				uint32_t dropped = 0;
+
+				[prepared.condition lock];
+				for (NSString *key in prepared.by_text.allKeys)
+				{
+					PreparedShader *shader = prepared.by_text[key];
+
+					if (shader.state == _prepared_compiling)
+						continue;
+					freed += (int64_t)shader.text.length;
+					shader.state = _prepared_taken;
+					shader.function = nil;
+					shader.text = nil;
+					[prepared.by_text removeObjectForKey:key];
+					dropped++;
+				}
+				[prepared.condition unlock];
+				if (dropped)
+					host_log("Metal: %u prepared shaders no draw had taken dropped", dropped);
+			}
 			return freed;
 		default:
 			return -1;

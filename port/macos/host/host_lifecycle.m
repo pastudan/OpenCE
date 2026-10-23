@@ -1,7 +1,7 @@
 /*
 HOST_LIFECYCLE.M
 
-The app's foreground state (host_lifecycle.h).
+The app's foreground state and the memory pressure (host_lifecycle.h).
 
 The state is SDL's app events, which come from UIKit's scene delegate and
 notifications on the main thread, as they happen (SDL_AddEventWatch: they
@@ -20,6 +20,7 @@ which is how the events that end the stop arrive.
 #include <TargetConditionals.h>
 #if TARGET_OS_TV || TARGET_OS_IOS
 #import <UIKit/UIKit.h>
+#include <os/proc.h>
 #endif
 #include <mach/mach.h>
 #include <dispatch/dispatch.h>
@@ -39,6 +40,16 @@ static _Atomic int away;
 launch, before the app was ever active (there is no game yet to pause) */
 static _Atomic unsigned int stops;
 static _Atomic int ever_active;
+/* the memory warnings so far, and the newest's level (1 warning, 2
+critical: dispatch's memory pressure, or UIKit's warning as 1) */
+static _Atomic unsigned int warnings;
+static _Atomic int warning_level;
+/* (the main thread's) the warnings answered, and the trim's next step */
+static unsigned int warnings_seen;
+static int trim_step = -1;
+static int64_t trim_freed;
+static uint64_t trim_started_ns;
+static dispatch_source_t pressure;
 /* another thread waiting at the gate (a texture conversion's command
 buffer, an audio thread): the main thread wakes it */
 static pthread_mutex_t away_lock = PTHREAD_MUTEX_INITIALIZER;
@@ -53,6 +64,15 @@ static uint64_t footprint_bytes(void)
 		information.phys_footprint : 0;
 }
 
+static uint64_t available_bytes(void)
+{
+#if TARGET_OS_TV || TARGET_OS_IOS
+	if (@available(tvOS 13.0, iOS 13.0, *))
+		return os_proc_available_memory();
+#endif
+	return 0;
+}
+
 static void away_set(int value, const char *why)
 {
 	if (!value)
@@ -64,6 +84,16 @@ static void away_set(int value, const char *why)
 	pthread_mutex_lock(&away_lock);
 	pthread_cond_broadcast(&away_changed);
 	pthread_mutex_unlock(&away_lock);
+}
+
+static void memory_warned(int level, const char *source)
+{
+	atomic_store(&warning_level, level);
+	atomic_fetch_add(&warnings, 1);
+	/* (the log line now, from whichever thread: the event and the trim on
+	the main thread's next frame, host_lifecycle_frame) */
+	host_log("lifecycle: memory %s (%s): footprint %.0f MB, %.0f MB more available", level >= 2 ? "critical" :
+		"warning", source, footprint_bytes() / 1048576.0, available_bytes() / 1048576.0);
 }
 
 static bool SDLCALL app_event(void *userdata, SDL_Event *event)
@@ -90,6 +120,9 @@ static bool SDLCALL app_event(void *userdata, SDL_Event *event)
 		host_log("lifecycle: terminating");
 		host_frame_log_event("lifecycle", "terminating");
 		host_telemetry_flush();
+		break;
+	case SDL_EVENT_LOW_MEMORY:
+		memory_warned(1, "low-memory");
 		break;
 	default:
 		break;
@@ -119,12 +152,29 @@ void host_lifecycle_start(void)
 			atomic_store(&ever_active, 1);
 	}
 #endif
+	/* (the kernel's pressure, which may come before or without UIKit's
+	warning: both are logged) */
+	pressure = dispatch_source_create(DISPATCH_SOURCE_TYPE_MEMORYPRESSURE, 0,
+		DISPATCH_MEMORYPRESSURE_WARN | DISPATCH_MEMORYPRESSURE_CRITICAL, dispatch_get_main_queue());
+	if (pressure)
+	{
+		dispatch_source_set_event_handler(pressure, ^
+		{
+			unsigned long flags = dispatch_source_get_data(pressure);
+
+			if (flags & (DISPATCH_MEMORYPRESSURE_WARN | DISPATCH_MEMORYPRESSURE_CRITICAL))
+				memory_warned(flags & DISPATCH_MEMORYPRESSURE_CRITICAL ? 2 : 1, "pressure");
+		});
+		dispatch_resume(pressure);
+	}
 }
 
 unsigned int host_lifecycle_stops(void)
 {
 	return atomic_load(&stops);
 }
+
+static int memory_event(void);
 
 /* (main thread) the game stopped until the app is active again */
 static void stop(void)
@@ -156,6 +206,9 @@ static void stop(void)
 			loop: the game is inside a run of it, SDL's call of the game) */
 			SDL_PumpEvents();
 			CFRunLoopRunInMode(kCFRunLoopDefaultMode, 0.1, true);
+			/* (a warning meanwhile: logged; the trim is done already) */
+			if (memory_event())
+				host_telemetry_flush();
 #if TARGET_OS_TV || TARGET_OS_IOS
 			/* (and UIKit's state itself: at a launch the scene may have
 			become active before the watch was added, its event missed) */
@@ -202,6 +255,54 @@ int host_lifecycle_gate(void)
 	return 1;
 }
 
+/* (main thread) a memory warning since the last look, as a telemetry event
+with the footprint then (whether the system warns before it takes memory
+back, PERFORMANCE.md); 1 if there was one */
+static int memory_event(void)
+{
+	unsigned int seen = atomic_load(&warnings);
+	char detail[64];
+	int level;
+
+	if (seen == warnings_seen)
+		return 0;
+	warnings_seen = seen;
+	level = atomic_load(&warning_level);
+	snprintf(detail, sizeof(detail), "%s footprint %.0f MB avail %.0f MB", level >= 2 ? "critical" : "warning",
+		footprint_bytes() / 1048576.0, available_bytes() / 1048576.0);
+	host_frame_log_event("memory", detail);
+	return 1;
+}
+
 void host_lifecycle_frame(void)
 {
+	if (memory_event() && trim_step < 0)
+	{
+		trim_step = 0;
+		trim_freed = 0;
+		trim_started_ns = host_frame_log_now();
+	}
+	if (trim_step >= 0)
+	{
+		/* (a step a frame: never one long stall on the main thread) */
+		int64_t freed = host_metal_trim(trim_step, 0);
+
+		if (freed < 0)
+		{
+			char detail[48];
+
+			snprintf(detail, sizeof(detail), "trimmed %.1f MB footprint %.0f MB", trim_freed / 1048576.0,
+				footprint_bytes() / 1048576.0);
+			host_frame_log_event("memory", detail);
+			host_log("lifecycle: memory trim: %.1f MB released over %d frames (%.0f ms); footprint now %.0f MB",
+				trim_freed / 1048576.0, trim_step, (host_frame_log_now() - trim_started_ns) / 1e6,
+				footprint_bytes() / 1048576.0);
+			trim_step = -1;
+		}
+		else
+		{
+			trim_freed += freed;
+			trim_step++;
+		}
+	}
 }

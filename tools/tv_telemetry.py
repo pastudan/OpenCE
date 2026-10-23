@@ -543,12 +543,35 @@ def report(sessions):
                          f"{_f(mean(s.get('gpu_p95') for s in rows), 2)} | {_f(mean(s.get('guest_ms') for s in rows), 2)} | "
                          f"{sum(s.get('tex_converts', 0) for s in rows)} | {_f(mean(s.get('stream_mb', 0) for s in rows))} | "
                          f"{_f(rows[-1].get('footprint_mb', 0), 0)} | {THERMAL[rows[-1].get('thermal', 0)]} |")
+    lines += ["", "## Lifecycle and memory events", ""] + lifecycle_events(sessions)
     overhead = [s.get("self_ms", 0) for s in all_seconds]
     if overhead:
         lines += ["", "## The recorder's own cost", "",
                   f"- {_f(mean(overhead), 3)} ms a second on the main thread (mean; max {_f(max(overhead), 3)}), "
                   f"{_f(mean(s.get('writer_ms', 0) for s in all_seconds), 3)} ms a second on its writer's queue."]
     return "\n".join(lines) + "\n"
+
+
+def lifecycle_events(sessions):
+    """the app leaving the foreground and coming back, and the memory
+    warnings (port/macos/host/host_lifecycle.h): each with the footprint of
+    the second before, so whether the system warned before it took memory
+    back shows"""
+    lines = []
+    for session in sessions:
+        events = [e for e in session["events"] if e.get("kind") in ("lifecycle", "memory", "active")]
+        if not events:
+            continue
+        lines += [f"{session['name']}:", "", "| t (s) | kind | detail | footprint MB (second before) |",
+                  "|---|---|---|---|"]
+        seconds = session["seconds"]
+        for event in events:
+            before = [s for s in seconds if s.get("t", 0) <= event.get("t", 0)]
+            footprint = before[-1].get("footprint_mb") if before else None
+            lines.append(f"| {_f(event.get('t', 0), 1)} | {event.get('kind')} | {event.get('detail', '')} | "
+                         f"{_f(footprint, 0) if footprint is not None else '-'} |")
+        lines.append("")
+    return lines or ["None."]
 
 
 # ---------- pulling
