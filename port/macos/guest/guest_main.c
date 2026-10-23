@@ -45,6 +45,18 @@ int main(int argc, char **argv)
 
 	(void)argc;
 	(void)argv;
+	/* HALO_OOB_TEST=<hex offset>: a deliberate read there, which must end
+	the game with an out-of-bounds trap (the memory is 0xA0000000 bytes:
+	tools/macos_build.py), whatever the host's bounds checking is */
+	if (getenv("HALO_OOB_TEST"))
+	{
+		unsigned long offset = strtoul(getenv("HALO_OOB_TEST"), NULL, 16);
+		volatile unsigned char *address = (volatile unsigned char *)offset;
+
+		fprintf(stderr, "guest: out-of-bounds test: reading 0x%lx\n", offset);
+		fprintf(stderr, "guest: out-of-bounds test: NOT TRAPPED, read %d\n", *address);
+		return 3;
+	}
 	if (root && *root && chdir(root) != 0)
 		fprintf(stderr, "cannot enter the data folder %s\n", root);
 	return halo_game_main();
