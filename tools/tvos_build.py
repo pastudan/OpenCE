@@ -22,6 +22,32 @@ def run(command):
     subprocess.run(list(map(str, command)), cwd=ROOT, check=True)
 
 
+ASSETS = ROOT / "port/tvos/Assets.xcassets"
+BRAND = "App Icon & Top Shelf Image"
+
+
+def add_icons(app, sdk):
+    """Compile the icon and Top Shelf images (port/tvos/Assets.xcassets, made
+    by tools/app_icon.py --tvos) into the app's Assets.car, and add the keys
+    actool says name them (CFBundleIcons, TVTopShelfImage) to its Info.plist.
+    Runs after every build, since cmake rewrites the plist."""
+    import plistlib
+    import tempfile
+    with tempfile.TemporaryDirectory() as directory:
+        partial = Path(directory) / "partial.plist"
+        run(["xcrun", "actool", ASSETS, "--compile", app, "--platform", sdk, "--target-device", "tv",
+             "--minimum-deployment-target", "17.4", "--app-icon", BRAND,
+             "--output-partial-info-plist", partial, "--errors", "--warnings",
+             "--output-format", "human-readable-text"])
+        keys = plistlib.loads(partial.read_bytes())
+    if not (app / "Assets.car").is_file() or "CFBundleIcons" not in keys:
+        raise RuntimeError("actool did not compile the app icon")
+    info_path = app / "Info.plist"
+    info = plistlib.loads(info_path.read_bytes())
+    info.update(keys)
+    info_path.write_bytes(plistlib.dumps(info, fmt=plistlib.FMT_BINARY))
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--platform", choices=("device", "simulator"), required=True)
@@ -55,6 +81,7 @@ def main():
          f"-DOPENCE_WASM_RUNTIME={tools['runtime']}", f"-DOPENCE_SIMDE={tools['simde']}",
          f"-DOPENCE_SDL_SOURCE={ROOT / 'build/macos/third_party' / ('SDL3-' + SDL_VERSION)}"])
     run(["cmake", "--build", build, "--parallel", args.jobs])
+    add_icons(build / "OpenCETV.app", sdk)
     platform = subprocess.check_output(["xcrun", "vtool", "-show-build", str(build / "OpenCETV.app/OpenCETV")], text=True)
     print(platform)
     expected = "TVOSSIMULATOR" if args.platform == "simulator" else "TVOS"

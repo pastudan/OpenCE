@@ -3,6 +3,7 @@
 
     python tools/app_icon.py
     python tools/app_icon.py --macos   # the Mac app's icon only (on a Mac)
+    python tools/app_icon.py --tvos    # the Apple TV app's icon and Top Shelf images only
 
 - opence-icon.png, the helmet on its background (512x512): the Windows
   executable's icon (port/windows/opence-icon.ico, which port/windows/halo.rc
@@ -134,6 +135,106 @@ def macos_icon(icon: Image.Image, render: Image.Image) -> None:
     print(f"{MACOS_ICON.relative_to(ROOT)}: 16 to 1024")
 
 
+TVOS_ASSETS = ROOT / "port/tvos/Assets.xcassets"
+TVOS_BRAND = "App Icon & Top Shelf Image"
+FONT = ROOT / "port/assets/fonts/OpenCE-Regular.ttf"
+
+
+def tvos_icons(icon: Image.Image, render: Image.Image) -> None:
+    """the Apple TV app's icon and Top Shelf images, as an asset catalog
+    (port/tvos/Assets.xcassets, which tools/tvos_build.py compiles into
+    OpenCETV.app with actool). A TV icon is a stack of layers the home screen
+    moves for its parallax: the background's gradient as the back layer
+    (opaque) and the helmet render as the front one, at 400x240 and 800x480,
+    and 1280x768 for the App Store. The Top Shelf images (1920x720 and
+    2320x720, with their @2x) are the same gradient with the helmet and the
+    name."""
+    import json
+    import shutil
+    from PIL import ImageDraw, ImageFont
+
+    top, bottom = background_gradient(icon, render)
+    info = {"author": "xcode", "version": 1}
+
+    def gradient(width: int, height: int) -> Image.Image:
+        rows = np.linspace(0.0, 1.0, height)[:, None]
+        data = np.zeros((height, width, 4), np.float64)
+        for channel in range(3):
+            data[..., channel] = top[channel] + (bottom[channel] - top[channel]) * rows
+        data[..., 3] = 255
+        return Image.fromarray(np.round(data).astype(np.uint8), "RGBA")
+
+    def helmet(width: int, height: int, fraction: float, centre_x: float = 0.5) -> Image.Image:
+        """the render on transparency, fraction of the height tall"""
+        side = int(round(height * fraction))
+        layer = Image.new("RGBA", (width, height), (0, 0, 0, 0))
+        layer.alpha_composite(render.resize((side, side), Image.LANCZOS),
+                              (int(round(width * centre_x - side / 2)), (height - side) // 2))
+        return layer
+
+    def write_json(path: Path, data: dict) -> None:
+        path.mkdir(parents=True, exist_ok=True)
+        (path / "Contents.json").write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+
+    if TVOS_ASSETS.exists():
+        shutil.rmtree(TVOS_ASSETS)
+    write_json(TVOS_ASSETS, {"info": info})
+    brand = TVOS_ASSETS / f"{TVOS_BRAND}.brandassets"
+
+    def stack(name: str, sizes: list, idiom: str) -> None:
+        """an image stack of a back and a front layer at each (scale, width, height)"""
+        directory = brand / f"{name}.imagestack"
+        write_json(directory, {"info": info, "layers": [{"filename": "Front.imagestacklayer"},
+                                                        {"filename": "Back.imagestacklayer"}]})
+        for layer, draw in (("Front", lambda w, h: helmet(w, h, 0.86)), ("Back", gradient)):
+            imageset = directory / f"{layer}.imagestacklayer" / "Content.imageset"
+            write_json(imageset.parent, {"info": info})
+            images = []
+            for scale, width, height in sizes:
+                filename = f"{layer.lower()}{'' if scale == 1 else f'@{scale}x'}.png"
+                picture = draw(width, height)
+                if layer == "Back":
+                    picture = picture.convert("RGB")
+                imageset.mkdir(parents=True, exist_ok=True)
+                picture.save(imageset / filename, optimize=True)
+                images.append({"filename": filename, "idiom": idiom, "scale": f"{scale}x"})
+            write_json(imageset, {"images": images, "info": info})
+
+    stack("App Icon", [(1, 400, 240), (2, 800, 480)], "tv")
+    stack("App Icon - App Store", [(1, 1280, 768)], "tv")
+
+    def shelf(name: str, width: int, height: int) -> None:
+        imageset = brand / f"{name}.imageset"
+        images = []
+        for scale in (1, 2):
+            w, h = width * scale, height * scale
+            picture = gradient(w, h)
+            picture.alpha_composite(helmet(w, h, 0.78, centre_x=0.30))
+            font = ImageFont.truetype(str(FONT), int(round(h * 0.22)))
+            draw = ImageDraw.Draw(picture)
+            text = "OpenCE"
+            box = draw.textbbox((0, 0), text, font=font)
+            draw.text((int(w * 0.47), (h - (box[3] - box[1])) // 2 - box[1]), text, font=font,
+                      fill=(255, 255, 255, 255))
+            filename = f"top_shelf{'' if scale == 1 else f'@{scale}x'}.png"
+            imageset.mkdir(parents=True, exist_ok=True)
+            picture.convert("RGB").save(imageset / filename, optimize=True)
+            images.append({"filename": filename, "idiom": "tv", "scale": f"{scale}x"})
+        write_json(imageset, {"images": images, "info": info})
+
+    shelf("Top Shelf Image", 1920, 720)
+    shelf("Top Shelf Image Wide", 2320, 720)
+    write_json(brand, {"assets": [
+        {"filename": "App Icon - App Store.imagestack", "idiom": "tv", "role": "primary-app-icon",
+         "size": "1280x768"},
+        {"filename": "App Icon.imagestack", "idiom": "tv", "role": "primary-app-icon", "size": "400x240"},
+        {"filename": "Top Shelf Image Wide.imageset", "idiom": "tv", "role": "top-shelf-image-wide",
+         "size": "2320x720"},
+        {"filename": "Top Shelf Image.imageset", "idiom": "tv", "role": "top-shelf-image", "size": "1920x720"},
+    ], "info": info})
+    print(f"{TVOS_ASSETS.relative_to(ROOT)}: icon 400x240 (@2x), App Store 1280x768, Top Shelf 1920/2320x720 (@2x)")
+
+
 def web_icons(icon: Image.Image) -> None:
     WEB_ICONS.mkdir(parents=True, exist_ok=True)
     for size in WEB_SIZES:
@@ -149,6 +250,10 @@ def main() -> None:
     # (--macos: the Mac app's icon only, which needs a Mac's iconutil)
     if "--macos" in sys.argv[1:]:
         macos_icon(icon, render)
+        return
+    # (--tvos: the Apple TV app's icon and Top Shelf images only)
+    if "--tvos" in sys.argv[1:]:
+        tvos_icons(icon, render)
         return
 
     # the desktop's icons
