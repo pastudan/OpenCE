@@ -306,6 +306,51 @@ u32 w2c_env_host_errno(struct w2c_env *instance)
 	}
 }
 
+/* ---------- the guest's memory */
+
+/* HALO_GUEST_RESERVE_BYTES (the TV build: port/tvos/game/CMakeLists.txt):
+the memory with guard pages in a reservation of this size instead of
+wasm2c's 8 GB, which tvOS refuses. Guard pages need every 32-bit index plus
+every load's and store's static offset (and its size) to land in the
+reservation; tools/tvos_build.py checks the translated code's largest
+offset against it. The layout is wasm2c's own (wasm-rt-mem-impl.c): the
+memory at the reservation's start, the rest inaccessible. */
+#ifdef HALO_GUEST_RESERVE_BYTES
+#include <sys/mman.h>
+
+#if !WASM_RT_MEMCHECK_GUARD_PAGES
+#error "HALO_GUEST_RESERVE_BYTES is for WASM_RT_MEMCHECK_GUARD_PAGES"
+#endif
+_Static_assert((uint64_t)HALO_GUEST_RESERVE_BYTES > 0x100000000ull, "the reservation must cover 4 GB and a guard");
+
+static void guest_memory_allocate(void)
+{
+	uint64_t size = GUEST_MEMORY_PAGES * WASM_DEFAULT_PAGE_SIZE;
+	uint8_t *base = mmap(NULL, (size_t)HALO_GUEST_RESERVE_BYTES, PROT_NONE, MAP_PRIVATE | MAP_ANON, -1, 0);
+
+	if (base == MAP_FAILED)
+		host_fatal("cannot reserve %llu bytes for the game's memory (errno %d)",
+			(unsigned long long)HALO_GUEST_RESERVE_BYTES, errno);
+	if (mprotect(base, (size_t)size, PROT_READ | PROT_WRITE) != 0)
+		host_fatal("cannot make the game's memory accessible (errno %d)", errno);
+	env.memory.data = base;
+	env.memory.data_end = base + HALO_GUEST_RESERVE_BYTES;
+	env.memory.page_size = WASM_DEFAULT_PAGE_SIZE;
+	env.memory.pages = GUEST_MEMORY_PAGES;
+	env.memory.max_pages = GUEST_MEMORY_PAGES;
+	env.memory.size = size;
+	env.memory.is64 = false;
+	host_log("game memory: %llu MB, guard pages to %llu MB", (unsigned long long)(size >> 20),
+		(unsigned long long)((uint64_t)HALO_GUEST_RESERVE_BYTES >> 20));
+}
+#else
+static void guest_memory_allocate(void)
+{
+	wasm_rt_allocate_memory(&env.memory, (uint32_t)GUEST_MEMORY_PAGES, (uint32_t)GUEST_MEMORY_PAGES, false,
+		WASM_DEFAULT_PAGE_SIZE);
+}
+#endif
+
 /* ---------- start */
 
 int host_sdl_show_simple_message_box(unsigned int flags, const char *title, const char *message);
@@ -370,8 +415,7 @@ int main(int argc, char **argv)
 #endif
 	host_sdl_main_thread_set();
 	wasm_rt_init();
-	wasm_rt_allocate_memory(&env.memory, (uint32_t)GUEST_MEMORY_PAGES, (uint32_t)GUEST_MEMORY_PAGES, false,
-		WASM_DEFAULT_PAGE_SIZE);
+	guest_memory_allocate();
 	host_memory_base = (uint8_t *)env.memory.data;
 	host_memory_size = env.memory.size;
 	wasm2c_halo_instantiate(&instance, &env, &wasi, &preview1);

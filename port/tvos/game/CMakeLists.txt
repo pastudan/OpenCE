@@ -32,8 +32,21 @@ add_executable(OpenCETV MACOSX_BUNDLE
     ${MBED_C} ${UPNP_C})
 target_compile_definitions(OpenCETV PRIVATE HALO_TVOS=1
     WASM_RT_NONCONFORMING_UNCHECKED_STACK_EXHAUSTION=1 WASM_RT_TRAP_HANDLER=host_trap
-    WASM_RT_MEMCHECK_BOUNDS_CHECK=1 WASM_RT_MEMCHECK_GUARD_PAGES=0
     _GNU_SOURCE MINIUPNP_STATICLIB MINIUPNPC_SET_SOCKET_TIMEOUT MINIUPNPC_GET_SRC_ADDR)
+# The guest's bounds (tools/tvos_build.py --memcheck): "guard" is wasm2c's
+# guard pages in a reservation of OPENCE_GUEST_RESERVE_BYTES (4 GiB and the
+# largest static offset; tvOS refuses wasm2c's own 8 GiB: host_main.c);
+# "bounds" is a compare and branch on every guest load and store.
+set(OPENCE_GUEST_MEMCHECK "bounds" CACHE STRING "guest bounds checking: guard or bounds")
+set(OPENCE_GUEST_RESERVE_BYTES "0x104000000" CACHE STRING "the guard-page reservation")
+if(OPENCE_GUEST_MEMCHECK STREQUAL "guard")
+    target_compile_definitions(OpenCETV PRIVATE WASM_RT_MEMCHECK_GUARD_PAGES=1 WASM_RT_MEMCHECK_BOUNDS_CHECK=0
+        HALO_GUEST_RESERVE_BYTES=${OPENCE_GUEST_RESERVE_BYTES}ull)
+elseif(OPENCE_GUEST_MEMCHECK STREQUAL "bounds")
+    target_compile_definitions(OpenCETV PRIVATE WASM_RT_MEMCHECK_BOUNDS_CHECK=1 WASM_RT_MEMCHECK_GUARD_PAGES=0)
+else()
+    message(FATAL_ERROR "OPENCE_GUEST_MEMCHECK must be guard or bounds")
+endif()
 target_compile_options(OpenCETV PRIVATE -O2 -g -ffp-contract=off
     "$<$<COMPILE_LANGUAGE:OBJC>:-fobjc-arc>")
 set_source_files_properties(${TRANSLATED} PROPERTIES COMPILE_OPTIONS "-O3;-w")

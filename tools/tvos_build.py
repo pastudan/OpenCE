@@ -10,6 +10,7 @@ playable. It is separate from the feasibility probes and the Mac binary.
 """
 import argparse
 import os
+import re
 from pathlib import Path
 import subprocess
 import sys
@@ -48,10 +49,41 @@ def add_icons(app, sdk):
     info_path.write_bytes(plistlib.dumps(info, fmt=plistlib.FMT_BINARY))
 
 
+# The guard-page reservation of the TV build (--memcheck guard): the guest's
+# 4 GiB of 32-bit indices, plus room for the largest static offset a load or
+# store adds to one (and the access's size). tvOS refuses wasm2c's 8 GiB.
+GUARD_RESERVE_BYTES = 0x104000000
+OFFSET = re.compile(rb"instance->w2c_env_memory, \(u64\)\([^()]*\) \+ (\d+)u")
+# the widest access (v128)
+ACCESS_BYTES = 16
+
+
+def largest_offset(w2c_dir):
+    """the largest static offset in the translated code's memory accesses"""
+    largest = 0
+    for path in sorted(Path(w2c_dir).glob("halo_*.c")):
+        for match in OFFSET.finditer(path.read_bytes()):
+            largest = max(largest, int(match.group(1)))
+    return largest
+
+
+def check_guard_reserve(w2c_dir, reserve=GUARD_RESERVE_BYTES):
+    """raise if an index plus a static offset could pass the reservation's
+    end: the access would then reach whatever is mapped after it"""
+    offset = largest_offset(w2c_dir)
+    if (1 << 32) + offset + ACCESS_BYTES > reserve:
+        raise RuntimeError(f"a guest access reaches 4 GiB + {offset:#x}, past the {reserve:#x}-byte "
+                           f"guard reservation: raise GUARD_RESERVE_BYTES or build with --memcheck bounds")
+    return offset
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--platform", choices=("device", "simulator"), required=True)
     parser.add_argument("--jobs", type=int, default=min(os.cpu_count() or 2, 4))
+    parser.add_argument("--memcheck", choices=("guard", "bounds"), default=os.environ.get("OPENCE_TV_MEMCHECK", "bounds"),
+                        help="the guest's bounds: guard pages in a 4 GiB + 64 MiB reservation, or a compare and "
+                             "branch on every access (bounds); OPENCE_TV_MEMCHECK sets the default")
     args = parser.parse_args()
     os.chdir(ROOT)
     if sys.platform != "darwin":
@@ -73,13 +105,17 @@ def main():
                "build/macos/generated/host_imports.c"]
     outputs += [f"build/macos/w2c/halo_{i}.c" for i in range(24)]
     run(["ninja", f"-j{args.jobs}", *outputs])
+    if args.memcheck == "guard":
+        offset = check_guard_reserve(ROOT / "build/macos/w2c")
+        print(f"guard pages: largest static offset {offset:#x}, reservation {GUARD_RESERVE_BYTES:#x}", flush=True)
     build = ROOT / "build/tvos" / args.platform
     run(["cmake", "-S", ROOT / "port/tvos/game", "-B", build, "-G", "Ninja",
          "-DCMAKE_SYSTEM_NAME=tvOS", f"-DCMAKE_OSX_SYSROOT={sdkpath}", "-DCMAKE_OSX_ARCHITECTURES=arm64",
          "-DCMAKE_OSX_DEPLOYMENT_TARGET=17.4", "-DCMAKE_BUILD_TYPE=Release",
          f"-DOPENCE_W2C={ROOT / 'build/macos/w2c'}", f"-DOPENCE_GENERATED={ROOT / 'build/macos/generated'}",
          f"-DOPENCE_WASM_RUNTIME={tools['runtime']}", f"-DOPENCE_SIMDE={tools['simde']}",
-         f"-DOPENCE_SDL_SOURCE={ROOT / 'build/macos/third_party' / ('SDL3-' + SDL_VERSION)}"])
+         f"-DOPENCE_SDL_SOURCE={ROOT / 'build/macos/third_party' / ('SDL3-' + SDL_VERSION)}",
+         f"-DOPENCE_GUEST_MEMCHECK={args.memcheck}", f"-DOPENCE_GUEST_RESERVE_BYTES={GUARD_RESERVE_BYTES:#x}"])
     run(["cmake", "--build", build, "--parallel", args.jobs])
     add_icons(build / "OpenCETV.app", sdk)
     platform = subprocess.check_output(["xcrun", "vtool", "-show-build", str(build / "OpenCETV.app/OpenCETV")], text=True)
