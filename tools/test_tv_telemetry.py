@@ -467,3 +467,11 @@ def test_fps_and_missed_are_the_displays():
     metal = (ROOT / "port/macos/host/host_metal.m").read_text()
     handler = metal.index("[drawable addPresentedHandler:")
     assert "#ifndef HALO_TVOS" not in metal[handler - 600:handler]
+
+
+def test_feedback_copy_is_let_go_when_unused():
+    metal = (ROOT / "port/macos/host/host_metal.m").read_text()
+    assert "#define FEEDBACK_IDLE_FRAMES 600" in metal
+    assert "feedback_serial = frame_serial;" in metal
+    present = metal[metal.index("void host_metal_present(void)"):]
+    assert "frame_serial - feedback_serial > FEEDBACK_IDLE_FRAMES" in present[:2000]
