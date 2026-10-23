@@ -293,3 +293,18 @@ def test_shader_tour_is_off_by_default():
     assert 'config_string("debug.shader_tour")' in tour
     main = (ROOT / "source/main/main.c").read_text()
     assert "shader_tour_update(main_globals.main_menu_scenario_loaded);" in main
+
+
+def test_the_memory_warning_trim_leaves_dropped_shaders_preparable():
+    """host_metal_trim (tv/lifecycle) drops prepared shaders no draw has
+    taken back to idle, under the lock, never one compiling, so the next
+    map's load (or the low-priority pass) prepares it again"""
+    metal = (ROOT / "port/macos/host/host_metal.m").read_text()
+    trim = metal[metal.index("int64_t host_metal_trim(int step, int stopped)\n{"):]
+    trim = trim[:trim.index("\n}\n")]
+    drop = trim[trim.index("[prepared.condition lock];"):trim.index("[prepared.condition unlock];")]
+    assert "shader.state == _prepared_compiling" in drop and "shader.state = _prepared_idle;" in drop
+    prepare = metal[metal.index("static void prepare_map(NSString *name, uint32_t generation)\n{"):]
+    prepare = prepare[:prepare.index("\n}\n")]
+    # (a compile starts only for one still queued, checked under the lock)
+    assert "if (!prepared_current(generation) || shader.state != _prepared_queued)" in prepare

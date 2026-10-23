@@ -2768,7 +2768,11 @@ static void prepare_map(NSString *name, uint32_t generation)
 	}
 	[prepared.condition lock];
 	/* (what the last map's draws did not take, and this map has not, is
-	dropped: its memory, and the dictionary's) */
+	dropped: its memory, and the dictionary's. This queue's, where
+	host_metal_trim's memory-warning step is the main thread's: both change
+	by_text and a shader's state only under this lock, over a copy of the
+	keys, neither touches one compiling, and a compile starts only for one
+	still queued, so either may drop a shader the other has queued) */
 	for (NSString *key in prepared.by_text.allKeys)
 	{
 		PreparedShader *shader = prepared.by_text[key];
@@ -5373,9 +5377,13 @@ int64_t host_metal_trim(int step, int stopped)
 			}
 			else if (prepared.condition)
 			{
-				/* the shader cache's prepared shaders no draw has taken yet:
-				one asked for later is compiled then (a memory warning's only:
-				they are what keeps a level's first draws from compiling) */
+				/* the shader cache's prepared shaders no draw has taken yet,
+				and the queued ones not started: one asked for later is
+				compiled then, by the draw, or prepared again at the next
+				map's load (idle, as one no map has queued). A memory
+				warning's only: they are what keeps a level's first draws
+				from compiling. (The preparation's threads change these only
+				under the same lock, and skip what is not queued) */
 				uint32_t dropped = 0;
 
 				[prepared.condition lock];
@@ -5386,7 +5394,7 @@ int64_t host_metal_trim(int step, int stopped)
 					if (shader.state == _prepared_compiling)
 						continue;
 					freed += (int64_t)shader.text.length;
-					shader.state = _prepared_taken;
+					shader.state = _prepared_idle;
 					shader.function = nil;
 					shader.text = nil;
 					[prepared.by_text removeObjectForKey:key];
