@@ -149,7 +149,7 @@ SCENES["thermal"] = {"init": SCENES["b30split"]["init"], "seconds": 1830, "windo
 # allocations over time (the play telemetry's footprint_mb, metal_mb)
 SCENES["b30long"] = {"init": ["player_spawn_count 2", "map_name levels\\b30\\b30"], "seconds": 900,
                      "window_seconds": 780.0, "map": "b30.map",
-                     "env": {"HALO_TEST_INPUT": "bot:1", "HALO_TELEMETRY": "on"}}
+                     "env": {"HALO_TEST_INPUT": "bot:1", "HALO_TELEMETRY": "on", "HALO_FRAME_LOG_FRAMES": "112000"}}
 
 
 def multimap_commands(maps=("b30", "b40", "c10", "b30"), dwell=300):
@@ -168,7 +168,7 @@ def multimap_commands(maps=("b30", "b40", "c10", "b30"), dwell=300):
 SCENES["multimap"] = {"init": SCENES["split"]["init"], "seconds": 1400, "window_seconds": 1200.0,
                       "maps": ["b30.map", "b40.map", "c10.map"],
                       "env": {"HALO_TEST_COMMANDS": multimap_commands(), "HALO_TEST_INPUT": "bot:1",
-                              "HALO_TELEMETRY": "on"}}
+                              "HALO_TELEMETRY": "on", "HALO_FRAME_LOG_FRAMES": "112000"}}
 SCENE_LABEL = {"opening": "a10 cutscene (partial)", "bridge": "a10 bridge (gameplay)",
                "b30": "b30 beach (gameplay)", "a10play": "a10 cryo bay (first gameplay)",
                "cryo": "a10 cryo bay (saved state)", "split": "a10 split screen (2 players)",
