@@ -185,6 +185,17 @@ a vertex layout */
 unsigned int host_metal_shader(const char *source, int fragment);
 unsigned int host_metal_vertex_layout(const struct metal_vertex_layout *layout);
 
+/* the queued transparents at half resolution (display.half_res_transparents,
+host_metal.m): a run begun, its draws then going into accumulate (RGBA16F)
+and depth (Depth32Float), the guest's textures at half the scene's
+resolution, after the screen's depth is reduced into them inside rect (the
+window, in their pixels); ended, the run composited into the screen. step
+is the screen's pixels to theirs each way (2; 1 accumulates at full
+resolution, diagnostic) */
+void host_metal_halfres_begin(unsigned int screen_color, unsigned int screen_depth, unsigned int accumulate,
+	unsigned int depth, unsigned int x, unsigned int y, unsigned int width, unsigned int height, unsigned int step);
+void host_metal_halfres_end(void);
+
 /* drawing: the targets (textures, 0 for none), a clear and a draw */
 void host_metal_set_targets(unsigned int color, unsigned int depth);
 void host_metal_clear(const struct metal_clear *clear);

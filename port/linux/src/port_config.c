@@ -196,6 +196,12 @@ static const struct config_setting config_settings[] =
 		"whose view must stay sharp) draw their passes between the first and\n"
 		"the last at half the resolution, a quarter of the pixels: faster on a\n"
 		"4K screen, a little softer. false draws them all at full resolution." },
+	{ "display.half_res_transparents", _config_boolean, "false", "HALO_HALF_RES_TRANSPARENTS", _environment_value,
+		_platform_desktop,
+		"Metal builds: smoke, particles, plasma, glass and the other blended\n"
+		"effects drawn after the scene are drawn at half the resolution and\n"
+		"blended in once: faster on a 4K screen, a little softer. false draws\n"
+		"them at full resolution." },
 	{ "display.menus", _config_string, "\"pc\"", "HALO_MENUS", _environment_value, _platform_all,
 		"The menus: \"pc\" for the PC version's main menu (port/assets/menus,\n"
 		"and a menus folder here for your own), \"xbox\" for the Xbox's." },

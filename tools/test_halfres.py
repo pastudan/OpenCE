@@ -68,6 +68,7 @@ def test_edges_from_base(tmp_path):
 def test_settings_documented():
     config = (ROOT / "port/linux/src/port_config.c").read_text()
     readme = (ROOT / "port/linux/README.md").read_text()
-    for name, environment in (("display.half_res_convolution", "HALO_HALF_RES_CONVOLUTION"),):
+    for name, environment in (("display.half_res_convolution", "HALO_HALF_RES_CONVOLUTION"),
+                              ("display.half_res_transparents", "HALO_HALF_RES_TRANSPARENTS")):
         assert re.search(r'\{ "' + re.escape(name) + r'", _config_boolean, "false", "' + environment + '"', config)
         assert f"| `{name}` | `false` | `{environment}` |" in readme

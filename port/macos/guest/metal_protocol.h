@@ -25,6 +25,9 @@ typedef unsigned int guest_address;
 #define METAL_FORMAT_BGRA8 80
 #define METAL_FORMAT_RGBA8 70
 #define METAL_FORMAT_DEPTH32_STENCIL8 260
+/* (the half-resolution transparents' accumulation and depth: host_metal_halfres_begin) */
+#define METAL_FORMAT_RGBA16F 115
+#define METAL_FORMAT_DEPTH32 252
 #define METAL_FORMAT_BC1 130
 #define METAL_FORMAT_BC2 132
 #define METAL_FORMAT_BC3 134

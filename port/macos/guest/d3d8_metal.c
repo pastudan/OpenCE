@@ -862,6 +862,279 @@ int halo_half_res_convolution(void)
 	return half_res_convolution_setting;
 }
 
+/* ---------- the queued transparents at half resolution
+(display.half_res_transparents)
+
+Opt-in: the queued transparents' draws (the rasterizer's phase 22:
+particles, effects, plasma, glass, contrails) that blend affinely in what
+is under them are drawn in runs into targets at half the scene's
+resolution and composited into the screen once a run (host_metal.m's
+"queued transparents at half resolution": why that is the same per pixel,
+the depth and the upsample). A draw joins a run, or ends one, by its own
+state, so the order of the draws is the game's:
+- it draws into the screen and its depth buffer, blending with an add of
+  a source factor of one, zero, the source's alpha or the destination's
+  colour and a destination factor of the source's (or one or zero);
+- it writes neither depth nor the target's alpha;
+- its stencil test, if any, only reads (the first-person weapon's mask),
+  the same throughout the run;
+- it samples no render target (active camouflage's, the screen's);
+- its depth test is less or less-equal, or off.
+Others are drawn at full resolution as before, after the run before them
+is composited. HALO_HALF_RES_CYCLE (above) alternates it too; with
+HALO_HALF_RES_CYCLE_BLOCKS=3 the third block accumulates at full
+resolution (the blending's difference alone, for comparisons), and with 4
+the fourth draws none of the queued transparents (which pixels they
+touch). */
+
+static int half_res_transparents_setting = -1;
+static unsigned long half_res_transparents_read_at;
+
+static struct render_target_entry *render_target_get(const D3DSurface *surface);
+static unsigned long stage_texture_mode(int stage);
+
+static struct
+{
+	/* the phase is the queued transparents', a run is being drawn, and
+	(diagnostic) the phase's draws are not drawn */
+	BOOL phase, active, skip;
+	/* runs this phase; the run's stencil state */
+	int runs;
+	DWORD stencil[6];
+	/* the targets: accumulate (RGBA16F) and depth, their size */
+	struct render_target_entry *accumulate, *depth;
+	unsigned long width, height, step;
+	float scale[2];
+	/* the draws drawn at half resolution and not, and runs, since the log */
+	unsigned long draws, others, total_runs, frames_logged;
+} half_run;
+
+/* the half-resolution transparents: off, on (2: half), or accumulated at
+full resolution (1: the diagnostic cycle's third block) */
+static int half_res_transparents_step(void)
+{
+	long block;
+	const char *blocks;
+
+	if (half_res_transparents_setting < 0 || half_res_transparents_read_at != config_changes())
+	{
+		half_res_transparents_read_at = config_changes();
+		half_res_transparents_setting = config_boolean("display.half_res_transparents") != 0;
+		platform_log("half resolution: queued transparents %s", half_res_transparents_setting ? "on" : "off");
+	}
+	blocks = getenv("HALO_HALF_RES_CYCLE_BLOCKS");
+	block = half_res_cycle_block(blocks && atol(blocks) >= 3 && atol(blocks) <= 4 ? atol(blocks) : 2);
+	if (block >= 0)
+		return block == 0 ? 0 : block == 1 ? 2 : block == 2 ? 1 : -1;
+	return half_res_transparents_setting ? 2 : 0;
+}
+
+/* a run's targets, the screen's size in its units at half its scale
+(step 1: the screen's scale) */
+static BOOL half_run_targets(unsigned long step)
+{
+	float scale[2];
+	unsigned long width, height;
+	/* (the back buffer as the scene draws into it: under dynamic resolution
+	a scene target at a fraction of the screen's scale, which
+	render_target_get gives while a scene is active) */
+	struct render_target_entry *back_buffer = render_target_get(&device.back_buffer);
+
+	if (!back_buffer)
+		return FALSE;
+	scale[0] = back_buffer->target.scale[0];
+	scale[1] = back_buffer->target.scale[1];
+	scale[0] /= (float)step;
+	scale[1] /= (float)step;
+	width = (back_buffer->target.gl_width + step - 1) / step;
+	height = (back_buffer->target.gl_height + step - 1) / step;
+	if (half_run.accumulate && half_run.width == width && half_run.height == height && half_run.step == step)
+	{
+		half_run.scale[0] = scale[0];
+		half_run.scale[1] = scale[1];
+		return TRUE;
+	}
+	if (!half_run.accumulate)
+	{
+		half_run.accumulate = calloc(1, sizeof(*half_run.accumulate));
+		half_run.depth = calloc(1, sizeof(*half_run.depth));
+		half_run.accumulate->target.texture = host_metal_texture_new();
+		half_run.depth->target.texture = host_metal_texture_new();
+		half_run.depth->target.depth = TRUE;
+	}
+	host_metal_texture_define(half_run.accumulate->target.texture, _metal_texture_2d, METAL_FORMAT_RGBA16F,
+		(unsigned int)width, (unsigned int)height, 1, 1, _metal_usage_color_target, METAL_SWIZZLE_IDENTITY);
+	host_metal_texture_define(half_run.depth->target.texture, _metal_texture_2d, METAL_FORMAT_DEPTH32,
+		(unsigned int)width, (unsigned int)height, 1, 1, _metal_usage_depth_target, METAL_SWIZZLE_IDENTITY);
+	half_run.accumulate->target.gl_width = half_run.depth->target.gl_width = width;
+	half_run.accumulate->target.gl_height = half_run.depth->target.gl_height = height;
+	half_run.width = width;
+	half_run.height = height;
+	half_run.step = step;
+	half_run.scale[0] = scale[0];
+	half_run.scale[1] = scale[1];
+	platform_log("half resolution: transparents drawn at %lux%lu (1/%lu of %lux%lu)", width, height, step,
+		back_buffer->target.gl_width, back_buffer->target.gl_height);
+	return TRUE;
+}
+
+/* whether the draw about to be made may be drawn in a run */
+static BOOL half_run_eligible(void)
+{
+	const DWORD *rs = D3D__RenderState;
+	DWORD source = rs[D3DRS_SRCBLEND], destination = rs[D3DRS_DESTBLEND];
+	int stage;
+
+	if (device.render_target != &device.back_buffer || device.depth_stencil != &device.depth_buffer)
+		return FALSE;
+	if (!rs[D3DRS_ALPHABLENDENABLE] || rs[D3DRS_BLENDOP] != D3DBLENDOP_ADD || source_blend_in_shader())
+		return FALSE;
+	if (source != D3DBLEND_ONE && source != D3DBLEND_ZERO && source != D3DBLEND_SRCALPHA &&
+		source != D3DBLEND_DESTCOLOR)
+	{
+		return FALSE;
+	}
+	if (destination != D3DBLEND_ZERO && destination != D3DBLEND_ONE && destination != D3DBLEND_SRCALPHA &&
+		destination != D3DBLEND_INVSRCALPHA && destination != D3DBLEND_SRCCOLOR && destination != D3DBLEND_INVSRCCOLOR)
+	{
+		return FALSE;
+	}
+	if ((rs[D3DRS_COLORWRITEENABLE] & D3DCOLORWRITEENABLE_ALPHA) ||
+		(rs[D3DRS_COLORWRITEENABLE] & (D3DCOLORWRITEENABLE_RED | D3DCOLORWRITEENABLE_GREEN | D3DCOLORWRITEENABLE_BLUE)) !=
+		(D3DCOLORWRITEENABLE_RED | D3DCOLORWRITEENABLE_GREEN | D3DCOLORWRITEENABLE_BLUE))
+	{
+		return FALSE;
+	}
+	if (rs[D3DRS_ZENABLE] && (rs[D3DRS_ZWRITEENABLE] ||
+		(rs[D3DRS_ZFUNC] != D3DCMP_LESSEQUAL && rs[D3DRS_ZFUNC] != D3DCMP_LESS)))
+	{
+		return FALSE;
+	}
+	if (rs[D3DRS_STENCILENABLE] && (rs[D3DRS_STENCILWRITEMASK] & 0xff) &&
+		(rs[D3DRS_STENCILPASS] != D3DSTENCILOP_KEEP || rs[D3DRS_STENCILFAIL] != D3DSTENCILOP_KEEP ||
+		rs[D3DRS_STENCILZFAIL] != D3DSTENCILOP_KEEP))
+	{
+		return FALSE;
+	}
+	for (stage = 0; stage < D3DTSS_MAXSTAGES; stage++)
+	{
+		D3DBaseTexture *texture = device.textures[stage];
+		unsigned long mode = stage_texture_mode(stage);
+
+		if (texture && texture->Data && mode != 0 && mode != 0x04 && mode != 0x05 && mode != 0x11 &&
+			xgpu_render_target_find(texture->Data))
+		{
+			return FALSE;
+		}
+	}
+	return TRUE;
+}
+
+/* the run's stencil state, which every draw of it shares */
+static void half_run_stencil_state(DWORD state[6])
+{
+	const DWORD *rs = D3D__RenderState;
+
+	memset(state, 0, 6 * sizeof(DWORD));
+	if (!rs[D3DRS_STENCILENABLE])
+		return;
+	state[0] = 1;
+	state[1] = rs[D3DRS_STENCILFUNC];
+	state[2] = rs[D3DRS_STENCILREF] & 0xff;
+	state[3] = rs[D3DRS_STENCILMASK] & 0xff;
+}
+
+static void half_run_end(void)
+{
+	if (!half_run.active)
+		return;
+	host_metal_halfres_end();
+	half_run.active = FALSE;
+}
+
+/* the draw about to be made: in a run (begun now if need be), or not (the
+run before it composited); FALSE: not drawn (the diagnostic cycle's block
+without the queued transparents) */
+static BOOL half_run_draw(void)
+{
+	int step;
+	DWORD stencil[6];
+	struct render_target_entry *back_buffer, *depth_buffer;
+
+	if (!half_run.phase)
+		return TRUE;
+	if (half_run.skip)
+		return FALSE;
+	if (!half_run_eligible())
+	{
+		half_run_end();
+		half_run.others++;
+		return TRUE;
+	}
+	half_run_stencil_state(stencil);
+	if (half_run.active && memcmp(stencil, half_run.stencil, sizeof(stencil)))
+		half_run_end();
+	if (!half_run.active)
+	{
+		step = half_res_transparents_step();
+		if (step <= 0 || !half_run_targets((unsigned long)step))
+		{
+			half_run.others++;
+			return TRUE;
+		}
+		back_buffer = render_target_get(&device.back_buffer);
+		depth_buffer = render_target_get(&device.depth_buffer);
+		if (!back_buffer || !depth_buffer)
+		{
+			half_run.others++;
+			return TRUE;
+		}
+		/* (the window's viewport, in the run's pixels) */
+		{
+			unsigned long x = (unsigned long)(device.viewport.X * half_run.scale[0]);
+			unsigned long y = (unsigned long)(device.viewport.Y * half_run.scale[1]);
+			unsigned long width = (unsigned long)(device.viewport.Width * half_run.scale[0] + 0.999f);
+			unsigned long height = (unsigned long)(device.viewport.Height * half_run.scale[1] + 0.999f);
+
+			host_metal_halfres_begin(back_buffer->target.texture, depth_buffer->target.texture,
+				half_run.accumulate->target.texture, half_run.depth->target.texture, (unsigned int)x, (unsigned int)y,
+				(unsigned int)width, (unsigned int)height, (unsigned int)half_run.step);
+		}
+		half_run.active = TRUE;
+		half_run.runs++;
+		half_run.total_runs++;
+		memcpy(half_run.stencil, stencil, sizeof(stencil));
+	}
+	half_run.draws++;
+	return TRUE;
+}
+
+/* the rasterizer's phase begun or ended (guest_metal.c): the queued
+transparents' (22) are drawn in runs; any run composited at its end */
+void halo_half_res_phase(int profile, int begin)
+{
+	if (profile != 22)
+		return;
+	if (begin)
+	{
+		int step = half_res_transparents_step();
+
+		half_run.phase = step != 0;
+		half_run.skip = step < 0;
+		half_run.runs = 0;
+		return;
+	}
+	half_run_end();
+	half_run.phase = half_run.skip = FALSE;
+	if (half_run.total_runs && device.frame >= half_run.frames_logged + 600)
+	{
+		platform_log("half resolution: %lu runs, %lu draws at half resolution and %lu not, in %lu frames",
+			half_run.total_runs, half_run.draws, half_run.others, device.frame - half_run.frames_logged);
+		half_run.frames_logged = device.frame;
+		half_run.total_runs = half_run.draws = half_run.others = 0;
+	}
+}
+
 /* a half-resolution target's surface (to draw into) and texture (to
 sample), index 0 or 1: the screen's size in the game's units */
 void halo_half_res_target(int index, D3DSurface **surface, D3DBaseTexture **texture)
@@ -1112,6 +1385,15 @@ static BOOL bind_targets(BOOL *has_depth)
 	struct render_target_entry *color = render_target_get(device.render_target);
 	struct render_target_entry *depth = render_target_get(device.depth_stencil);
 
+	/* (a half-resolution run's: its targets in the screen's place) */
+	if (half_run.active && device.render_target == &device.back_buffer && device.depth_stencil == &device.depth_buffer)
+	{
+		target_scale[0] = half_run.scale[0];
+		target_scale[1] = half_run.scale[1];
+		host_metal_set_targets(half_run.accumulate->target.texture, half_run.depth->target.texture);
+		*has_depth = TRUE;
+		return TRUE;
+	}
 	if (depth && !depth->target.depth)
 		depth = NULL;
 	if (color && color->target.depth)
@@ -2582,6 +2864,9 @@ static BOOL prepare_draw(BOOL immediate, struct metal_draw *draw)
 	key.combiner_state[D3DRS_PSFINALCOMBINERCONSTANT0] = 0;
 	key.combiner_state[D3DRS_PSFINALCOMBINERCONSTANT1] = 0;
 	key.texture_modes = D3D__RenderState[D3DRS_PSTEXTUREMODES];
+	/* (the queued transparents: in a half-resolution run, or not) */
+	if (!half_run_draw())
+		return FALSE;
 	/* the textures before the targets: a render target the draw samples is
 	copied (a mip composite) before the pass that draws */
 	bind_textures(&key, texture_scale, draw);
@@ -3400,6 +3685,8 @@ void WINAPI D3DDevice_Clear(DWORD count, CONST D3DRECT *rectangles, DWORD flags,
 	BOOL has_depth = FALSE;
 	DWORD index;
 
+	/* (a clear is not one of a half-resolution run's draws) */
+	half_run_end();
 	if (!device.ready || !bind_targets(&has_depth))
 		return;
 	if (trace_frame())
@@ -3658,6 +3945,8 @@ void WINAPI D3DDevice_Present(CONST RECT *source_rectangle, CONST RECT *destinat
 	(void)unused2;
 	if (screenshot_every < 0)
 		screenshot_every = config_integer("debug.screenshot_every");
+	half_run_end();
+	half_run.phase = FALSE;
 
 	if (device.ready)
 	{
