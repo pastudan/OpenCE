@@ -152,3 +152,25 @@ def test_split_scene_starts_at_two_views_that_hold():
     assert bench.SCENES["split"]["init"] == ["player_spawn_count 2", "map_name levels\\a10\\a10"]
     _, reason = bench.scene_window("split", *bench.parse_frame_log(frame_log(frames[:10])))
     assert "two player views were never drawn" in reason
+
+
+def test_latelag_scene_moves_both_players_between_two_areas():
+    scene = bench.SCENES["latelag"]
+    assert scene["init"] == bench.SCENES["split"]["init"] and scene["seconds"] >= 600
+    commands = scene["env"]["HALO_TEST_COMMANDS"].split(";")
+    assert commands[0] == "1 (game_speed 8)" and "226 (game_speed 1)" in commands
+    moves = [c for c in commands if "switch_bsp" in c]
+    assert len(moves) >= 14 and {c.split()[-1] for c in moves} == {"0)", "1)"}
+    # (both players each time: two teleports for each switch)
+    assert sum("object_teleport (player1)" in c for c in commands) == len(moves)
+    # (each area unseen for longer than the old 30 s idle sweep)
+    times = [float(c.split()[0]) for c in moves]
+    assert min(b - a for a, b in zip(times, times[1:])) > 30
+    frames = [(16.7 * (i + 1), 16.7, 5.0, 0, 0) for i in range(4000)]
+    window, description = bench.scene_window("latelag", *bench.parse_frame_log(
+        frame_log(frames, [(100.0, 5, "views", "2")])), window_seconds=20)
+    assert window and "latelag" in description
+    game = (ROOT / "port/linux/game/network_test.c").read_text()
+    assert 'config_string("debug.test_commands")' in game and "hs_compile_and_evaluate(command)" in game
+    config = (ROOT / "port/linux/src/port_config.c").read_text()
+    assert '{ "debug.test_commands", _config_string, "\\"\\"", "HALO_TEST_COMMANDS"' in config

@@ -106,9 +106,36 @@ SCENES = {
     "split": {"init": ["player_spawn_count 2", "map_name levels\\a10\\a10"], "seconds": 290,
               "window_seconds": 50.0},
 }
+
+
+def latelag_commands(dwell=40, until=900):
+    """the latelag scene's script (debug.test_commands, game seconds): the
+    opening at 8x, both players out of the cryo tubes, then both moved
+    between the cryo bay (BSP 0) and the bridge (BSP 1) every dwell seconds:
+    each area's textures go unseen for longer than the old idle sweep's 30 s
+    and come back into view (xbox_textures.c's residency)"""
+    commands = ["1 (game_speed 8)", "226 (game_speed 1)", "232 (unit_exit_vehicle (player0))",
+                "232 (unit_exit_vehicle (player1))", "233 (player_enable_input true)"]
+    places = [(1, "cheat_bridge_flag"), (0, "tutorial_exit_cryotube_flag")]
+    for index, at in enumerate(range(236, until, dwell)):
+        bsp, flag = places[index % 2]
+        commands += [f"{at} (switch_bsp {bsp})", f"{at} (object_teleport (player0) {flag})",
+                     f"{at} (object_teleport (player1) {flag})"]
+    return ";".join(commands)
+
+
+# a10 split screen for ten minutes, the players moved between two areas
+# (latelag_commands; player 1 turning and looking about, debug.test_input
+# look): the late-level texture churn of two players in co-op, measured over
+# the 8 minutes from the first two-view frame (scene_window: as split); the
+# play telemetry on (its per-second texture counts: tools/tv_telemetry.py)
+SCENES["latelag"] = {"init": SCENES["split"]["init"], "seconds": 600, "window_seconds": 480.0,
+                     "env": {"HALO_TEST_COMMANDS": latelag_commands(), "HALO_TEST_INPUT": "look:1",
+                             "HALO_TELEMETRY": "on"}}
 SCENE_LABEL = {"opening": "a10 cutscene (partial)", "bridge": "a10 bridge (gameplay)",
                "b30": "b30 beach (gameplay)", "a10play": "a10 cryo bay (first gameplay)",
-               "cryo": "a10 cryo bay (saved state)", "split": "a10 split screen (2 players)"}
+               "cryo": "a10 cryo bay (saved state)", "split": "a10 split screen (2 players)",
+               "latelag": "a10 split screen, two areas in turn (10 min)"}
 FOG_START_DRAWS = 20
 FOG_SUSTAIN_SECONDS = 5.0
 SERIES = ("wall_ms", "gpu_ms", "guest_ms", "host_ms", "compile_ms", "wait_drawable_ms", "wait_inflight_ms",
@@ -182,7 +209,7 @@ def scene_window(scene, events, rows, window_seconds=None):
         if start is None:
             return [], "the cryo bay (>= 40 fog-plane draws) was never reached"
         description = f"a10 cryo bay: {window_seconds:g} s from frame {rows[start]['serial']}"
-    elif scene == "split":
+    elif scene in ("split", "latelag"):
         # (the first frame drawn as two player views, after the cinematic)
         views = [e for e in events if e["kind"] == "views" and e["detail"] == "2"]
         split = None
@@ -197,7 +224,7 @@ def scene_window(scene, events, rows, window_seconds=None):
         if split is None:
             return [], "two player views were never drawn (player_spawn_count 2 did not take)"
         start = split
-        description = f"a10 split screen: {window_seconds:g} s from frame {rows[start]['serial']}"
+        description = f"a10 split screen{' (latelag)' if scene == 'latelag' else ''}: {window_seconds:g} s from frame {rows[start]['serial']}"
     elif scene in ("bridge", "b30", "cryo"):
         core = SCENES[scene].get("core", CORE_NAME)
         loaded = [e for e in events if e["kind"] == "core-open" and e["detail"] == core]
