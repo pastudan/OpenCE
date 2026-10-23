@@ -141,3 +141,14 @@ def test_cold_runs_empty_the_shader_cache_and_primed_runs_miss_the_system_cache(
     assert [e["HALO_METAL_SHADER_CACHE_RESET"] for e in environments] == ["1", "0", "0"]
     metal = (ROOT / "port/macos/host/host_metal.m").read_text()
     assert 'getenv("HALO_METAL_SHADER_CACHE_RESET")' in metal
+
+
+def test_split_scene_starts_at_two_views_that_hold():
+    frames = [(16.7 * (i + 1), 16.7, 5.0, 0, 0) for i in range(4000)]
+    events = [(10.0, 1, "map-open", "a10.map"), (100.0, 5, "views", "2"), (150.0, 8, "views", "1"),
+              (1000.0, 60, "views", "2")]
+    window, description = bench.scene_window("split", *bench.parse_frame_log(frame_log(frames, events)))
+    assert window[0]["serial"] == 62 and description.startswith("a10 split screen: 50 s")
+    assert bench.SCENES["split"]["init"] == ["player_spawn_count 2", "map_name levels\\a10\\a10"]
+    _, reason = bench.scene_window("split", *bench.parse_frame_log(frame_log(frames[:10])))
+    assert "two player views were never drawn" in reason
