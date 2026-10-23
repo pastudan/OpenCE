@@ -118,6 +118,9 @@ def main():
          f"-DOPENCE_GUEST_MEMCHECK={args.memcheck}", f"-DOPENCE_GUEST_RESERVE_BYTES={GUARD_RESERVE_BYTES:#x}"])
     run(["cmake", "--build", build, "--parallel", args.jobs])
     add_icons(build / "OpenCETV.app", sdk)
+    # the bundled shader pack (tools/shader_pack.py), if it is this tree's
+    from tools.shader_pack import bundle as bundle_shader_pack
+    bundle_shader_pack(build / "OpenCETV.app")
     platform = subprocess.check_output(["xcrun", "vtool", "-show-build", str(build / "OpenCETV.app/OpenCETV")], text=True)
     print(platform)
     expected = "TVOSSIMULATOR" if args.platform == "simulator" else "TVOS"
