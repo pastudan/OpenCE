@@ -2703,3 +2703,134 @@ black screen), and the project was wrapped up after it. The Mac's
 - **Opt-in lower shadow resolution / no blur**: the maps are not where the
   time goes; the apply's cost is per screen pixel, so a smaller map would
   not reduce it.
+
+# Bundled shader manifest (A12)
+
+Branch `tv/shaderpack` (from tv/integrate 85a49369). Goal: no shader-compile
+stall even on the very first launch after an install, and none in a level
+the player has never visited.
+
+## What was built
+
+1. **Per-map records** (`host_shader_manifest.c`). The manifest now has map
+   records and shader-use records, so each shader and pipeline is grouped
+   by the map that drew it. The guest's `game_load` calls `host_metal_map`
+   before the scenario loads. The app's own record
+   (`Library/Caches/<bundle>/metal_shaders.manifest`) is written that way
+   too.
+2. **Preparation at map load, not at launch** (`host_metal.m`, "the shader
+   cache"). Nothing is compiled at app start.
+   - While the loading screen is up, the loading map's set (from the
+     bundled pack and the app's record) is compiled: 4 at a time through
+     Metal's asynchronous compile, then its pipelines.
+   - 5 s later, every other recorded shader is compiled at utility priority,
+     2 at a time, and kept. These are shaders only another map's visit
+     recorded; about 260 for the whole campaign.
+   - 120 s into a map, the next map's pipelines (campaign order) are made at
+     low priority and dropped, which leaves them in the system's caches.
+   - A new map's load cuts all of this short and drops the old map's
+     unused functions.
+   - Tuning: `HALO_METAL_SHADER_PREPARE_JOBS`, `_PREPARE_REST`, `_PREPARE_NEXT`.
+3. **The bundled pack** (`tools/shader_pack.py`, `metal_shaders.pack` in the
+   app bundle).
+   - `generate` runs the Mac app once per map (ui, a10 … d40) with the
+     *shader tour* (`port/linux/game/shader_tour.c`, `HALO_SHADER_TOUR=on`).
+     The tour:
+     - puts a scripted camera at up to 3 subcluster middles of every
+       cluster of every BSP, looking 6 ways, with the game at 3x speed;
+     - makes every object tag and every effect tag in front of the camera;
+     - runs the screen effects (convolution, filter, video, fade);
+     - gives the player every weapon in turn while the bot input fires,
+       throws and jumps, with camo, flashlight and shield damage.
+   - Generation uses the TV's texture path (`HALO_METAL_NO_BC=1`).
+   - 11 runs take about 15 min on the M4 and are cached per translator hash
+     under `build/shader_pack/<hash>/`. It is a separate step, not part of
+     the build.
+   - The result: 263 distinct shaders, 1074 pipeline records, **119 KiB**
+     zlib (7.6 MiB of MSL source expanded). That is the bundle size added.
+4. **Keyed to the build.**
+   - The pack's header names a hash of the sources that write shader text
+     (`nv2a_psh.c`, `nv2a_vsh.c`, `xgpu.h`, `xgpu_text.c`, `d3d8_metal.c`,
+     `metal_protocol.h`).
+   - `tools/tvos_build.py` bundles it (after `add_icons`) only if that hash
+     is the tree's, and removes a stale one otherwise.
+   - The host also checks the compile-option key (MSL 2.2, invariance,
+     record layout).
+   - Missing or mismatched means it is silently not used. The log says why.
+5. **Correctness unchanged.**
+   - A draw takes a prepared function only for exactly the text it would
+     compile (`shader_text` of the same source and kind). Anything else
+     compiles on the main thread as before.
+   - Prepared pipelines are dropped; draws make their own.
+   - So a wrong or stale pack can cost time but cannot change a picture.
+
+## Mac and TV shader text are the same
+
+The TV's own records, pulled from the bedroom A12 (`<scratch>/shaderpack/tv-pull/`),
+were compared byte for byte with the Mac-generated pack:
+- the tvbench record (bridge + b30 runs): **60 / 60 shaders** and **43 / 43
+  pipelines** (formats and blend) are in the pack;
+- the TV's long-play record (several sessions, a10 + b30 and more): **132 /
+  147 shaders (90%)**, 124 / 152 pipelines.
+
+So the MSL text does not depend on Mac vs TV or on BC handling. The 15
+missing shaders are pixel-shader variants: other combiner inputs, an
+alpha-test variant, a cube-map stage. They come from play the tour does not
+reproduce, such as particular weapon or effect states. The low-priority
+whole-pack pass compiles what the pack has; anything else still compiles in
+the draw, as before.
+
+## Coverage in play (Mac M4, 1080, `tvos_bench --target mac`, nopack vs cold-with-pack, 1 run each)
+
+From the host's per-map log ("of the N new shader texts its draws compiled,
+P were prepared …"), with the pack, in the cold run:
+
+| scene | new texts drawn | prepared | compiled by the draw first | in no record |
+|---|---|---|---|---|
+| a10 bridge | 76 | 73 | 1 | 2 |
+| a10 cryo | 48 | 44 | 3 | 1 |
+| b30 beach | 79 | 70 | 2 | 7 |
+| **b40, fresh launch (never visited)** | 80 | 77 | 3 | **0** |
+
+The frame-log results (60 s windows; "compile ms" is the window's sum):
+
+| scene | mode | worst frame ms | frames >33 ms | >50 ms | compile ms in window |
+|---|---|---|---|---|---|
+| bridge | nopack | 93 | 1 | 1 | 142 |
+| bridge | **pack** | **11.5** | 0 | 0 | **2** |
+| cryo | nopack | 402 | 3 | 2 | 719 |
+| cryo | **pack** | 71 | 1 | 1 | **30** |
+| b30 | nopack | 257 | 3 | 3 | 305 |
+| b30 | **pack** | 84 | 1 | 1 | **51** |
+| b40 new level | nopack | 753 | 8 | 6 | 1305 |
+| b40 new level | **pack** | 402* | 3 | 3 | **420** |
+
+\* b40's remaining stall is its first frame, 0.4 s in, with 91 compiles. The
+fresh launch's window starts while the map's own set is still being
+prepared: the preparation is 490 ms on the M4 and the frame waits for it.
+That frame is part of the load (the insertion cinematic's first frame); the
+rest of the b40 window has no compile frame over 13 ms. Without the pack,
+b40 stalled 219 ms at 11 s and 113 ms at 31 s in play.
+
+(These are Mac numbers, not TV numbers. The M4 compiles about 3x faster than
+the A12.)
+
+## A12 device
+
+Pending. The bedroom TV was booked by other chats' sessions (#113, #106,
+#110) until at least ~21:45 UTC on 2026-10-23. The device comparison is
+`tvos_bench.py run --target device --scenes bridge,b30,cryo,b40,a30 --modes
+nopack,cold --repeats 2`, with nopack and cold interleaved by the plan. It
+has not been run yet; see "What remains".
+
+## What remains
+
+- The A12 runs above (first launch with and without the pack, the new-level
+  load, and the load-frame cost of the preparation).
+- Whether reinstalling clears the system shader cache on tvOS. Not verified;
+  the bench uses the salt, which is the conservative case.
+- The 10% of the TV's long-play shaders the tour misses: pixel-shader
+  combiner variants from states the tour does not reach. A richer tour
+  (vehicles driven, AI fights) or an offline enumerator over the shader tags
+  could close it.
+- `MTLBinaryArchive` for the pipelines remains untested.
