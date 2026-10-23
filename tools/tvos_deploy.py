@@ -70,8 +70,12 @@ DEVICE = os.environ.get("OPENCE_TV_DEVICE") or "443953B8-9072-5EAD-A947-95563A1C
 BUNDLE = os.environ.get("OPENCE_TV_BUNDLE") or "com.pastudan.opence.tv"
 # Apple Development (team 426324Q3LG), by SHA-1
 IDENTITY = os.environ.get("OPENCE_TV_IDENTITY") or "0DE31AA707B2320C376624A7D5A10C968F432235"
-PROFILE = Path(os.environ.get("OPENCE_TV_PROFILE") or
-               SCRATCH / "tvos-provision-xcode/Debug-appletvos/TVDevelopmentProvision.app/embedded.mobileprovision")
+# (the team's wildcard tvOS profile; it is kept outside the scratch folder,
+# which deletes what nobody touched for a week)
+STABLE_PROFILE = Path.home() / "Library/Application Support/OpenCE-tv/TVDevelopment.mobileprovision"
+PROFILE = Path(os.environ.get("OPENCE_TV_PROFILE") or (
+    STABLE_PROFILE if STABLE_PROFILE.is_file() else
+    SCRATCH / "tvos-provision-xcode/Debug-appletvos/TVDevelopmentProvision.app/embedded.mobileprovision"))
 ENTITLEMENTS = ROOT / "port/tvos/game-development.entitlements"
 APP = ROOT / "build/tvos/device/OpenCETV.app"
 SIGNED = SCRATCH / "tv-deploy" / "OpenCETV.app"
