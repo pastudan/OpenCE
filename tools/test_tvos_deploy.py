@@ -146,3 +146,11 @@ def test_log_findings_valid_run():
     assert findings["valid"] and findings["invalid_reason"] is None
     assert not deploy.log_findings("nothing at all")["valid"]
     assert deploy.log_findings("host: Metal: Apple A12 GPU\nhost: fatal: the game trapped: out of bounds")["trap"]
+
+
+def test_push_data_skips_maps_the_tv_has_at_the_same_size(tmp_path):
+    for name, size in (("ui.map", 10), ("a10.map", 20), ("a30.map", 30)):
+        (tmp_path / name).write_bytes(b"x" * size)
+    remote = {"ui.map": 10, "a10.map": 19}
+    assert deploy.maps_to_push(["ui.map", "a10.map", "a30.map"], tmp_path, remote) == ["a10.map", "a30.map"]
+    assert len(deploy.CAMPAIGN_MAPS) == 11 and deploy.CAMPAIGN_MAPS[0] == "ui.map" and "d40.map" in deploy.CAMPAIGN_MAPS
