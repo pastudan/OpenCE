@@ -1512,8 +1512,17 @@ Method: `tools/dynres_frames.py`: a saved state, the game's time frozen
   near-black share of the edge rows matches the whole frame's (b30 0.002
   vs 0.002; cryo 0.307 vs 0.347 at the top: the room's dark ceiling): no
   black or garbage edge from sampling outside the scene's part.
-- Split screen: not yet checked frame-by-frame (the b30split scene runs on
-  the Mac with two views from 36 s); pending.
+- **Split screen** (b30split, two views, 0.75 vs 1.0 alternating every 30
+  frames, Mac): the game could not be frozen here (no two same-fraction
+  frames were identical: the second player's view keeps animating), so
+  only structure is checked, not pixels. The divider between the views
+  (rows 1075-1083 at 2160) is pure black in both fractions; the error of
+  the rows next to it (top view's last rows 9-11, bottom view's first
+  3.5-5.5) is the same as the error across a mixed pair's interiors and
+  as same-fraction pairs 60 frames apart (8-11): no view's filter reads
+  into the divider or into the other view (that would bleed the divider's
+  black or the other view's pixels across it). Whole frame mean abs 5.4,
+  PSNR 27-28 dB, the motion included.
 
 ## Mac sanity (M4 at 7680x4320, GPU-bound there; not a TV number)
 

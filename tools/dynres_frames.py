@@ -197,6 +197,8 @@ def main():
     p.add_argument("out")
     p.add_argument("--fixed", default="")
     p.add_argument("--every", type=int, default=30)
+    p.add_argument("--freeze-at", type=float, default=14.0, help="seconds after launch to freeze the game")
+    p.add_argument("--seconds", type=int, default=26)
     p.add_argument("--env", action="append", default=[])
     p = sub.add_parser("compare")
     p.add_argument("out")
@@ -205,7 +207,8 @@ def main():
     p.add_argument("b")
     args = parser.parse_args()
     if args.command == "capture":
-        capture(args.scene, args.out, args.fixed, dict(item.split("=", 1) for item in args.env), every=args.every)
+        capture(args.scene, args.out, args.fixed, dict(item.split("=", 1) for item in args.env), args.freeze_at,
+                args.seconds, args.every)
     elif args.command == "compare":
         compare(args.out)
     else:
