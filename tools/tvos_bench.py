@@ -109,7 +109,8 @@ SCENES = {
     # a level never visited (the bundled shader pack's case): a fresh launch
     # into a30 or b40, its opening cinematic and first minutes as they play
     # (no input: a30's and b40's open with a cinematic and the insertion),
-    # measured 60 s from the first frame drawn after the level's map opened
+    # measured 60 s from the second frame after the level's map opened (the
+    # first is the load)
     "a30": {"init": ["map_name levels\\a30\\a30"], "seconds": 80, "window_seconds": 60.0, "map": "a30.map",
             "level": True},
     "b40": {"init": ["map_name levels\\b40\\b40"], "seconds": 80, "window_seconds": 60.0, "map": "b40.map",
@@ -285,7 +286,8 @@ def scene_window(scene, events, rows, window_seconds=None):
         opened = [e for e in events if e["kind"] == "map-open" and e["detail"].lower() == level]
         if not opened:
             return [], f"{level} was never opened"
-        start = next((index for index, row in enumerate(rows) if row["serial"] > opened[-1]["serial"]), None)
+        # (the frame after the one the map opened in: that one is the load)
+        start = next((index for index, row in enumerate(rows) if row["serial"] >= opened[-1]["serial"] + 2), None)
         if start is None:
             return [], f"no frames after {level} was opened"
         description = f"{scene} (a new level): {window_seconds:g} s from frame {rows[start]['serial']}"

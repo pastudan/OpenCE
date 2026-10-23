@@ -147,7 +147,7 @@ def test_new_level_scene_starts_after_its_map_opens():
     frames = [(16.7 * (i + 1), 16.7, 5.0, 0, 0) for i in range(4000)]
     events = [(10.0, 1, "map-open", "ui.map"), (20.0, 3, "map-open", "b40.map")]
     window, description = bench.scene_window("b40", *bench.parse_frame_log(frame_log(frames, events)))
-    assert window[0]["serial"] == 4 and description.startswith("b40 (a new level): 60 s")
+    assert window[0]["serial"] == 5 and description.startswith("b40 (a new level): 60 s")
     _, reason = bench.scene_window("a30", *bench.parse_frame_log(frame_log(frames, events)))
     assert "a30.map was never opened" in reason
 
