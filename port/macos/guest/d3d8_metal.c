@@ -2501,6 +2501,88 @@ static void apply_raster_state(BOOL has_depth, struct metal_draw *draw)
 	}
 }
 
+/* ---------- how the pixel shaders are written (nv2a_pixel_shader_key's
+shading, XGPU_SHADING_*; port/tvos/PERFORMANCE.md "Shading (A12)")
+
+The default is the text as it always was (mask 0): none of the changes
+gave byte-identical frames (frozen frames, the old text and the new in one
+run: PERFORMANCE.md). display.half_precision_shading turns them all on
+(faster on the A12, a few levels on some pixels: an opt-in). Diagnostics:
+HALO_METAL_SHADING=<mask> sets the mask outright (1 half combiners, 2 half
+samples, 4 alpha test as a color of 0, 8 no LOD bias of 0), and
+HALO_METAL_SHADING_CYCLE=N alternates it with 0 (the old text) in blocks
+of N frames: even blocks 0, odd the mask, for frozen-frame comparisons in
+one run. */
+
+#define SHADING_FAST (XGPU_SHADING_HALF_COMBINERS | XGPU_SHADING_HALF_SAMPLES | XGPU_SHADING_ZERO_ALPHA_TEST | \
+	XGPU_SHADING_ZERO_BIAS)
+
+static unsigned char shading_mask(void)
+{
+	static unsigned long read_at = (unsigned long)-1;
+	static int forced = -2;
+	static long cycle = -1;
+	static unsigned char mask;
+
+	if (forced == -2)
+	{
+		const char *setting = getenv("HALO_METAL_SHADING");
+		const char *cycle_setting = getenv("HALO_METAL_SHADING_CYCLE");
+
+		forced = setting && *setting ? (int)(strtol(setting, NULL, 0) & 0xff) : -1;
+		cycle = cycle_setting && atol(cycle_setting) > 0 ? atol(cycle_setting) : 0;
+		if (forced >= 0 || cycle)
+			platform_log("GPU: HALO_METAL_SHADING=%d HALO_METAL_SHADING_CYCLE=%ld (diagnostic)", forced, cycle);
+	}
+	if (read_at != config_changes())
+	{
+		read_at = config_changes();
+		mask = (unsigned char)(config_boolean("display.half_precision_shading") ? SHADING_FAST : 0);
+		platform_log("GPU: display.half_precision_shading %s (pixel shader mask %u)", mask ? "on" : "off", mask);
+	}
+	{
+		unsigned char chosen = forced >= 0 ? (unsigned char)forced : mask;
+
+		if (cycle && (device.frame / (unsigned long)cycle) % 2 == 0)
+			return 0;
+		return chosen;
+	}
+}
+
+/* the draw's shading flags: the mask, less what does not apply to it. A
+failed alpha test may give the color 0 instead of discarding (a discard
+costs Apple's GPUs their hidden surface removal and early tests) only where
+that leaves every attachment as the discard would: a blend that adds the
+color with the destination kept whole (a destination factor of one, or one
+less the source's alpha or color: 0 makes both 1), no depth write, no
+stencil operation that writes (a discarded fragment changes no stencil,
+even where its depth test fails), and no visibility test counting the
+samples */
+static unsigned char shading_flags(const struct metal_draw *draw)
+{
+	unsigned char flags = shading_mask();
+
+	if (flags & XGPU_SHADING_ZERO_ALPHA_TEST)
+	{
+		const struct metal_blend *blend = &draw->blend;
+		const struct metal_depth_stencil *depth_stencil = &draw->depth_stencil;
+		BOOL keeps = blend->enabled &&
+			(blend->operation == METAL_BLEND_OPERATION_ADD || blend->operation == METAL_BLEND_OPERATION_REVERSE_SUBTRACT) &&
+			(blend->destination == METAL_BLEND_ONE || blend->destination == METAL_BLEND_ONE_MINUS_SOURCE_ALPHA ||
+				blend->destination == METAL_BLEND_ONE_MINUS_SOURCE_COLOR);
+
+		if (!keeps || (depth_stencil->depth_test && depth_stencil->depth_write) ||
+			(depth_stencil->stencil_test && depth_stencil->stencil_write_mask &&
+				(depth_stencil->stencil_pass != METAL_STENCIL_KEEP || depth_stencil->stencil_fail != METAL_STENCIL_KEEP ||
+					depth_stencil->stencil_depth_fail != METAL_STENCIL_KEEP)) ||
+			device.visibility_test_active)
+		{
+			flags &= (unsigned char)~XGPU_SHADING_ZERO_ALPHA_TEST;
+		}
+	}
+	return flags;
+}
+
 /* the uniforms of the latest draws, converted from these inputs; the serial
 counts the conversions */
 #define DRAW_UNIFORM_INPUT_COUNT (4 + 4 + 16 + 1 + 16 + 2 + 4 + 1 + 1 + 7 * D3DTSS_MAXSTAGES)
@@ -2605,6 +2687,17 @@ static BOOL prepare_draw(BOOL immediate, struct metal_draw *draw)
 	key.fog_enable = D3D__RenderState[D3DRS_FOGENABLE] != 0;
 	key.source_blend = source_blend_in_shader();
 	key.fog_table_mode = (unsigned char)D3D__RenderState[D3DRS_FOGTABLEMODE];
+	key.shading = shading_flags(draw);
+	if (!key.alpha_test_function)
+		key.shading &= (unsigned char)~XGPU_SHADING_ZERO_ALPHA_TEST;
+	if (key.shading & XGPU_SHADING_ZERO_BIAS)
+	{
+		for (stage = 0; stage < D3DTSS_MAXSTAGES; stage++)
+		{
+			if (D3D__TextureState[stage][D3DTSS_MIPMAPLODBIAS])
+				key.lod_bias_stages |= (unsigned char)(1 << stage);
+		}
+	}
 
 	if (program->lighting.lights && !program->lighting_failed && per_pixel_lighting())
 	{
