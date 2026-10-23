@@ -359,6 +359,10 @@ static const struct config_setting config_settings[] =
 		"to throw and reload, and a player turns with the aim while throwing;\n"
 		"false: the original animations, which freeze the legs and stand a\n"
 		"rider up." },
+	{ "game.texture_cache_mb", _config_integer, "0", "HALO_TEXTURE_CACHE_MB", _environment_value, _platform_all,
+		"The game's texture cache in MiB (the textures loaded from the map,\n"
+		"before they are drawn): 0 for all of this build's (256 MiB on the\n"
+		"desktop; the Apple TV's app sets 96), at least the Xbox's 22." },
 	{ "game.custom_edition", _config_boolean, "true", "HALO_CUSTOM_EDITION", _environment_value, _platform_all,
 		"Load and run Halo Custom Edition maps (not those that need OpenSauce):\n"
 		"put them and Custom Edition's bitmaps.map, sounds.map and loc.map in\n"

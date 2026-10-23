@@ -205,6 +205,20 @@ struct xbox_texture_cache_globals
 	boolean stolen_memory;
 };
 
+/* port: the pages the cache uses, of the XBOX_TEXTURE_CACHE_PAGE_COUNT it
+has: fewer where the platform asks (halo_texture_cache_pages: the Apple TV,
+whose footprint counts every page used once); stolen memory is taken from
+the top of what it uses */
+static long texture_cache_page_count(
+	void)
+{
+	static long page_count;
+
+	if (!page_count)
+		page_count = halo_texture_cache_pages(XBOX_TEXTURE_CACHE_PAGE_COUNT, XBOX_TEXTURE_CACHE_PAGE_SIZE);
+	return page_count;
+}
+
 struct xbox_texture_cache_texture
 {
 	short identifier;
@@ -419,8 +433,10 @@ void *texture_cache_steal_memory(
 	long size)
 {
 	long page_count = size / XBOX_TEXTURE_CACHE_PAGE_SIZE + 1;
+	/* port: of the pages it uses (texture_cache_page_count) */
 	long remaining_page_count =
-		XBOX_TEXTURE_CACHE_STEALABLE_PAGE_COUNT - page_count;
+		texture_cache_page_count() - (XBOX_TEXTURE_CACHE_PAGE_COUNT - XBOX_TEXTURE_CACHE_STEALABLE_PAGE_COUNT) -
+		page_count;
 	byte *base_address =
 		(byte *)physical_memory_get_texture_cache_base_address() +
 		remaining_page_count * XBOX_TEXTURE_CACHE_PAGE_SIZE;
@@ -467,7 +483,7 @@ void texture_cache_return_memory(
 		xbox_texture_cache_globals.stolen_memory);
 	lruv_resize(
 		xbox_texture_cache_globals.cache,
-		XBOX_TEXTURE_CACHE_PAGE_COUNT);
+		texture_cache_page_count());
 	XPhysicalProtect(
 		physical_memory_get_texture_cache_base_address(),
 		XBOX_TEXTURE_CACHE_SIZE,
@@ -702,7 +718,7 @@ void texture_cache_new(
 		"xbox_texture_cache_globals.textures");
 	xbox_texture_cache_globals.cache = lruv_new(
 		"xbox texture cache",
-		XBOX_TEXTURE_CACHE_PAGE_COUNT,
+		texture_cache_page_count(),
 		XBOX_TEXTURE_CACHE_PAGE_SIZE_BITS,
 		XBOX_TEXTURE_CACHE_PAGE_COUNT,
 		texture_cache_delete_block_proc,
@@ -900,7 +916,7 @@ void texture_cache_debug_render(
 		colors[3] = NULL;
 		lruv_cache_get_page_usage(xbox_texture_cache_globals.cache, page_usage);
 
-		for (page_index = 0; page_index < XBOX_TEXTURE_CACHE_PAGE_COUNT; page_index++)
+		for (page_index = 0; page_index < texture_cache_page_count(); page_index++)
 		{
 			x_offset = render.camera.window_bounds.x0 -
 				render.camera.viewport_bounds.x0;

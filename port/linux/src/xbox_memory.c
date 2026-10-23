@@ -140,6 +140,22 @@ void *halo_custom_edition_tag_cache(void)
 	return custom_edition_tag_cache;
 }
 
+/* The texture cache's pages are backed as they are first used, and its LRU
+takes never-used pages before it evicts, so over a long session all of
+them come to be part of the footprint. game.texture_cache_mb bounds how many
+it uses (0: all; the Apple TV's app sets it: port/tvos/tv_main.m), never
+below the Xbox's 22 MB. */
+long halo_texture_cache_pages(long page_count, long page_size)
+{
+	long megabytes = config_integer("game.texture_cache_mb");
+	long pages = megabytes > 0 ? (long)(((unsigned long long)megabytes << 20) / (unsigned long)page_size) : page_count;
+	long least = (long)(0x1600000UL / (unsigned long)page_size);
+
+	if (pages < least)
+		pages = least;
+	return pages < page_count ? pages : page_count;
+}
+
 BOOL platform_is_contiguous(const void *address)
 {
 	unsigned long value = (unsigned long)address;

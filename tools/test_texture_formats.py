@@ -276,3 +276,17 @@ def test_wasm_contiguous_blocks_clear_only_pages_used_before():
     assert cleared == []
     allocate(12, 6)
     assert cleared == [12, 13, 14]
+
+
+def test_game_texture_cache_size_is_a_setting_the_tv_lowers():
+    cache = (ROOT / "source/cache/xbox_texture_cache.c").read_text()
+    assert "halo_texture_cache_pages(XBOX_TEXTURE_CACHE_PAGE_COUNT, XBOX_TEXTURE_CACHE_PAGE_SIZE)" in cache
+    new = cache[cache.index("void texture_cache_new("):]
+    assert "texture_cache_page_count()," in new[:800]
+    steal = cache[cache.index("void *texture_cache_steal_memory("):]
+    assert "texture_cache_page_count() - (XBOX_TEXTURE_CACHE_PAGE_COUNT - XBOX_TEXTURE_CACHE_STEALABLE_PAGE_COUNT)" in steal
+    memory = (ROOT / "port/linux/src/xbox_memory.c").read_text()
+    assert 'config_integer("game.texture_cache_mb")' in memory and "0x1600000UL" in memory
+    assert 'setenv("HALO_TEXTURE_CACHE_MB", "96", 0);' in (ROOT / "port/tvos/tv_main.m").read_text()
+    config = (ROOT / "port/linux/src/port_config.c").read_text()
+    assert '{ "game.texture_cache_mb", _config_integer, "0", "HALO_TEXTURE_CACHE_MB"' in config
