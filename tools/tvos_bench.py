@@ -150,13 +150,33 @@ SCENES["thermal"] = {"init": SCENES["b30split"]["init"], "seconds": 1830, "windo
 SCENES["b30long"] = {"init": ["player_spawn_count 2", "map_name levels\\b30\\b30"], "seconds": 900,
                      "window_seconds": 780.0, "map": "b30.map",
                      "env": {"HALO_TEST_INPUT": "bot:1", "HALO_TELEMETRY": "on"}}
+
+
+def multimap_commands(maps=("b30", "b40", "c10", "b30"), dwell=300):
+    """the multimap scene's script: a10's opening at 8x, then every dwell
+    game seconds the next map (debug.test_commands' times are each map's
+    own: the game's time starts again with a map)"""
+    commands = ["1 (game_speed 8)", "226 (game_speed 1)"]
+    commands += [f"{dwell} (map_name levels\\{name}\\{name})" for name in maps]
+    return ";".join(commands)
+
+
+# a long co-op session over several maps, split screen, player 1 the bot: a10
+# then b30, b40, c10 and b30 again, 300 game seconds each (~23 min): the
+# memory the owner's 2.5-hour session grew (textures of maps left behind),
+# and what a map change costs once the host texture budget is full
+SCENES["multimap"] = {"init": SCENES["split"]["init"], "seconds": 1400, "window_seconds": 1200.0,
+                      "maps": ["b30.map", "b40.map", "c10.map"],
+                      "env": {"HALO_TEST_COMMANDS": multimap_commands(), "HALO_TEST_INPUT": "bot:1",
+                              "HALO_TELEMETRY": "on"}}
 SCENE_LABEL = {"opening": "a10 cutscene (partial)", "bridge": "a10 bridge (gameplay)",
                "b30": "b30 beach (gameplay)", "a10play": "a10 cryo bay (first gameplay)",
                "cryo": "a10 cryo bay (saved state)", "split": "a10 split screen (2 players)",
                "latelag": "a10 split screen, two areas in turn (10 min)",
                "b30split": "b30 beach split screen (2 players)",
                "thermal": "b30 beach split screen, 30 min (thermal)",
-               "b30long": "b30 split screen, bot player (15 min)"}
+               "b30long": "b30 split screen, bot player (15 min)",
+               "multimap": "a10, b30, b40, c10, b30 split screen (23 min)"}
 FOG_START_DRAWS = 20
 FOG_SUSTAIN_SECONDS = 5.0
 SERIES = ("wall_ms", "gpu_ms", "guest_ms", "host_ms", "compile_ms", "wait_drawable_ms", "wait_inflight_ms",
@@ -230,7 +250,7 @@ def scene_window(scene, events, rows, window_seconds=None):
         if start is None:
             return [], "the cryo bay (>= 40 fog-plane draws) was never reached"
         description = f"a10 cryo bay: {window_seconds:g} s from frame {rows[start]['serial']}"
-    elif scene in ("split", "latelag", "b30split", "thermal", "b30long"):
+    elif scene in ("split", "latelag", "b30split", "thermal", "b30long", "multimap"):
         # (the first frame drawn as two player views, after the cinematic)
         views = [e for e in events if e["kind"] == "views" and e["detail"] == "2"]
         split = None
@@ -579,7 +599,9 @@ def run_device(runs, out, extra_env, device, core=None, traces=(), trace_results
     print(f"backed up the TV's config.toml and init.txt: {config_backup}, {init_backup}", flush=True)
     results = []
     try:
-        for map_name in sorted({SCENES[run["scene"]].get("map", "a10.map") for run in runs} - {"a10.map"}) if push else ():
+        wanted = {SCENES[run["scene"]].get("map", "a10.map") for run in runs}
+        wanted |= {name for run in runs for name in SCENES[run["scene"]].get("maps", ())}
+        for map_name in sorted(wanted - {"a10.map"}) if push else ():
             if not maps:
                 raise deploy.DeployError(f"{map_name} is needed on the TV: pass --maps")
             deploy.run(deploy.copy_args("to", device, Path(maps) / map_name, f"{container}/maps/{map_name}"),
