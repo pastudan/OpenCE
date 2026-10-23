@@ -3504,7 +3504,16 @@ void host_metal_scene_upscale(const struct metal_upscale *upscale)
 	MTLScissorRect scissor;
 	MTLViewport viewport;
 
+	static int skip = -1;
+
 	if (!metal.device || !scene || !back)
+		return;
+	/* (HALO_DYNRES_NO_UPSCALE, diagnostic: the upscale's draw not drawn,
+	to measure what it costs with HALO_DYNRES_FIXED; the picture is then
+	wrong) */
+	if (skip < 0)
+		skip = getenv("HALO_DYNRES_NO_UPSCALE") && atoi(getenv("HALO_DYNRES_NO_UPSCALE")) > 0;
+	if (skip)
 		return;
 	@autoreleasepool
 	{
