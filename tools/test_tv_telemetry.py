@@ -442,3 +442,15 @@ def test_tv_ring_is_smaller_and_overflow_is_kept():
     metal = (ROOT / "port/macos/host/host_metal.m").read_text()
     assert "#ifdef HALO_TVOS\n#define RING_BYTES (24u << 20)\n#else\n#define RING_BYTES (64u << 20)" in metal
     assert "host_frame_acc.ring_overflows++;" in metal
+
+
+def test_fps_and_missed_are_the_displays():
+    """a host present is not a frame shown (the A12 has presented 120 a
+    second to a 60 Hz display): fps and missed come from the presented
+    handler's times where it gives them, on tvOS too"""
+    source = (HOST / "host_telemetry.c").read_text()
+    assert "host_frame_log_presented_of(second->numbers[index].serial)" in source
+    assert '\\"missed_from\\":\\"%s\\"' in source
+    metal = (ROOT / "port/macos/host/host_metal.m").read_text()
+    handler = metal.index("[drawable addPresentedHandler:")
+    assert "#ifndef HALO_TVOS" not in metal[handler - 600:handler]

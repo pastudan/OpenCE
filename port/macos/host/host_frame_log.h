@@ -12,8 +12,8 @@ read a frame. HALO_FRAME_LOG=1 (level 2) also splits the frame: Metal
 encoding (host), shader/pipeline compiles, the waits for a free frame, a
 drawable and a readback, the main thread's sleeps, real GPU time
 (GPUStartTime/GPUEndTime of the frame's command buffers) and when the frame
-reached the display (the drawable's presented handler; not on tvOS, whose
-SDK does not have it: 0 there). What is left of the
+reached the display (the drawable's presented handler; 0 for a frame the
+display never showed). What is left of the
 wall time is the guest's own work (the translated game, SDL, audio, files).
 */
 
@@ -130,6 +130,9 @@ includes waiting behind the frame before: not added to the GPU time) */
 void host_frame_log_gpu_hoisted(uint64_t serial, double start_seconds, double end_seconds);
 /* frame serial reached the display (0: it never did) */
 void host_frame_log_presented(uint64_t serial, double presented_seconds);
+/* when the display showed frame serial (CLOCK_UPTIME_RAW ns; 0: not, or
+not known yet, or the frame is out of the ring) */
+uint64_t host_frame_log_presented_of(uint64_t serial);
 /* something to find the frames by ("map-open", "a10.map") */
 void host_frame_log_event(const char *kind, const char *detail);
 /* the GPU's times of frame serial so far (its command buffers', the

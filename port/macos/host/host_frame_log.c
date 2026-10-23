@@ -492,6 +492,13 @@ void host_frame_log_present(uint64_t serial)
 		interval_line(serial);
 }
 
+uint64_t host_frame_log_presented_of(uint64_t serial)
+{
+	struct frame_record *record = record_of(serial);
+
+	return record ? atomic_load(&record->presented_ns) : 0;
+}
+
 static uint64_t ns_of_seconds(double seconds)
 {
 	/* (Metal's times, GPUStartTime and presentedTime, are seconds of the

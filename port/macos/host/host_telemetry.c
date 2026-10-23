@@ -116,6 +116,8 @@ static struct
 	/* the game's state, as the guest last gave it */
 	struct metal_telemetry_game game;
 	uint32_t render_width, render_height, drawable_width, drawable_height;
+	/* the display's time of the last frame it showed (second_write) */
+	uint64_t last_shown_ns;
 	/* events since the last frame (for a hitch), from any thread */
 	_Atomic uint32_t events;
 	char last_event[48];
@@ -698,11 +700,23 @@ static void second_write(struct second *second)
 	const struct metal_telemetry_game *game = &second->game;
 	char map[40];
 	int players, view_count;
+	/* the frames the display showed, and the refresh slots it showed none
+	in between them (its own times, a second late: the presented handler's) */
+	uint32_t shown = 0, missed_shown = 0;
 
 	for (index = 0; index < kept; index++)
 	{
-		uint64_t gpu_ns, hoisted_ns, span_ns;
+		uint64_t gpu_ns, hoisted_ns, span_ns, presented;
 		uint32_t buffers;
+
+		presented = host_frame_log_presented_of(second->numbers[index].serial);
+		if (presented)
+		{
+			shown++;
+			if (telemetry.last_shown_ns && presented > telemetry.last_shown_ns)
+				missed_shown += host_telemetry_missed_slots(presented - telemetry.last_shown_ns, telemetry.slot_ns);
+			telemetry.last_shown_ns = presented;
+		}
 
 		wall[index] = second->numbers[index].wall_us;
 		guest[index] = second->numbers[index].guest_us;
@@ -744,11 +758,20 @@ static void second_write(struct second *second)
 		append("%s[%.1f,%.1f,%.1f]", index ? "," : "", game->positions[index][0], game->positions[index][1],
 			game->positions[index][2]);
 	}
-	append("],\"frames\":%u,\"fps\":%.2f,\"wall_p50\":%.2f,\"wall_p95\":%.2f,\"wall_max\":%.2f,"
-		"\"over16\":%u,\"over33\":%u,\"over50\":%u,\"missed\":%u,",
-		second->frames, second->frames / duration, ms_of_us(percentile(wall, kept, 0.50)),
-		ms_of_us(percentile(wall, kept, 0.95)), kept ? ms_of_us(wall[kept - 1]) : 0.0, second->over16,
-		second->over33, second->over50, second->missed_slots);
+	/* fps and missed: the display's (frames it showed, and the refresh
+	slots between them it showed none in) where it gives its times (the
+	presented handler); else from the host's presents. A host present is
+	not a frame shown: the A12 has presented 120 a second to a 60 Hz
+	display (a drawable replaced before it was shown), whose present to
+	present times then miss nothing however the display stutters.
+	"presents" is the host's count, and "missed_host" its slots */
+	append("],\"frames\":%u,\"presents\":%u,\"shown\":%u,\"fps\":%.2f,\"wall_p50\":%.2f,\"wall_p95\":%.2f,"
+		"\"wall_max\":%.2f,\"over16\":%u,\"over33\":%u,\"over50\":%u,\"missed\":%u,\"missed_host\":%u,"
+		"\"missed_from\":\"%s\",",
+		second->frames, second->frames, shown, (shown ? shown : second->frames) / duration,
+		ms_of_us(percentile(wall, kept, 0.50)), ms_of_us(percentile(wall, kept, 0.95)),
+		kept ? ms_of_us(wall[kept - 1]) : 0.0, second->over16, second->over33, second->over50,
+		shown ? missed_shown : second->missed_slots, second->missed_slots, shown ? "display" : "host");
 	append("\"guest_ms\":%.3f,\"guest_p95\":%.2f,\"guest_max\":%.2f,\"host_ms\":%.3f,\"host_p95\":%.2f,"
 		"\"gpu_ms\":%.3f,\"gpu_p50\":%.2f,\"gpu_p95\":%.2f,\"gpu_max\":%.2f,\"gpu_span_p95\":%.2f,\"gpu_frames\":%u,"
 		"\"hoisted_ms\":%.3f,",

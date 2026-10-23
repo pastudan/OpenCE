@@ -3395,8 +3395,10 @@ void host_metal_present(void)
 			{
 				drawable = [metal.layer nextDrawable];
 			}
-#ifndef HALO_TVOS
-			/* (tvOS's SDK has no presented handler: presented_ms stays 0 there) */
+			/* when the display showed it (0: it was not, another drawable
+			replaced it first): the frame log's presented_ms and the
+			telemetry's fps and missed slots. (tvOS has the handler too, from
+			tvOS 10.3: an earlier comment here said it had not) */
 			if (drawable && host_frame_log_level)
 			{
 				[drawable addPresentedHandler:^(id<MTLDrawable> shown)
@@ -3404,7 +3406,6 @@ void host_metal_present(void)
 					host_frame_log_presented(serial, shown.presentedTime);
 				}];
 			}
-#endif
 			if (drawable)
 			{
 				MTLRenderPassDescriptor *descriptor = [MTLRenderPassDescriptor renderPassDescriptor];
