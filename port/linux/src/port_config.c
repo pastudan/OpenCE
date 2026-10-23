@@ -202,6 +202,12 @@ static const struct config_setting config_settings[] =
 		"samples in half precision, which Apple's GPUs run a little faster;\n"
 		"some pixels come out a level or two of 255 apart. false draws them\n"
 		"in full precision, as before." },
+	{ "display.half_res_transparents", _config_boolean, "false", "HALO_HALF_RES_TRANSPARENTS", _environment_value,
+		_platform_desktop,
+		"Metal builds: smoke, particles, plasma, glass and the other blended\n"
+		"effects drawn after the scene are drawn at half the resolution and\n"
+		"blended in once: faster on a 4K screen, a little softer. false draws\n"
+		"them at full resolution." },
 	{ "display.menus", _config_string, "\"pc\"", "HALO_MENUS", _environment_value, _platform_all,
 		"The menus: \"pc\" for the PC version's main menu (port/assets/menus,\n"
 		"and a menus folder here for your own), \"xbox\" for the Xbox's." },

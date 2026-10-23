@@ -393,6 +393,28 @@ static struct
 static id<MTLRenderCommandEncoder> encoder;
 static uint64_t encoder_serial, encoder_serials;
 
+/* the queued transparents at half resolution (host_metal_halfres_begin,
+below): while a run is drawn, its pass has two more colour attachments
+than the guest knows of, multiply (the factor the run multiplies what is
+under it by) and depths (each half-resolution pixel's own pixels' depths,
+for the upsample) */
+static struct
+{
+	BOOL active, reduced;
+	uint32_t accumulate, depth;
+	uint32_t screen_color, screen_depth;
+	uint32_t x, y, width, height, step;
+	id<MTLTexture> multiply, depths;
+	/* the run's draws' stencil test, which the composite repeats at full
+	resolution (set: one was seen) */
+	struct metal_depth_stencil stencil;
+	uint32_t stencil_reference, stencil_set;
+	uint64_t runs, draws;
+} halfres;
+
+/* the pixel shaders' sources, for their variants that half-resolution runs draw with */
+static NSMutableDictionary<NSNumber *, NSString *> *halfres_sources;
+
 /* HALO_METAL_DEPTH_DISCARD=present (experimental, off by default): the
 depth and stencil of the pass that ends at the present not stored (store
 actions decided at the pass's end). Correct only if every frame's first use
@@ -1071,6 +1093,20 @@ static BOOL encoder_begin(void)
 	descriptor.colorAttachments[0].loadAction = color ? pass.color_load : MTLLoadActionDontCare;
 	descriptor.colorAttachments[0].storeAction = color ? MTLStoreActionStore : MTLStoreActionDontCare;
 	descriptor.colorAttachments[0].clearColor = pass.clear_color;
+	/* (a half-resolution run's: its multiply and depths beside it) */
+	if (halfres.active && pass.color == halfres.accumulate)
+	{
+		/* (the run's first pass: the reduction writes every pixel) */
+		MTLLoadAction load = halfres.reduced ? MTLLoadActionLoad : MTLLoadActionDontCare;
+
+		descriptor.colorAttachments[1].texture = halfres.multiply;
+		descriptor.colorAttachments[1].loadAction = load;
+		descriptor.colorAttachments[1].storeAction = MTLStoreActionStore;
+		descriptor.colorAttachments[2].texture = halfres.depths;
+		descriptor.colorAttachments[2].loadAction = load;
+		descriptor.colorAttachments[2].storeAction = MTLStoreActionStore;
+		halfres.reduced = YES;
+	}
 	if (depth)
 	{
 		/* (HALO_METAL_DEPTH_DISCARD: a load of what was not stored) */
@@ -1090,7 +1126,8 @@ static BOOL encoder_begin(void)
 		descriptor.depthAttachment.loadAction = pass.depth_load;
 		descriptor.depthAttachment.storeAction = depth_discard.enabled ? MTLStoreActionUnknown : MTLStoreActionStore;
 		descriptor.depthAttachment.clearDepth = pass.clear_depth;
-		descriptor.stencilAttachment.texture = depth;
+		/* (a depth target without stencil: the half-resolution runs') */
+		descriptor.stencilAttachment.texture = depth.pixelFormat == MTLPixelFormatDepth32Float ? nil : depth;
 		descriptor.stencilAttachment.loadAction = pass.stencil_load;
 		descriptor.stencilAttachment.storeAction = depth_discard.enabled ? MTLStoreActionUnknown : MTLStoreActionStore;
 		descriptor.stencilAttachment.clearStencil = pass.clear_stencil;
@@ -1370,6 +1407,8 @@ static BOOL renderer_initialize(void)
 	metal.dummy_2d = dummy_make(MTLTextureType2D);
 	metal.dummy_cube = dummy_make(MTLTextureTypeCube);
 	metal.dummy_3d = dummy_make(MTLTextureType3D);
+	/* (the pixel shaders' sources, for display.half_res_transparents' variants) */
+	halfres_sources = [NSMutableDictionary dictionary];
 	frames_free = dispatch_semaphore_create(FRAMES_IN_FLIGHT);
 	for (index = 0; index < METAL_VISIBILITY_SLOTS; index++)
 		atomic_store(&index_known[index], 0);
@@ -2133,6 +2172,9 @@ unsigned int host_metal_shader(const char *source, int fragment)
 		{
 			handle_set(handle, function);
 			shader_cache_record_shader(handle, source, fragment);
+			/* (its text, for its half-resolution variant: halfres_fragment) */
+			if (fragment && halfres_sources)
+				halfres_sources[@(handle)] = [NSString stringWithUTF8String:source];
 		}
 		return handle;
 	}
@@ -2194,6 +2236,9 @@ struct pipeline_key
 	struct metal_blend blend;
 };
 
+/* (a half-resolution run's draw's pipeline: below) */
+static id<MTLRenderPipelineState> halfres_pipeline_get(const struct metal_draw *draw);
+
 /* a draw pipeline's descriptor: its shaders, vertex layout, targets' formats
 and blend (a pipeline_key's, as pipeline_get makes it) */
 static MTLRenderPipelineDescriptor *pipeline_descriptor_make(id<MTLFunction> vertex, id<MTLFunction> fragment,
@@ -2228,6 +2273,8 @@ static id<MTLRenderPipelineState> pipeline_get(const struct metal_draw *draw)
 	id<MTLRenderPipelineState> state;
 	NSError *error = nil;
 
+	if (halfres.active && pass.color == halfres.accumulate)
+		return halfres_pipeline_get(draw);
 	memset(&key, 0, sizeof(key));
 	key.vertex_shader = draw->vertex_shader;
 	key.fragment_shader = draw->fragment_shader;
@@ -2975,10 +3022,714 @@ static id<MTLTexture> dummy_texture(uint32_t type)
 		metal.dummy_2d;
 }
 
+/* ---------- the queued transparents at half resolution
+
+display.half_res_transparents (the guest decides which draws:
+d3d8_metal.c's half-resolution runs). A run of the queued transparents'
+draws is drawn into targets at half the scene's resolution each way, and
+composited into the screen once, so that what each pixel ends as is what
+the draws, one after another at full resolution, would have made of it:
+
+Every draw a run may have blends affinely in what is under it: dst' =
+src * a + dst * b, where b is a factor of the source (or 1, 0) and a a
+factor of the source or the destination's colour (multiply's). Then a run
+of them makes dst_end = S + M * dst_start for each pixel, whatever was
+under it, with S and M accumulated as the draws go, from S = 0 and M = 1:
+- accumulate (S, the guest's target) blends as the draw does;
+- multiply (M) blends the same source with the same destination factor
+  b, and a source factor of 0, or of M itself where the draw's is the
+  destination's colour (S' = src * S + S * b, M' = src * M + M * b).
+The composite, at full resolution, sets dst = S + M * dst (dual-source
+blending), so that a pixel no draw touched (S 0, M 1) is kept exactly.
+Both are half-precision floats: the 8-bit target's rounding and clamping
+between draws is not there, which differs from full resolution only where
+draws saturate.
+
+Depth: the half-resolution depth is each 2x2's nearest, so a transparent
+behind any of them is hidden there; each of the 2x2's own depths is kept
+(depths) for the composite's upsample, which takes the bilinear blend of
+the four nearest half-resolution pixels where their depths agree with the
+pixel's own (within a tenth), and else the one whose depth is nearest the
+pixel's. The run's stencil test (the first-person weapon's mask) is not
+drawn at half resolution but repeated by the composite at full: the weapon
+is near, so its half-resolution pixels hide what is behind them already.
+*/
+
+static NSString *const halfres_shaders =
+	@"#include <metal_stdlib>\n"
+	"using namespace metal;\n"
+	"struct halfres_vertex_out { float4 position [[position]]; };\n"
+	"struct halfres_frame { int4 rect; int step; float tolerance; int2 pad; };\n"
+	"vertex halfres_vertex_out halfres_vertex(uint id [[vertex_id]])\n"
+	"{\n"
+	"\tfloat2 p = float2((id << 1) & 2, id & 2);\n"
+	"\thalfres_vertex_out o;\n"
+	"\to.position = float4(p * 2.0 - 1.0, 0.0, 1.0);\n"
+	"\treturn o;\n"
+	"}\n"
+	/* the reduction: each half-resolution pixel's nearest depth (as
+	depth, for the draws' test) and its own pixels' (1 - z, so that the
+	far ones keep their precision in half floats; -1 outside the screen) */
+	"struct halfres_reduce_out { float4 accumulate [[color(0)]]; float4 multiply [[color(1)]];\n"
+	"\tfloat4 depths [[color(2)]]; float depth [[depth(any)]]; };\n"
+	"fragment halfres_reduce_out halfres_reduce(halfres_vertex_out in [[stage_in]],\n"
+	"\tdepth2d<float> screen [[texture(0)]], constant halfres_frame &f [[buffer(0)]])\n"
+	"{\n"
+	"\tint2 h = int2(in.position.xy);\n"
+	"\tint2 size = int2(screen.get_width(), screen.get_height());\n"
+	"\tfloat4 d = float4(-1.0);\n"
+	"\tfloat nearest = 1.0;\n"
+	"\tfor (int c = 0; c < f.step * f.step && c < 4; c++)\n"
+	"\t{\n"
+	"\t\tint2 q = h * f.step + int2(c % f.step, c / f.step);\n"
+	"\t\tif (q.x < size.x && q.y < size.y)\n"
+	"\t\t{\n"
+	"\t\t\tfloat z = screen.read(uint2(q));\n"
+	"\t\t\td[c] = 1.0 - z;\n"
+	"\t\t\tnearest = min(nearest, z);\n"
+	"\t\t}\n"
+	"\t}\n"
+	"\thalfres_reduce_out o;\n"
+	"\to.accumulate = float4(0.0);\n"
+	"\to.multiply = float4(1.0);\n"
+	"\to.depths = d;\n"
+	"\to.depth = nearest;\n"
+	"\treturn o;\n"
+	"}\n"
+	/* the composite: dst = S + M * dst (source 1 is M) */
+	"struct halfres_composite_out { float4 add [[color(0), index(0)]]; float4 multiply [[color(0), index(1)]]; };\n"
+	"fragment halfres_composite_out halfres_composite(halfres_vertex_out in [[stage_in]],\n"
+	"\ttexture2d<float> accumulate [[texture(0)]], texture2d<float> multiply [[texture(1)]],\n"
+	"\ttexture2d<float> depths [[texture(2)]], constant halfres_frame &f [[buffer(0)]])\n"
+	"{\n"
+	"\tint2 q = int2(in.position.xy);\n"
+	"\tint2 size = int2(accumulate.get_width(), accumulate.get_height());\n"
+	"\thalfres_composite_out o;\n"
+	"\tif (f.step == 1)\n"
+	"\t{\n"
+	"\t\to.add = accumulate.read(uint2(q));\n"
+	"\t\to.multiply = multiply.read(uint2(q));\n"
+	"\t\treturn o;\n"
+	"\t}\n"
+	"\tint2 parent = q / 2;\n"
+	"\tint child = (q.y & 1) * 2 + (q.x & 1);\n"
+	"\tfloat own = depths.read(uint2(parent))[child];\n"
+	/* the four nearest half-resolution pixels and their bilinear weights
+	(a pixel's centre is a quarter of a half-resolution pixel from its
+	parent's: 0.25 and 0.75) */
+	"\tfloat2 at = (float2(q) + 0.5) * 0.5 - 0.5;\n"
+	"\tint2 base = int2(floor(at));\n"
+	"\tfloat2 t = at - float2(base);\n"
+	"\tfloat4 s = float4(0.0), m = float4(0.0);\n"
+	"\tfloat weights[4] = { (1.0 - t.x) * (1.0 - t.y), t.x * (1.0 - t.y), (1.0 - t.x) * t.y, t.x * t.y };\n"
+	"\tint2 at4[4];\n"
+	"\tfloat near4[4];\n"
+	"\tbool agree = true;\n"
+	"\tint best = 0;\n"
+	"\tfloat best_difference = 1.0e9;\n"
+	"\tfor (int i = 0; i < 4; i++)\n"
+	"\t{\n"
+	"\t\tat4[i] = clamp(base + int2(i & 1, i >> 1), int2(0), size - 1);\n"
+	"\t\tfloat4 d = depths.read(uint2(at4[i]));\n"
+	"\t\tnear4[i] = max(max(d.x, d.y), max(d.z, d.w));\n"
+	"\t\tfloat difference = abs(near4[i] - own);\n"
+	"\t\tif (difference > f.tolerance * max(own, 1.0e-5))\n"
+	"\t\t\tagree = false;\n"
+	"\t\tif (difference < best_difference)\n"
+	"\t\t{\n"
+	"\t\t\tbest_difference = difference;\n"
+	"\t\t\tbest = i;\n"
+	"\t\t}\n"
+	"\t}\n"
+	"\tif (agree)\n"
+	"\t{\n"
+	"\t\tfor (int i = 0; i < 4; i++)\n"
+	"\t\t{\n"
+	"\t\t\ts += weights[i] * accumulate.read(uint2(at4[i]));\n"
+	"\t\t\tm += weights[i] * multiply.read(uint2(at4[i]));\n"
+	"\t\t}\n"
+	"\t}\n"
+	"\telse\n"
+	"\t{\n"
+	"\t\ts = accumulate.read(uint2(at4[best]));\n"
+	"\t\tm = multiply.read(uint2(at4[best]));\n"
+	"\t}\n"
+	"\to.add = float4(s.rgb, 0.0);\n"
+	"\to.multiply = float4(m.rgb, 1.0);\n"
+	"\treturn o;\n"
+	"}\n";
+
+static struct
+{
+	BOOL tried;
+	id<MTLFunction> vertex, reduce, composite;
+	id<MTLRenderPipelineState> reduce_pipeline;
+	/* the composite's, by the screen's colour and depth formats */
+	id<MTLRenderPipelineState> composite_pipeline;
+	uint32_t composite_formats[2];
+	/* each pixel shader's variant writing both accumulators, by handle */
+	NSMutableDictionary<NSNumber *, id<MTLFunction>> *fragments;
+	struct cache pipelines;
+} halfres_state;
+
+static BOOL halfres_prepare(void)
+{
+	NSError *error = nil;
+	id<MTLLibrary> library;
+
+	if (halfres_state.tried)
+		return halfres_state.composite != nil;
+	halfres_state.tried = YES;
+	library = [metal.device newLibraryWithSource:halfres_shaders options:compile_options() error:&error];
+	if (!library)
+	{
+		host_log("Metal: half resolution: its shaders do not build: %s", error.localizedDescription.UTF8String);
+		return NO;
+	}
+	halfres_state.vertex = [library newFunctionWithName:@"halfres_vertex"];
+	halfres_state.reduce = [library newFunctionWithName:@"halfres_reduce"];
+	halfres_state.composite = [library newFunctionWithName:@"halfres_composite"];
+	halfres_state.fragments = [NSMutableDictionary dictionary];
+	return halfres_state.composite != nil;
+}
+
+/* a pixel shader's text, with its result written to the run's two
+accumulators (and nothing to the depths): the entry point returns a struct
+of both, each return in it giving the same colour to both */
+static NSString *halfres_fragment_text(NSString *source)
+{
+	NSRange entry = [source rangeOfString:@"fragment vec4 fragment_main("];
+	NSMutableString *text;
+	NSUInteger at;
+
+	if (entry.location == NSNotFound)
+		return nil;
+	text = [NSMutableString stringWithString:[source substringToIndex:entry.location]];
+	[text appendString:@"struct halfres_out { vec4 accumulate [[color(0)]]; vec4 multiply [[color(1)]]; };\n"
+		"static inline halfres_out halfres_both(vec4 c) { halfres_out o; o.accumulate = c; o.multiply = c; "
+		"return o; }\n"
+		"fragment halfres_out fragment_main("];
+	at = entry.location + entry.length;
+	while (at < source.length)
+	{
+		NSRange found = [source rangeOfString:@"return " options:0 range:NSMakeRange(at, source.length - at)];
+		NSRange end;
+
+		if (found.location == NSNotFound)
+			break;
+		end = [source rangeOfString:@";" options:0
+			range:NSMakeRange(found.location, source.length - found.location)];
+		if (end.location == NSNotFound)
+			return nil;
+		[text appendString:[source substringWithRange:NSMakeRange(at, found.location - at)]];
+		[text appendString:@"return halfres_both("];
+		[text appendString:[source substringWithRange:NSMakeRange(found.location + found.length,
+			end.location - found.location - found.length)]];
+		[text appendString:@")"];
+		at = end.location;
+	}
+	[text appendString:[source substringFromIndex:at]];
+	return text;
+}
+
+static id<MTLFunction> halfres_fragment(uint32_t handle)
+{
+	id<MTLFunction> function = halfres_state.fragments[@(handle)];
+	NSString *source, *text;
+	NSError *error = nil;
+	id<MTLLibrary> library;
+	uint64_t frame_log_started;
+
+	if (function)
+		return function;
+	source = halfres_sources[@(handle)];
+	text = source ? halfres_fragment_text(source) : nil;
+	if (!text)
+		return nil;
+	text = shader_text(text.UTF8String, 1);
+	frame_log_started = host_frame_log_detail() ? host_frame_log_now() : 0;
+	library = [metal.device newLibraryWithSource:text options:compile_options() error:&error];
+	if (frame_log_started)
+	{
+		host_frame_acc.compile_ns += host_frame_log_now() - frame_log_started;
+		host_frame_acc.compiles++;
+	}
+	function = library ? [library newFunctionWithName:shader_entry_point(1)] : nil;
+	if (!function)
+	{
+		host_log("Metal: half resolution: pixel shader %u's variant does not build: %s", handle,
+			error ? error.localizedDescription.UTF8String : "no entry point");
+		return nil;
+	}
+	halfres_state.fragments[@(handle)] = function;
+	return function;
+}
+
+/* the multiply's source factor for a draw's (half resolution's comment) */
+static metal_u32 halfres_multiply_source(metal_u32 source)
+{
+	return source == METAL_BLEND_DESTINATION_COLOR ? METAL_BLEND_DESTINATION_COLOR : METAL_BLEND_ZERO;
+}
+
+static id<MTLRenderPipelineState> halfres_pipeline_get(const struct metal_draw *draw)
+{
+	struct pipeline_key key;
+	uint64_t hash;
+	BOOL found;
+	void *object;
+	MTLRenderPipelineDescriptor *descriptor;
+	id<MTLRenderPipelineState> state = nil;
+	id<MTLFunction> fragment;
+	NSError *error = nil;
+
+	memset(&key, 0, sizeof(key));
+	key.vertex_shader = draw->vertex_shader;
+	key.fragment_shader = draw->fragment_shader;
+	key.vertex_layout = draw->vertex_layout;
+	key.blend = draw->blend;
+	object = cache_find(&halfres_state.pipelines, &key, sizeof(key), &hash, &found);
+	if (found)
+		return (__bridge id<MTLRenderPipelineState>)object;
+	fragment = halfres_fragment(draw->fragment_shader);
+	if (fragment)
+	{
+		descriptor = pipeline_descriptor_make(handle_object(draw->vertex_shader, _handle_shader), fragment,
+			handle_object(draw->vertex_layout, _handle_layout), METAL_FORMAT_RGBA16F, MTLPixelFormatDepth32Float,
+			&draw->blend);
+		descriptor.stencilAttachmentPixelFormat = MTLPixelFormatInvalid;
+		descriptor.colorAttachments[0].writeMask = MTLColorWriteMaskRed | MTLColorWriteMaskGreen | MTLColorWriteMaskBlue;
+		descriptor.colorAttachments[1].pixelFormat = MTLPixelFormatRGBA16Float;
+		descriptor.colorAttachments[1].writeMask = MTLColorWriteMaskRed | MTLColorWriteMaskGreen | MTLColorWriteMaskBlue;
+		descriptor.colorAttachments[1].blendingEnabled = YES;
+		descriptor.colorAttachments[1].sourceRGBBlendFactor = (MTLBlendFactor)halfres_multiply_source(draw->blend.source);
+		descriptor.colorAttachments[1].sourceAlphaBlendFactor = descriptor.colorAttachments[1].sourceRGBBlendFactor;
+		descriptor.colorAttachments[1].destinationRGBBlendFactor = (MTLBlendFactor)draw->blend.destination;
+		descriptor.colorAttachments[1].destinationAlphaBlendFactor = (MTLBlendFactor)draw->blend.destination;
+		descriptor.colorAttachments[1].rgbBlendOperation = MTLBlendOperationAdd;
+		descriptor.colorAttachments[1].alphaBlendOperation = MTLBlendOperationAdd;
+		descriptor.colorAttachments[2].pixelFormat = MTLPixelFormatRGBA16Float;
+		descriptor.colorAttachments[2].writeMask = MTLColorWriteMaskNone;
+		state = [metal.device newRenderPipelineStateWithDescriptor:descriptor error:&error];
+		if (!state)
+			host_log("Metal: half resolution: no pipeline for shaders %u/%u: %s", draw->vertex_shader,
+				draw->fragment_shader, error.localizedDescription.UTF8String);
+	}
+	cache_add(&halfres_state.pipelines, &key, sizeof(key), hash, state);
+	return state;
+}
+
+static void halfres_frame_values(uint32_t values[8])
+{
+	float tolerance = 0.1f;
+
+	values[0] = halfres.x;
+	values[1] = halfres.y;
+	values[2] = halfres.width;
+	values[3] = halfres.height;
+	values[4] = halfres.step;
+	memcpy(&values[5], &tolerance, sizeof(tolerance));
+	values[6] = values[7] = 0;
+}
+
+void host_metal_halfres_begin(unsigned int screen_color, unsigned int screen_depth, unsigned int accumulate,
+	unsigned int depth, unsigned int x, unsigned int y, unsigned int width, unsigned int height, unsigned int step)
+{
+	HOST_FRAME_LOG_SCOPE;
+	id<MTLTexture> target = texture_object(accumulate), screen = texture_object(screen_depth);
+	MTLRenderPassDescriptor *descriptor;
+
+	if (!metal.device || halfres.active || !target || !screen || !halfres_prepare())
+		return;
+	@autoreleasepool
+	{
+		/* the screen's pass ended (its depth stored, for the reduction) */
+		pass_flush();
+		park_end();
+		pass_log.end_reason = _pass_end_targets;
+		encoder_end();
+		frame_begin();
+		if (!halfres.multiply || halfres.multiply.width != target.width || halfres.multiply.height != target.height)
+		{
+			MTLTextureDescriptor *made = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:
+				MTLPixelFormatRGBA16Float width:target.width height:target.height mipmapped:NO];
+
+			made.usage = MTLTextureUsageRenderTarget | MTLTextureUsageShaderRead;
+			made.storageMode = MTLStorageModePrivate;
+			halfres.multiply = [metal.device newTextureWithDescriptor:made];
+			halfres.depths = [metal.device newTextureWithDescriptor:made];
+		}
+		if (!halfres_state.reduce_pipeline)
+		{
+			MTLRenderPipelineDescriptor *pipeline = [MTLRenderPipelineDescriptor new];
+			NSError *error = nil;
+
+			pipeline.vertexFunction = halfres_state.vertex;
+			pipeline.fragmentFunction = halfres_state.reduce;
+			pipeline.colorAttachments[0].pixelFormat = MTLPixelFormatRGBA16Float;
+			pipeline.colorAttachments[1].pixelFormat = MTLPixelFormatRGBA16Float;
+			pipeline.colorAttachments[2].pixelFormat = MTLPixelFormatRGBA16Float;
+			pipeline.depthAttachmentPixelFormat = MTLPixelFormatDepth32Float;
+			halfres_state.reduce_pipeline = [metal.device newRenderPipelineStateWithDescriptor:pipeline error:&error];
+			if (!halfres_state.reduce_pipeline)
+			{
+				host_log("Metal: half resolution: no reduction pipeline: %s", error.localizedDescription.UTF8String);
+				return;
+			}
+		}
+		halfres.active = YES;
+		halfres.accumulate = accumulate;
+		halfres.depth = depth;
+		halfres.screen_color = screen_color;
+		halfres.screen_depth = screen_depth;
+		halfres.x = x;
+		halfres.y = y;
+		halfres.width = width;
+		halfres.height = height;
+		halfres.step = step ? step : 2;
+		halfres.stencil_set = 0;
+		halfres.reduced = NO;
+		halfres.runs++;
+		/* the targets the guest's draws now name: theirs, cleared by the
+		reduction (whole: the window's rectangle is the composite's) */
+		pass.color = accumulate;
+		pass.depth = depth;
+		pass.color_load = pass.depth_load = pass.stencil_load = MTLLoadActionDontCare;
+		handles[accumulate].fresh = handles[depth].fresh = 0;
+		if (!encoder_begin())
+		{
+			halfres.active = NO;
+			return;
+		}
+		{
+			uint32_t values[8];
+			struct metal_depth_stencil state_key;
+
+			memset(&state_key, 0, sizeof(state_key));
+			state_key.depth_test = 1;
+			state_key.depth_function = MTLCompareFunctionAlways;
+			state_key.depth_write = 1;
+			halfres_frame_values(values);
+			[encoder setRenderPipelineState:halfres_state.reduce_pipeline];
+			[encoder setDepthStencilState:depth_stencil_get(&state_key)];
+			[encoder setCullMode:MTLCullModeNone];
+			[encoder setTriangleFillMode:MTLTriangleFillModeFill];
+			[encoder setDepthBias:0.0f slopeScale:0.0f clamp:0.0f];
+			[encoder setViewport:(MTLViewport){ 0.0, 0.0, (double)pass.width, (double)pass.height, 0.0, 1.0 }];
+			[encoder setScissorRect:(MTLScissorRect){ 0, 0, pass.width, pass.height }];
+			[encoder setFragmentTexture:screen atIndex:0];
+			[encoder setFragmentBytes:values length:sizeof(values) atIndex:0];
+			if (bound.counter != ~0u)
+				[encoder setVisibilityResultMode:MTLVisibilityResultModeDisabled offset:0];
+			[encoder drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
+			bound_forget();
+			handles[screen_depth].commands_read = commands_generation;
+		}
+		(void)descriptor;
+	}
+}
+
+/* a draw of a run: its depth's and stencil's tests as the half-resolution
+targets have them (the stencil's repeated by the composite) */
+static const struct metal_draw *halfres_draw(const struct metal_draw *draw, struct metal_draw *adjusted)
+{
+	if (!halfres.active || pass.color != halfres.accumulate)
+		return draw;
+	*adjusted = *draw;
+	if (draw->depth_stencil.stencil_test && !halfres.stencil_set)
+	{
+		halfres.stencil = draw->depth_stencil;
+		halfres.stencil_reference = draw->stencil_reference;
+		halfres.stencil_set = 1;
+	}
+	adjusted->depth_stencil.stencil_test = 0;
+	adjusted->depth_stencil.stencil_function = adjusted->depth_stencil.stencil_fail = 0;
+	adjusted->depth_stencil.stencil_depth_fail = adjusted->depth_stencil.stencil_pass = 0;
+	adjusted->depth_stencil.stencil_read_mask = adjusted->depth_stencil.stencil_write_mask = 0;
+	adjusted->stencil_reference = 0;
+	adjusted->depth_stencil.depth_write = 0;
+	adjusted->blend.write_mask = METAL_WRITE_RED | METAL_WRITE_GREEN | METAL_WRITE_BLUE;
+	halfres.draws++;
+	return adjusted;
+}
+
+void host_metal_halfres_end(void)
+{
+	HOST_FRAME_LOG_SCOPE;
+	id<MTLTexture> screen_color, screen_depth;
+
+	if (!halfres.active)
+		return;
+	@autoreleasepool
+	{
+		/* (the run's pass, parked by a small one between its draws, ended
+		too) */
+		park_end();
+		pass_log.end_reason = _pass_end_targets;
+		encoder_end();
+		halfres.active = NO;
+		pass.color = halfres.screen_color;
+		pass.depth = halfres.screen_depth;
+		pass.color_load = pass.depth_load = pass.stencil_load = MTLLoadActionLoad;
+		screen_color = texture_object(pass.color);
+		screen_depth = texture_object(pass.depth);
+		if (!screen_color || !encoder_begin())
+			return;
+		if (!halfres_state.composite_pipeline || halfres_state.composite_formats[0] != (uint32_t)pass.color_format ||
+			halfres_state.composite_formats[1] != (uint32_t)pass.depth_format)
+		{
+			MTLRenderPipelineDescriptor *pipeline = [MTLRenderPipelineDescriptor new];
+			NSError *error = nil;
+
+			pipeline.vertexFunction = halfres_state.vertex;
+			pipeline.fragmentFunction = halfres_state.composite;
+			pipeline.colorAttachments[0].pixelFormat = pass.color_format;
+			pipeline.colorAttachments[0].writeMask = MTLColorWriteMaskRed | MTLColorWriteMaskGreen |
+				MTLColorWriteMaskBlue;
+			pipeline.colorAttachments[0].blendingEnabled = YES;
+			pipeline.colorAttachments[0].sourceRGBBlendFactor = MTLBlendFactorOne;
+			pipeline.colorAttachments[0].destinationRGBBlendFactor = MTLBlendFactorSource1Color;
+			pipeline.colorAttachments[0].sourceAlphaBlendFactor = MTLBlendFactorZero;
+			pipeline.colorAttachments[0].destinationAlphaBlendFactor = MTLBlendFactorOne;
+			pipeline.depthAttachmentPixelFormat = pass.depth_format;
+			pipeline.stencilAttachmentPixelFormat = pass.depth_format;
+			halfres_state.composite_pipeline = [metal.device newRenderPipelineStateWithDescriptor:pipeline error:&error];
+			halfres_state.composite_formats[0] = (uint32_t)pass.color_format;
+			halfres_state.composite_formats[1] = (uint32_t)pass.depth_format;
+			if (!halfres_state.composite_pipeline)
+			{
+				host_log("Metal: half resolution: no composite pipeline: %s", error.localizedDescription.UTF8String);
+				return;
+			}
+		}
+		{
+			uint32_t values[8];
+			struct metal_depth_stencil state_key;
+			MTLScissorRect scissor;
+			uint32_t x = halfres.x * halfres.step, y = halfres.y * halfres.step;
+			uint32_t right = (halfres.x + halfres.width) * halfres.step, bottom = (halfres.y + halfres.height) * halfres.step;
+
+			if (right > pass.width)
+				right = pass.width;
+			if (bottom > pass.height)
+				bottom = pass.height;
+			if (x >= right || y >= bottom)
+				return;
+			scissor = (MTLScissorRect){ x, y, right - x, bottom - y };
+			memset(&state_key, 0, sizeof(state_key));
+			if (halfres.stencil_set && screen_depth)
+			{
+				state_key.stencil_test = 1;
+				state_key.stencil_function = halfres.stencil.stencil_function;
+				state_key.stencil_read_mask = halfres.stencil.stencil_read_mask;
+			}
+			halfres_frame_values(values);
+			[encoder setRenderPipelineState:halfres_state.composite_pipeline];
+			[encoder setDepthStencilState:depth_stencil_get(&state_key)];
+			[encoder setStencilReferenceValue:halfres.stencil_reference & 0xff];
+			[encoder setCullMode:MTLCullModeNone];
+			[encoder setTriangleFillMode:MTLTriangleFillModeFill];
+			[encoder setDepthBias:0.0f slopeScale:0.0f clamp:0.0f];
+			[encoder setViewport:(MTLViewport){ 0.0, 0.0, (double)pass.width, (double)pass.height, 0.0, 1.0 }];
+			[encoder setScissorRect:scissor];
+			[encoder setFragmentTexture:texture_object(halfres.accumulate) atIndex:0];
+			[encoder setFragmentTexture:halfres.multiply atIndex:1];
+			[encoder setFragmentTexture:halfres.depths atIndex:2];
+			[encoder setFragmentBytes:values length:sizeof(values) atIndex:0];
+			if (bound.counter != ~0u)
+				[encoder setVisibilityResultMode:MTLVisibilityResultModeDisabled offset:0];
+			[encoder drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
+			bound_forget();
+			handles[halfres.accumulate].commands_read = commands_generation;
+		}
+	}
+}
+
+/* ---------- the queued transparents' kinds (diagnostic)
+
+HALO_METAL_TRANSPARENT_SURVEY=1: the queued transparents' draws (phase 22)
+counted by what drawing them at half resolution needs to know: their blend
+(the destination factor's dependence on what is under them, the source's),
+whether they write depth, test stencil, sample a screen-sized render target
+(the screen, its copy, the secondary target), and the vertex count; written
+at exit. HALO_METAL_SKIP_TRANSPARENT_CLASSES=a,b,... (diagnostic, an upper
+bound on what each costs): the draws of those classes not drawn. A class:
+0 affine in the destination (alpha, add, multiply, double multiply,
+premultiplied: drawable at half resolution into a pair of accumulators),
+1 subtract / min / max, 2 a constant (meter) or destination-alpha factor,
+3 writes depth or colour alpha, 4 tests stencil, 5 samples a screen-sized
+target, 6 blending off. */
+
+enum
+{
+	_transparent_affine,
+	_transparent_not_affine,
+	_transparent_constant_or_destination_alpha,
+	_transparent_writes_depth_or_alpha,
+	_transparent_stencil,
+	_transparent_samples_screen,
+	_transparent_opaque,
+	NUMBER_OF_TRANSPARENT_CLASSES
+};
+
+static struct
+{
+	int enabled;
+	uint32_t skip;
+	uint64_t draws[NUMBER_OF_TRANSPARENT_CLASSES], vertices[NUMBER_OF_TRANSPARENT_CLASSES];
+	uint64_t frames_first, frames_last;
+	/* the stencil tests (function, reference, read mask, depth test and
+	function) and blends (source, destination, operation) seen, and their draws */
+	uint32_t stencil_keys[8], blend_keys[16];
+	uint64_t stencil_draws[8], blend_draws[16];
+} transparent_survey;
+
+static const char *const transparent_class_names[NUMBER_OF_TRANSPARENT_CLASSES] =
+{
+	"affine", "subtract/min/max", "constant/destination-alpha", "writes depth/alpha", "stencil", "samples screen",
+	"blend off",
+};
+
+static void transparent_survey_report(void)
+{
+	int index;
+	uint64_t frames = transparent_survey.frames_last - transparent_survey.frames_first + 1;
+
+	for (index = 0; index < NUMBER_OF_TRANSPARENT_CLASSES; index++)
+	{
+		host_log("transparent survey: %s: %.1f draws %.0f vertices a frame (%llu frames)",
+			transparent_class_names[index], (double)transparent_survey.draws[index] / (double)frames,
+			(double)transparent_survey.vertices[index] / (double)frames, (unsigned long long)frames);
+	}
+	for (index = 0; index < 8 && transparent_survey.stencil_keys[index]; index++)
+	{
+		uint32_t key = transparent_survey.stencil_keys[index];
+
+		host_log("transparent survey: stencil function %u reference %u read mask %02x depth test %u function %u: "
+			"%.1f draws a frame", key & 15, (key >> 4) & 255, (key >> 12) & 255, (key >> 20) & 1, (key >> 21) & 15,
+			(double)transparent_survey.stencil_draws[index] / (double)frames);
+	}
+	for (index = 0; index < 16 && transparent_survey.blend_keys[index]; index++)
+	{
+		uint32_t key = transparent_survey.blend_keys[index] - 1;
+
+		host_log("transparent survey: blend source %u destination %u operation %u: %.1f draws a frame", key & 255,
+			(key >> 8) & 255, (key >> 16) & 255, (double)transparent_survey.blend_draws[index] / (double)frames);
+	}
+}
+
+static int transparent_class(const struct metal_draw *draw)
+{
+	int stage;
+	metal_u32 source = draw->blend.source, destination = draw->blend.destination;
+
+	for (stage = 0; stage < METAL_STAGES; stage++)
+	{
+		id<MTLTexture> texture = texture_object(draw->textures[stage]);
+
+		if (texture && (texture.usage & MTLTextureUsageRenderTarget) && texture.width * texture.height >= PARK_LARGE_PIXELS / 4)
+			return _transparent_samples_screen;
+	}
+	if (draw->depth_stencil.depth_write || (draw->blend.write_mask & METAL_WRITE_ALPHA))
+		return _transparent_writes_depth_or_alpha;
+	/* (a stencil test that only reads: the first-person weapon's mask, which
+	the queued transparents keep (rasterizer_set_stencil_mode's REJECT and
+	ACCEPT), and a downsampled stencil carries; one that writes is apart) */
+	if (draw->depth_stencil.stencil_test && draw->depth_stencil.stencil_write_mask &&
+		(draw->depth_stencil.stencil_pass || draw->depth_stencil.stencil_fail || draw->depth_stencil.stencil_depth_fail))
+	{
+		return _transparent_stencil;
+	}
+	if (!draw->blend.enabled)
+		return _transparent_opaque;
+	if (draw->blend.operation != METAL_BLEND_OPERATION_ADD)
+		return _transparent_not_affine;
+	if (source >= METAL_BLEND_DESTINATION_ALPHA || destination >= METAL_BLEND_DESTINATION_COLOR ||
+		source == METAL_BLEND_ONE_MINUS_DESTINATION_COLOR)
+	{
+		return _transparent_constant_or_destination_alpha;
+	}
+	return _transparent_affine;
+}
+
+/* NO: the draw is not drawn (a class HALO_METAL_SKIP_TRANSPARENT_CLASSES names) */
+static BOOL transparent_survey_draw(const struct metal_draw *draw)
+{
+	static int read;
+	int kind;
+
+	if (!read)
+	{
+		const char *setting = getenv("HALO_METAL_SKIP_TRANSPARENT_CLASSES");
+
+		read = 1;
+		transparent_survey.enabled = getenv("HALO_METAL_TRANSPARENT_SURVEY") &&
+			atoi(getenv("HALO_METAL_TRANSPARENT_SURVEY")) != 0;
+		while (setting && *setting)
+		{
+			int value = atoi(setting);
+
+			if (value >= 0 && value < NUMBER_OF_TRANSPARENT_CLASSES)
+				transparent_survey.skip |= 1u << value;
+			setting = strchr(setting, ',');
+			if (setting)
+				setting++;
+		}
+		if (transparent_survey.enabled)
+			atexit(transparent_survey_report);
+		if (transparent_survey.enabled || transparent_survey.skip)
+			host_log("Metal: transparent survey %d, skipped classes %02x (diagnostic)", transparent_survey.enabled,
+				transparent_survey.skip);
+	}
+	if (profile_phase != 22 || (!transparent_survey.enabled && !transparent_survey.skip))
+		return YES;
+	kind = transparent_class(draw);
+	if (transparent_survey.enabled && frame_serial >= 300)
+	{
+		if (!transparent_survey.frames_first)
+			transparent_survey.frames_first = frame_serial;
+		transparent_survey.frames_last = frame_serial;
+		transparent_survey.draws[kind]++;
+		transparent_survey.vertices[kind] += draw->index_count ? draw->index_count : draw->vertex_count;
+		if (draw->depth_stencil.stencil_test)
+		{
+			int slot;
+			uint32_t key = draw->depth_stencil.stencil_function | draw->stencil_reference << 4 |
+				draw->depth_stencil.stencil_read_mask << 12 | (uint32_t)draw->depth_stencil.depth_test << 20 |
+				draw->depth_stencil.depth_function << 21;
+
+			for (slot = 0; slot < 8 && transparent_survey.stencil_keys[slot] &&
+				transparent_survey.stencil_keys[slot] != key; slot++)
+			{
+			}
+			if (slot < 8)
+			{
+				transparent_survey.stencil_keys[slot] = key;
+				transparent_survey.stencil_draws[slot]++;
+			}
+		}
+		if (draw->blend.enabled)
+		{
+			uint32_t triple = draw->blend.source | draw->blend.destination << 8 | draw->blend.operation << 16;
+			int slot;
+
+			for (slot = 0; slot < 16 && transparent_survey.blend_keys[slot] &&
+				transparent_survey.blend_keys[slot] != triple + 1; slot++)
+			{
+			}
+			if (slot < 16)
+			{
+				transparent_survey.blend_keys[slot] = triple + 1;
+				transparent_survey.blend_draws[slot]++;
+			}
+		}
+	}
+	return !(transparent_survey.skip >> kind & 1);
+}
+
 void host_metal_draw(const struct metal_draw *original)
 {
 	HOST_FRAME_LOG_SCOPE;
-	struct metal_draw adjusted;
+	struct metal_draw adjusted, halfres_adjusted;
 	const struct metal_draw *draw = original;
 
 	/* (_rasterizer_profile_environment_shadows, _environment_fog,
@@ -3012,9 +3763,12 @@ void host_metal_draw(const struct metal_draw *original)
 	/* HALO_METAL_SKIP_PHASES (diagnostic): the draws of these phases not drawn */
 	if (pass_log.skip_phases && profile_phase >= 0 && (pass_log.skip_phases >> profile_phase & 1))
 		return;
+	if (!transparent_survey_draw(draw))
+		return;
+	draw = halfres_draw(draw, &halfres_adjusted);
 	if (metal.debug & 3)
 	{
-		adjusted = *original;
+		adjusted = *draw;
 		if (metal.debug & 1)
 			adjusted.cull = METAL_CULL_NONE;
 		if (metal.debug & 2)
@@ -3612,10 +4366,20 @@ void host_metal_present(void)
 				(metal.layer.drawableSize.width != width || metal.layer.drawableSize.height != height))
 			{
 				metal.layer.drawableSize = CGSizeMake(width, height);
-				/* (the display's pixels, which the picture is scaled to: on a TV
-				in a 1080p output mode, not the picture's 2160 lines) */
-				host_log("Metal: drawable %dx%d, picture %ux%u", width, height, metal.present_width,
-					metal.present_height);
+			}
+			/* (the display's pixels, which the picture is scaled to: on a TV
+			in a 1080p output mode, not the picture's 2160 lines; at the first
+			frame and when either changes) */
+			{
+				static uint32_t logged[4];
+				uint32_t now[4] = { (uint32_t)metal.layer.drawableSize.width, (uint32_t)metal.layer.drawableSize.height,
+					metal.present_width, metal.present_height };
+
+				if (memcmp(logged, now, sizeof(now)))
+				{
+					memcpy(logged, now, sizeof(now));
+					host_log("Metal: drawable %ux%u, picture %ux%u", now[0], now[1], now[2], now[3]);
+				}
 			}
 			if (host_frame_log_detail())
 			{

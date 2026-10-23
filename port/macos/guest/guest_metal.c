@@ -33,9 +33,13 @@ void metal_device_screen_effect(int type, int passes, float radius, int video)
 	host_metal_screen_effect(type, passes, radius, video);
 }
 
+/* (d3d8_metal.c: the queued transparents at half resolution) */
+void halo_half_res_phase(int profile, int begin);
+
 void metal_device_profile_phase(int profile, int begin)
 {
 	host_metal_profile_phase(profile, begin);
+	halo_half_res_phase(profile, begin);
 }
 
 unsigned int metal_device_lifecycle_stops(void)
