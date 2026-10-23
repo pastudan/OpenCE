@@ -3893,9 +3893,12 @@ void host_metal_drain(void)
 		(host_frame_log_now() - started) / 1e6);
 }
 
+/* (allocatedSize, or the pixels' bytes where it is 0: the simulator's) */
 static int64_t texture_bytes_of(id<MTLTexture> texture)
 {
-	return texture ? (int64_t)texture.allocatedSize : 0;
+	if (!texture)
+		return 0;
+	return texture.allocatedSize ? (int64_t)texture.allocatedSize : (int64_t)texture.width * texture.height * 4;
 }
 
 /* what is cheap to make again, a step at a time (the main thread's, between
@@ -3948,7 +3951,8 @@ int64_t host_metal_trim(int step, int stopped)
 				{
 					if (&frames[index] != current && frames[index].ring)
 					{
-						freed += (int64_t)frames[index].ring.allocatedSize;
+						freed += (int64_t)(frames[index].ring.allocatedSize ? frames[index].ring.allocatedSize :
+							frames[index].ring.length);
 						frames[index].ring = nil;
 					}
 				}
