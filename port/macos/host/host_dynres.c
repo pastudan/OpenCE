@@ -16,7 +16,9 @@ CPU's sake (a load, a shader compile), which no resolution helps.
 
 So the controller
 - goes down when the GPU is the reason frames are late: a frame shown late
-  whose GPU time was hot (not a load's), a frame past 1.1 intervals, 16 hot
+  whose GPU time was hot (not a load's), a frame past 1.1 intervals (one
+  step; the model's jump only once confirmed: two such of the last eight,
+  or one late), 16 hot
   frames in the last 64 (25%: at a step the GPU holds, 3-7% of frames are
   hot from the clock's own regulation), or any frame past 1.5 intervals
   (split screen's 4-5x spikes): at once, as far as a model of the cost says
@@ -25,8 +27,8 @@ So the controller
 - goes up only by trying: a step, after up_frames frames in a row none of
   them late or over, at most 10% hot, and hold_ms since the last step down
   (four times as long while the device is hot: thermalState serious); if
-  within probe_frames the step shows a GPU-late frame, a frame over, or
-  25% hot, it goes back and waits twice as long before trying that step
+  within probe_frames the step shows a GPU-late frame, two frames over of
+  eight, or 25% hot, it goes back and waits twice as long before trying that step
   again (8, 16, 32 ... s, at most hold_most_ms), and a step that held
   stable_ms resets its wait. A failed try costs at most a frame late, a
   handful in the first minutes and then one in minutes; never shimmer;
@@ -116,6 +118,7 @@ static struct
 	uint32_t step_of[2];
 	uint32_t frames_at_step, clear_frames, clear_hot;
 	uint64_t recent_hot;
+	uint32_t recent_over;
 	uint64_t step_changed_ns, last_down_ns;
 	double hold[HOST_DYNRES_STEPS];
 	int probing;
@@ -227,7 +230,7 @@ static void step_to(uint32_t step, uint64_t now_ns)
 		dynres.steps_up++;
 	}
 	dynres.step = step;
-	dynres.frames_at_step = dynres.recent_hot = dynres.clear_frames = dynres.clear_hot = 0;
+	dynres.frames_at_step = dynres.recent_hot = dynres.recent_over = dynres.clear_frames = dynres.clear_hot = 0;
 	dynres.step_changed_ns = now_ns;
 }
 
@@ -249,13 +252,18 @@ static void frame_counted(double gpu_ms, int late, double slot_ms, uint32_t lowe
 	int hot = gpu_ms > p->hot_share * slot_ms;
 	int over = gpu_ms > OVER * slot_ms;
 	int gpu_late = late && hot;
-	uint32_t hot_count;
-	int down;
+	uint32_t hot_count, over_count;
+	int down, confirmed;
 
 	dynres.frames++;
 	dynres.frames_at_step++;
 	dynres.gpu_ms = dynres.gpu_ms ? dynres.gpu_ms * 0.95 + gpu_ms * 0.05 : gpu_ms;
 	dynres.recent_hot = dynres.recent_hot << 1 | (uint64_t)hot;
+	dynres.recent_over = (dynres.recent_over << 1 | (uint32_t)over) & 0xff;
+	over_count = (uint32_t)__builtin_popcount(dynres.recent_over);
+	/* (a frame over by itself may be a one-off: a texture's upload, the
+	first frame of a view; two of the last eight are the load's) */
+	confirmed = gpu_late || over_count >= 2 || gpu_ms > VERY_HOT * slot_ms;
 	hot_count = (uint32_t)__builtin_popcountll(dynres.recent_hot &
 		(dynres.frames_at_step >= 64 ? ~0ull : (1ull << dynres.frames_at_step) - 1));
 	if (late)
@@ -271,7 +279,7 @@ static void frame_counted(double gpu_ms, int late, double slot_ms, uint32_t lowe
 		/* (a step being tried: its first frame late for the GPU's sake,
 		over the interval, or a hot rate past HOT_RATE_PROBE, and it goes
 		back) */
-		down = gpu_late || over || (dynres.probe_frames >= 64 && hot_count >= HOT_RATE_PROBE);
+		down = confirmed || (dynres.probe_frames >= 64 && hot_count >= HOT_RATE_PROBE);
 	}
 	else
 	{
@@ -294,7 +302,7 @@ static void frame_counted(double gpu_ms, int late, double slot_ms, uint32_t lowe
 			if (dynres.hold[tried] > p->hold_most_ms)
 				dynres.hold[tried] = p->hold_most_ms;
 		}
-		else if (gpu_ms > slot_ms)
+		else if (confirmed && gpu_ms > slot_ms)
 		{
 			/* as far as the model says: the pixels' part of the late
 			frame's time scaled to target_share of the interval (a frame
