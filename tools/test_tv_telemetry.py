@@ -328,6 +328,7 @@ void host_telemetry_platform_start(void) {}
 double host_telemetry_platform_refresh_hz(void) { return 60.0; }
 void host_telemetry_platform_describe(char *t, unsigned int s) { snprintf(t, s, "test"); }
 uint64_t host_metal_allocated_bytes(void) { return 0; }
+void host_metal_memory(struct host_metal_memory *m) { memset(m, 0, sizeof(*m)); }
 
 int main(void)
 {
