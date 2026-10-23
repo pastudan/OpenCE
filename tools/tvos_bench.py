@@ -137,11 +137,18 @@ def latelag_commands(dwell=40, until=900):
 SCENES["latelag"] = {"init": SCENES["split"]["init"], "seconds": 600, "window_seconds": 480.0,
                      "env": {"HALO_TEST_COMMANDS": latelag_commands(), "HALO_TEST_INPUT": "look:1",
                              "HALO_TELEMETRY": "on"}}
+# b30's beach in split screen for 30 minutes (the players standing at the
+# insertion, the firefight going on): the A12's heating over a long session
+# (the owner's 12-15% loss over 25-30 min), measured over 27 minutes from the
+# first two-view frame (scene_window: as split)
+SCENES["thermal"] = {"init": SCENES["b30split"]["init"], "seconds": 1830, "window_seconds": 1620.0,
+                     "map": "b30.map"}
 SCENE_LABEL = {"opening": "a10 cutscene (partial)", "bridge": "a10 bridge (gameplay)",
                "b30": "b30 beach (gameplay)", "a10play": "a10 cryo bay (first gameplay)",
                "cryo": "a10 cryo bay (saved state)", "split": "a10 split screen (2 players)",
                "latelag": "a10 split screen, two areas in turn (10 min)",
-               "b30split": "b30 beach split screen (2 players)"}
+               "b30split": "b30 beach split screen (2 players)",
+               "thermal": "b30 beach split screen, 30 min (thermal)"}
 FOG_START_DRAWS = 20
 FOG_SUSTAIN_SECONDS = 5.0
 SERIES = ("wall_ms", "gpu_ms", "guest_ms", "host_ms", "compile_ms", "wait_drawable_ms", "wait_inflight_ms",
@@ -215,7 +222,7 @@ def scene_window(scene, events, rows, window_seconds=None):
         if start is None:
             return [], "the cryo bay (>= 40 fog-plane draws) was never reached"
         description = f"a10 cryo bay: {window_seconds:g} s from frame {rows[start]['serial']}"
-    elif scene in ("split", "latelag", "b30split"):
+    elif scene in ("split", "latelag", "b30split", "thermal"):
         # (the first frame drawn as two player views, after the cinematic)
         views = [e for e in events if e["kind"] == "views" and e["detail"] == "2"]
         split = None
@@ -230,7 +237,7 @@ def scene_window(scene, events, rows, window_seconds=None):
         if split is None:
             return [], "two player views were never drawn (player_spawn_count 2 did not take)"
         start = split
-        description = (f"{'b30' if scene == 'b30split' else 'a10'} split screen{' (latelag)' if scene == 'latelag' else ''}: "
+        description = (f"{'b30' if scene in ('b30split', 'thermal') else 'a10'} split screen{' (latelag)' if scene == 'latelag' else ''}: "
                        f"{window_seconds:g} s from frame {rows[start]['serial']}")
     elif scene in ("bridge", "b30", "cryo"):
         core = SCENES[scene].get("core", CORE_NAME)
