@@ -30,6 +30,29 @@ def test_lock_is_acquired_atomically_and_released(tmp_path):
     assert not path.exists()
 
 
+def test_lock_queue_is_first_come_first_served(tmp_path):
+    queue = tmp_path / "q"
+    queue.mkdir()
+    (queue / "100-11").write_text("earlier\n")
+    (queue / "200-22").write_text("later\n")
+    alive = lambda pid: True
+    assert deploy.queue_first(queue, "100-11", alive=alive)
+    assert not deploy.queue_first(queue, "200-22", alive=alive)
+    # a dead waiter's ticket is cleared and no longer blocks the next one
+    assert deploy.queue_first(queue, "200-22", alive=lambda pid: pid != 11)
+    assert not (queue / "100-11").exists()
+
+
+def test_lock_ticket_is_removed_once_acquired_or_given_up(tmp_path):
+    path = tmp_path / "tv-perf.lock"
+    queue = tmp_path / "tv-perf.lock.queue"
+    with deploy.HeavyLock("first", path=path, wait_seconds=0):
+        assert list(queue.iterdir()) == []
+        with pytest.raises(deploy.DeployError):
+            deploy.HeavyLock("second", path=path, wait_seconds=0, poll=0).acquire()
+        assert list(queue.iterdir()) == []
+
+
 def test_lock_release_leaves_someone_elses_lock(tmp_path):
     path = tmp_path / "tv-perf.lock"
     lock = deploy.HeavyLock("mine", path=path).acquire()

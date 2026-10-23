@@ -153,22 +153,64 @@ def lock_is_stale(info, now=None, alive=pid_alive):
     return info["pid"] is not None and not alive(info["pid"])
 
 
+def queue_first(directory, mine, alive=pid_alive):
+    """whether ticket `mine` is the oldest live one in the lock's queue folder
+    (tickets are "<monotonic-ish ns>-<pid>"; a dead process's ticket is removed)"""
+    tickets = []
+    for item in Path(directory).iterdir() if Path(directory).is_dir() else []:
+        stamp, _, pid = item.name.partition("-")
+        if not (stamp.isdigit() and pid.isdigit()):
+            continue
+        if item.name != mine and not alive(int(pid)):
+            item.unlink(missing_ok=True)
+            continue
+        tickets.append((int(stamp), item.name))
+    return not tickets or min(tickets)[1] == mine
+
+
 class HeavyLock:
     """the shared heavy-job lock, as a context manager: atomic creation
     (O_EXCL), waits while another job holds it, deletes it afterwards (only
-    if it is still this one's)"""
+    if it is still this one's). Waiters take a ticket in <lock>.queue and try
+    the lock only when theirs is the oldest live ticket, so jobs get the lock
+    in the order they asked for it, not whoever polls first."""
 
     def __init__(self, task, path=LOCK, wait_seconds=3600, poll=15, enabled=True):
         self.task, self.path, self.wait_seconds, self.poll, self.enabled = task, Path(path), wait_seconds, poll, enabled
         self.text = None
+        self.ticket = None
+
+    def _queue(self):
+        return self.path.with_name(self.path.name + ".queue")
+
+    def _drop_ticket(self):
+        if self.ticket:
+            (self._queue() / self.ticket).unlink(missing_ok=True)
+            self.ticket = None
 
     def acquire(self):
         if not self.enabled:
             return self
         deadline = time.monotonic() + self.wait_seconds
         reported = None
+        queue = self._queue()
+        queue.mkdir(parents=True, exist_ok=True)
+        self.ticket = f"{time.time_ns()}-{os.getpid()}"
+        (queue / self.ticket).write_text(self.task + "\n")
+        try:
+            return self._acquire(deadline, reported, queue)
+        except BaseException:
+            self._drop_ticket()
+            raise
+
+    def _acquire(self, deadline, reported, queue):
         while True:
             self.text = lock_text(self.task)
+            if not queue_first(queue, self.ticket):
+                if time.monotonic() >= deadline:
+                    raise DeployError(f"the heavy-job lock {self.path}: still queued behind earlier jobs")
+                time.sleep(self.poll)
+                continue
             try:
                 descriptor = os.open(self.path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o644)
             except FileExistsError:
@@ -191,10 +233,12 @@ class HeavyLock:
                 continue
             with os.fdopen(descriptor, "w") as file:
                 file.write(self.text)
+            self._drop_ticket()
             return self
 
     def release(self):
         if not self.enabled or self.text is None:
+            self._drop_ticket()
             return
         try:
             if self.path.read_text() == self.text:
