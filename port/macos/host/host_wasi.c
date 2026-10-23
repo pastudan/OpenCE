@@ -392,6 +392,30 @@ u32 w2c_wasi__snapshot__preview1_fd_filestat_set_times(struct w2c_wasi__snapshot
 	return futimens((int)fd, times) == 0 ? 0 : fail();
 }
 
+/* the main thread's file reads and writes, timed for the frame log's
+breakdown (the telemetry's hitches: host_telemetry.h) */
+static inline uint64_t file_begin(void)
+{
+	return host_frame_log_detail() ? host_frame_log_now() : 0;
+}
+
+static inline void file_end(uint64_t started, ssize_t bytes, int write)
+{
+	if (!started)
+		return;
+	host_frame_acc.file_ns += host_frame_log_now() - started;
+	if (write)
+	{
+		host_frame_acc.file_writes++;
+		host_frame_acc.file_write_bytes += bytes > 0 ? (uint64_t)bytes : 0;
+	}
+	else
+	{
+		host_frame_acc.file_reads++;
+		host_frame_acc.file_read_bytes += bytes > 0 ? (uint64_t)bytes : 0;
+	}
+}
+
 /* the iovecs (pointer, length pairs) of guest memory */
 static int iovecs(uint32_t list, uint32_t count, struct iovec *vectors, int capacity)
 {
@@ -412,9 +436,11 @@ u32 w2c_wasi__snapshot__preview1_fd_read(struct w2c_wasi__snapshot__preview1 *in
 {
 	struct iovec vectors[64];
 	ssize_t result;
+	uint64_t started = file_begin();
 
 	(void)instance;
 	result = readv((int)fd, vectors, iovecs(list, count, vectors, 64));
+	file_end(started, result, 0);
 	if (result < 0)
 		return fail();
 	put32(out, (uint32_t)result);
@@ -426,9 +452,11 @@ u32 w2c_wasi__snapshot__preview1_fd_pread(struct w2c_wasi__snapshot__preview1 *i
 {
 	struct iovec vectors[64];
 	ssize_t result;
+	uint64_t started = file_begin();
 
 	(void)instance;
 	result = preadv((int)fd, vectors, iovecs(list, count, vectors, 64), (off_t)offset);
+	file_end(started, result, 0);
 	if (result < 0)
 		return fail();
 	put32(out, (uint32_t)result);
@@ -440,9 +468,11 @@ u32 w2c_wasi__snapshot__preview1_fd_write(struct w2c_wasi__snapshot__preview1 *i
 {
 	struct iovec vectors[64];
 	ssize_t result;
+	uint64_t started = file_begin();
 
 	(void)instance;
 	result = writev((int)fd, vectors, iovecs(list, count, vectors, 64));
+	file_end(started, result, 1);
 	if (result < 0)
 		return fail();
 	put32(out, (uint32_t)result);
@@ -454,9 +484,11 @@ u32 w2c_wasi__snapshot__preview1_fd_pwrite(struct w2c_wasi__snapshot__preview1 *
 {
 	struct iovec vectors[64];
 	ssize_t result;
+	uint64_t started = file_begin();
 
 	(void)instance;
 	result = pwritev((int)fd, vectors, iovecs(list, count, vectors, 64), (off_t)offset);
+	file_end(started, result, 1);
 	if (result < 0)
 		return fail();
 	put32(out, (uint32_t)result);
@@ -483,8 +515,13 @@ u32 w2c_wasi__snapshot__preview1_fd_tell(struct w2c_wasi__snapshot__preview1 *in
 
 u32 w2c_wasi__snapshot__preview1_fd_sync(struct w2c_wasi__snapshot__preview1 *instance, u32 fd)
 {
+	uint64_t started = file_begin();
+	int result;
+
 	(void)instance;
-	return fsync((int)fd) == 0 ? 0 : fail();
+	result = fsync((int)fd);
+	file_end(started, 0, 1);
+	return result == 0 ? 0 : fail();
 }
 
 u32 w2c_wasi__snapshot__preview1_fd_datasync(struct w2c_wasi__snapshot__preview1 *instance, u32 fd)
@@ -630,7 +667,7 @@ u32 w2c_wasi__snapshot__preview1_path_open(struct w2c_wasi__snapshot__preview1 *
 	if (descriptor < 0)
 		return fail();
 	/* (a map or a saved core opened: where a benchmark's scene begins,
-	HALO_FRAME_LOG) */
+	HALO_FRAME_LOG; the telemetry's events) */
 	if (host_frame_log_level)
 	{
 		size_t used = strlen(host);

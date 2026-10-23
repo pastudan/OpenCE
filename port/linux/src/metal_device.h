@@ -21,5 +21,14 @@ void metal_device_present(void);
 /* Opt-in diagnostic marker; does not change the effect or draw state. */
 void metal_device_screen_effect(int type, int passes, float radius, int video);
 void metal_device_profile_phase(int profile, int begin);
+/* the play telemetry (port/macos/host/host_telemetry.h): its settings, the
+view the rasterizer begins (rasterizer_xbox_profile.c), the game's state
+(main.c): its ticks (-1: none), local players, player views, structure BSP
+(-1: none), whether a cinematic plays, each view's camera (four of x, y, z)
+and the map */
+void metal_device_telemetry_configure(const char *setting, const char *live);
+void metal_device_telemetry_window(long window_index);
+void metal_device_telemetry_game(long game_ticks, long local_players, long windows, long bsp, long cinematic,
+	const float *positions, const char *map);
 
 #endif

@@ -19,6 +19,7 @@ stream objects are small integer handles.
 struct metal_vertex_layout;
 struct metal_clear;
 struct metal_draw;
+struct metal_telemetry_game;
 
 /* ---------- process */
 
@@ -134,6 +135,13 @@ void host_metal_texture_bc(unsigned int texture, int type, int kind, int into, u
 void host_metal_set_vsync(int interval);
 void host_metal_screen_effect(int type, int passes, float radius, int video);
 void host_metal_profile_phase(int profile, int begin);
+/* the play telemetry (port/macos/host/host_telemetry.h): its settings
+(debug.telemetry, debug.telemetry_live; before host_metal_attach), the view
+the rasterizer begins (a player's window index, or -1), and the game's state
+once a frame (metal_protocol.h) */
+void host_telemetry_configure(const char *setting, const char *live);
+void host_telemetry_view(int window_index);
+void host_telemetry_game(const struct metal_telemetry_game *game);
 /* the frame drawn so far, shown: the picture last given to
 host_metal_present_target, letterboxed in the window */
 void host_metal_present(void);

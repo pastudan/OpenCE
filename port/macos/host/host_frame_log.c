@@ -16,6 +16,7 @@ tools/tvos_bench.py reads the CSV (frame_log_parse).
 
 #include "host.h"
 #include "host_frame_log.h"
+#include "host_telemetry.h"
 
 #include <pthread.h>
 #include <stdatomic.h>
@@ -343,13 +344,39 @@ static void finish(void)
 	fflush(stderr);
 }
 
+/* the telemetry's alone (host_telemetry.h): the breakdown, in a ring of a
+few seconds (the GPU's times of a second are read a second later), no CSV
+and no lines in the log */
+static void telemetry_only_start(void)
+{
+	host_frame_log_level = 2;
+	capacity = 1024;
+	interval = 0;
+	records = calloc(capacity, sizeof(*records));
+	if (!records)
+	{
+		host_frame_log_level = 0;
+		return;
+	}
+	start_ns = last_present_ns = host_frame_log_now();
+	memset(&host_frame_acc, 0, sizeof(host_frame_acc));
+	host_frame_acc.view = HOST_VIEWS - 1;
+	host_telemetry_start();
+}
+
 void host_frame_log_start(void)
 {
 	const char *setting = getenv("HALO_FRAME_LOG");
 	const char *value;
 
-	if (records || !setting || !*setting || !strcmp(setting, "0"))
+	if (records)
 		return;
+	if (!setting || !*setting || !strcmp(setting, "0"))
+	{
+		if (host_telemetry_wanted())
+			telemetry_only_start();
+		return;
+	}
 	host_frame_log_level = !strcmp(setting, "summary") ? 1 : 2;
 	value = getenv("HALO_FRAME_LOG_FRAMES");
 	capacity = value && atoi(value) > 0 ? (uint32_t)atoi(value) : 36000;
@@ -369,11 +396,15 @@ void host_frame_log_start(void)
 		snprintf(path, sizeof(path), "%s/frame_log.csv", getenv("HALO_DATA_ROOT"));
 	start_ns = last_present_ns = host_frame_log_now();
 	memset(&host_frame_acc, 0, sizeof(host_frame_acc));
+	host_frame_acc.view = HOST_VIEWS - 1;
 	if (host_frame_log_level >= 2)
 		pass_log_start();
 	atexit(finish);
 	host_log("frame log: level %d, %u frames kept, a line every %u, to %s", host_frame_log_level, capacity,
 		interval, path[0] ? path : "(nowhere)");
+	/* (the telemetry beside it, if it is on: it needs the breakdown) */
+	if (host_frame_log_level >= 2)
+		host_telemetry_start();
 }
 
 /* a compact line for the last interval's frames */
@@ -444,7 +475,15 @@ void host_frame_log_present(uint64_t serial)
 	record->fog_draws = host_frame_acc.fog_draws;
 	record->transparent_draws = host_frame_acc.transparent_draws;
 	atomic_store(&record->serial, serial);
+	if (host_telemetry_enabled)
+	{
+		/* (the last view's time runs to the present) */
+		if (host_frame_acc.view_started_ns)
+			host_frame_acc.views[host_frame_acc.view].ns += now - host_frame_acc.view_started_ns;
+		host_telemetry_frame(serial, now, record->wall_ns, &host_frame_acc);
+	}
 	memset(&host_frame_acc, 0, sizeof(host_frame_acc));
+	host_frame_acc.view = HOST_VIEWS - 1;
 	last_present_ns = now;
 	current_serial = serial;
 	frames++;
@@ -526,9 +565,31 @@ void host_frame_log_presented(uint64_t serial, double presented_seconds)
 		atomic_store(&record->presented_ns, ns_of_seconds(presented_seconds));
 }
 
+int host_frame_log_gpu_of(uint64_t serial, uint64_t *gpu_ns, uint32_t *buffers, uint64_t *hoisted_ns,
+	uint64_t *span_ns)
+{
+	struct frame_record *record = record_of(serial);
+	uint64_t start, end;
+
+	*gpu_ns = *hoisted_ns = *span_ns = 0;
+	*buffers = 0;
+	if (!record)
+		return 0;
+	*gpu_ns = atomic_load(&record->gpu_ns);
+	*buffers = atomic_load(&record->gpu_buffers);
+	*hoisted_ns = atomic_load(&record->hoisted_ns);
+	start = atomic_load(&record->gpu_start_ns);
+	end = atomic_load(&record->gpu_end_ns);
+	*span_ns = start && end > start ? end - start : 0;
+	return 1;
+}
+
 void host_frame_log_event(const char *kind, const char *detail)
 {
-	if (!host_frame_log_level || event_count >= EVENTS)
+	if (host_telemetry_enabled)
+		host_telemetry_event(kind, detail);
+	/* (the telemetry's alone: no CSV to list it in, nor a line in the log) */
+	if (!host_frame_log_level || event_count >= EVENTS || !path[0])
 		return;
 	/* (the same file opened again and again: once) */
 	if (event_count && !strcmp(events[event_count - 1].kind, kind) &&
