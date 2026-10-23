@@ -2233,3 +2233,85 @@ themselves got cheaper; the pass break ate most of it.
 **Default: off.** What would make it pay: compositing into the pass the
 game opens next instead of a pass of its own (no extra screen reload), and
 skipping a run whose draws cover little of the screen.
+
+## Memory: the footprint, who owns it, and the caps (2026-10-23)
+
+Capital OFFICE's 2.5-hour session (a10 then b30 in split screen, build
+8bc487e3) grew the footprint 849 -> 1379 MB and Metal's allocations
+400 -> 707 MB. tvOS then reclaimed memory under the game four times, each
+with a 50 to 90 MB drop in footprint and ~3 s of 200-320 ms frames (guest
+and host both 10-15x slower, the GPU barely). The play telemetry's "mem"
+(every second) now says who owns Metal's allocations. `footprint -p` on
+the Mac gives the rest.
+
+**Who owned the footprint.** Mac, b30 split, TV texture path, 4K, before
+these changes, 1143 MB in all:
+- **the guest's memory, 437 MB.** Mostly the game's 256 MiB texture cache,
+  plus the tag cache, the sound cache and game state. The window allocator
+  cleared every block on wasm, so all of it was backed at map load.
+- **graphics, ~594 MB:**
+  - sampled textures (grew from map to map);
+  - render targets, 74 MB;
+  - frame rings, 3 x 64 MiB;
+  - the 4K feedback copy, 33 MB, once an effect needed it;
+  - pipelines and the like.
+- **the rest, ~110 MB:** malloc, drawables, page tables.
+
+In a 67-minute ten-map Mac run (`multimap.py`), the sampled textures were
+the only thing that kept growing: 111 -> 428 MB by Metal's count.
+
+**The caps** (tv/latelag):
+- **24 MiB frame rings on tvOS** (was 64). The most any frame streamed in
+  ~9900 s of telemetry is 19.5 MB; overflow buffers are kept for the rest.
+- **No clearing of never-used window pages on wasm.** On the Mac the guest
+  went 437 -> ~190 MB.
+- **The game's texture cache: 96 MiB on the TV** (`game.texture_cache_mb`,
+  set by tv_main.m; it was 256).
+- **The host texture budget: 256 MiB on the TV, counted as Metal allocated
+  it** (`host_metal_sampled_bytes`). Past it the least recently drawn go,
+  4 a frame at most.
+- **The feedback copy is let go after 600 frames unused.** The lifecycle's
+  memory-warning trim shares its serial.
+
+**A12, bedroom TV (output 1080p, rendering 3840x2160), interleaved:**
+- base = tv/integrate 566bb6d4 (24 MiB rings already);
+- fix = tv/latelag 912fa2f2.
+
+| run | peak footprint | min available | peak Metal | textures (end) | missed slots (excl. ~30 fps stretches) | frames > 50 ms | file reads | conversions |
+|---|---|---|---|---|---|---|---|---|
+| b30long base | 946 | 1152 | 394 | 190 | 57 | 5 | 12 | 249 |
+| b30long fix | **682** | 1416 | 399 | 195 | 53 | 5 | 12 | 250 |
+| b30long fix | **676** | 1422 | 393 | 189 | 71 | 5 | 12 | 246 |
+| b30long base | 934 | 1164 | 399 | 195 | 77 | 4 | 12 | 249 |
+| a10 + b30 base | 1008 | 1090 | 463 | 259 | 83 | 7 | 14 | 350 |
+| a10 + b30 fix | **752** | 1346 | 459 | 255 | 113 | 8 | 15 | 349 |
+
+- **Footprint.** The peak is 255-265 MB lower in every pair.
+  - That is the guest's memory: the window not cleared, and the smaller
+    game cache.
+  - Metal is the same, within a few MB. The rings were already 24 MiB in
+    the base.
+  - None of these sessions reached the host texture budget on the TV:
+    textures stayed at 190-260 MB of Metal's count.
+- **The 96 MiB game cache** caused no more reads from the map and no more
+  conversions. During b30 traversal: 12 file reads in both builds, all at
+  the load. Conversions were the same (246-250 against 249). So it stays
+  at 96.
+- **Map change.** The a10 -> b30 change took 23 missed slots in both builds
+  (the load's own frame); no texture deletes in either.
+  - Only one map change was made: the scene's later map_name commands all
+    fired at once. Fixed in 396e5770, not yet re-run on the TV.
+  - The Mac's seven-map run, with the budget full, evicted up to 184
+    textures a second for a few seconds after each load, and those seconds
+    missed no slots.
+- **Not mine: stretches at ~30 fps.** Every b30long run but the first had a
+  stretch of 28-127 s at ~30 fps: base 127 s, fix 39 and 28 s.
+  - In those seconds guest and host time both went ~4x and the GPU to
+    22 ms; the views' time rose with nothing else changing.
+  - Footprint and available memory were flat, so it was not reclaim.
+  - It began and ended mid-play, in both builds, as the bot player walked
+    the beach's slope.
+  - It looks like the A12 holding a lower clock for a while. Thermal state
+    stayed "nominal" throughout.
+  - It is excluded from the missed-slot column above, and left for the
+    thermal and CPU work.
