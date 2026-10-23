@@ -286,6 +286,15 @@ def window_stats(rows):
     result["mean_fog_draws"] = round(sum(row.get("fog_draws", 0) for row in rows) / len(rows), 1)
     result["mean_passes"] = round(sum(row.get("passes", 0) for row in rows) / len(rows), 2)
     result["mean_copies"] = round(sum(row.get("copies", 0) for row in rows) / len(rows), 2)
+    # (display.dynamic_resolution: the 3D scenes' render scale, and the
+    # display's own count of refresh slots it showed no new frame in, from
+    # the presented handler's times; None where the log has none)
+    scales = [row["render_scale"] for row in rows if row.get("render_scale", 0) > 0]
+    result["render_scale_mean"] = round(sum(scales) / len(scales), 4) if scales else None
+    result["render_scale_min"] = round(min(scales), 4) if scales else None
+    shown = [row["presented_ms"] for row in rows if row.get("presented_ms")]
+    result["display_missed"] = (sum(max(0, int((b - a) / (1000.0 / 60.0) + 0.5) - 1) for a, b in zip(shown, shown[1:]))
+                                if len(shown) > len(rows) // 2 else None)
     result["stalls"] = sorted(({"serial": row["serial"], "wall_ms": row["wall_ms"],
                                 "compile_ms": row.get("compile_ms", 0.0), "gpu_ms": row.get("gpu_ms", 0.0),
                                 "guest_ms": row.get("guest_ms", 0.0), "wait_drawable_ms": row.get("wait_drawable_ms", 0.0)}
