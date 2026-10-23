@@ -605,6 +605,11 @@ boolean game_is_cooperative(
 	return player_spawn_count > 1;
 }
 
+#ifdef HALO_METAL
+/* port/linux/src/metal_device.h */
+void metal_device_map(const char *scenario);
+#endif
+
 boolean game_load(
 	struct game_options *options)
 {
@@ -613,6 +618,11 @@ boolean game_load(
 	load passes here: main_new_map's and a network game's,
 	network_game_manager.c) */
 	profile_console_map_loaded(options->map_name);
+#endif
+#ifdef HALO_METAL
+	/* port: the Metal host's shader cache prepares the map's shaders while
+	it loads (port/macos/host/host_metal.m) */
+	metal_device_map(options->map_name);
 #endif
 	match_assert(
 		"c:\\halo\\SOURCE\\game\\game.c",

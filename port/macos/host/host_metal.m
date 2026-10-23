@@ -1371,6 +1371,7 @@ static MTLCompileOptions *compile_options(void)
 
 /* (the shader cache: below) */
 static void shader_cache_start(void);
+void host_metal_map(const char *scenario);
 
 static BOOL renderer_initialize(void)
 {
@@ -2063,6 +2064,9 @@ struct pipeline_key;
 static void shader_cache_record_shader(uint32_t handle, const char *source, int fragment);
 static void shader_cache_record_layout(uint32_t handle, const struct metal_vertex_layout *layout);
 static void shader_cache_record_pipeline(const struct pipeline_key *key);
+static void shader_cache_note(uint32_t handle);
+/* (the shader cache keeps a record: shader_cache.enabled) */
+static BOOL shader_cache_noting;
 @class PreparedShader;
 static id<MTLFunction> prepared_take(NSString *text, int fragment, PreparedShader **claimed);
 static void prepared_give(PreparedShader *claimed, id<MTLFunction> function);
@@ -2280,6 +2284,12 @@ static id<MTLRenderPipelineState> pipeline_get(const struct metal_draw *draw)
 	id<MTLRenderPipelineState> state;
 	NSError *error = nil;
 
+	/* (a map's first draw of a shader: the shader cache's per-map record) */
+	if (shader_cache_noting)
+	{
+		shader_cache_note(draw->vertex_shader);
+		shader_cache_note(draw->fragment_shader);
+	}
 	if (halfres.active && pass.color == halfres.accumulate)
 		return halfres_pipeline_get(draw);
 	memset(&key, 0, sizeof(key));
@@ -2323,51 +2333,62 @@ static id<MTLRenderPipelineState> pipeline_get(const struct metal_draw *draw)
 
 /* ---------- the shader cache
 
-host_shader_manifest.h's record of the shaders and pipelines made, in the
-app's caches (HALO_METAL_SHADER_CACHE: a file name there, a path, or 0 for
-none; HALO_METAL_SHADER_CACHE_RESET=1 empties it first, for measuring a
-first launch). At the next launch its shaders and then its pipelines are compiled
-again on other threads, as soon as the device is made. A draw's shader
-whose text is exactly a prepared one's (the same source, compiled the same
-way) takes the function compiled for it (prepared_take); every other is
+Two records of the shaders and pipelines the game has made
+(host_shader_manifest.h), each grouped by the map that made them:
+- the app's own, in its caches (HALO_METAL_SHADER_CACHE: a file name there,
+  a path, or 0 for none; HALO_METAL_SHADER_CACHE_RESET=1 empties it first,
+  for measuring a first launch), written as the game plays: a shader's or a
+  pipeline's record when it is made, and when a map draws one an earlier map
+  made, a use record of it;
+- the bundled pack (metal_shaders.pack in the app's bundle, made by
+  tools/shader_pack.py from scripted visits of every campaign map on a Mac;
+  HALO_METAL_SHADER_PACK: another file, or 0 for none), read only. Its
+  header names the hash of the shader translators' sources it was made
+  from; tools/tvos_build.py bundles it only if that is this build's (and a
+  stale one could only cost time: what is prepared is used only for its
+  exact text).
+Nothing is compiled at launch. When a map begins to load (host_metal_map,
+the guest's game_load) its shaders, of both, are compiled on other threads,
+HALO_METAL_SHADER_PREPARE_JOBS (default 4) at a time, and then its
+pipelines; HALO_METAL_SHADER_PREPARE_NEXT seconds into the map (default 120,
+0 never) the next map's, in the pack's order, are compiled at a low
+priority and dropped, which leaves them in the system's caches for when it
+loads. (The records of a build before the maps were recorded, no map's,
+are compiled when the cache starts, as before.)
+
+A draw's shader whose text is exactly a prepared one's (the same source,
+compiled the same way: shader_text) takes the function compiled for it
+(prepared_take), waiting for it if a thread is compiling it; every other is
 compiled on the main thread as before, and finds the system's caches of
-compiled shaders and pipelines filled by the threads (on a Mac, about
-0.01 ms a shader instead of 9). The prepared pipelines are dropped: the
-draws make their own, from the system's cache. So a record that is stale,
-of another build or damaged can cost time but not change a picture. The
-main thread alone writes the record; the threads read only the prepared
-shaders, under their lock. */
+compiled shaders and pipelines filled by the threads (on a Mac, about 0.01
+ms a shader instead of 9). The prepared pipelines are dropped: the draws
+make their own, from the system's cache. So a record that is stale, of
+another build or damaged can cost time but not change a picture. The main
+thread alone writes the record and its tables; the threads have the
+prepared shaders (the library), the main thread only what it takes from
+them, under their lock. At each map's end and at exit the log says how many
+of the shaders the map's draws asked for were prepared. */
 
-static struct
-{
-	BOOL enabled;
-	struct shader_manifest manifest;
-	/* each shader handle's record, plus 1 (0: none) */
-	uint32_t *shader_records;
-	/* the records' sources (fragment's '1' or '0' first), to their indices,
-	and the pipelines recorded */
-	NSMutableDictionary<NSData *, NSNumber *> *sources;
-	NSMutableSet<NSData *> *pipelines;
-	/* each vertex layout handle's layout */
-	NSMutableDictionary<NSNumber *, NSData *> *layouts;
-} shader_cache;
-
-/* a recorded shader the threads compile: its text (shader_text's), and, once
-compiled, its function. A draw's compile of exactly this text and kind, on
-the main thread, takes the function (the same compile's result) or waits for
-the thread compiling it; one not started yet is the main thread's to
-compile, and the threads skip it */
+/* a recorded shader (the library's): its source, its text (shader_text's),
+made when it is to be compiled, and once compiled, its function. A draw's
+compile of exactly this text and kind, on the main thread, takes the
+function (the same compile's result) or waits for the thread compiling it;
+one queued but not started yet is the main thread's to compile, and the
+threads skip it */
 enum
 {
-	_prepared_waiting,
+	/* not to be compiled (no map loading has it), or compiled and dropped */
+	_prepared_idle,
+	_prepared_queued,
 	_prepared_compiling,
 	_prepared_done,
-	/* the main thread compiles it, or has taken it */
+	/* the main thread compiles it, or has taken it, or it does not build */
 	_prepared_taken,
 };
 
 @interface PreparedShader : NSObject
-@property(nonatomic, strong) NSString *text;
+@property(nonatomic, strong) NSData *source;
+@property(atomic, strong) NSString *text;
 @property(nonatomic) int fragment, state;
 @property(nonatomic, strong) id<MTLFunction> function;
 @end
@@ -2375,89 +2396,278 @@ enum
 @implementation PreparedShader
 @end
 
+/* a map's shaders (the library's indices, in the order they were first
+made) and pipelines (shader_manifest_pipelines of those indices) */
+@interface PreparedMap : NSObject
+@property(nonatomic, strong) NSMutableOrderedSet<NSNumber *> *shaders;
+@property(nonatomic, strong) NSMutableOrderedSet<NSData *> *pipelines;
+@end
+
+@implementation PreparedMap
+- (instancetype)init
+{
+	if ((self = [super init]))
+	{
+		_shaders = [NSMutableOrderedSet orderedSet];
+		_pipelines = [NSMutableOrderedSet orderedSet];
+	}
+	return self;
+}
+@end
+
+/* a record's file as read: its shaders (the file's indices), and its maps'
+sets of them ("" the records before any map's) */
+@interface PreparedRead : NSObject
+@property(nonatomic, strong) NSMutableArray<NSData *> *sources;
+@property(nonatomic, strong) NSMutableData *fragments;
+@property(nonatomic, strong) NSMutableDictionary<NSString *, PreparedMap *> *maps;
+@property(nonatomic, strong) NSMutableArray<NSString *> *order;
+@property(nonatomic, strong) NSString *map;
+@end
+
+@implementation PreparedRead
+- (instancetype)init
+{
+	if ((self = [super init]))
+	{
+		_sources = [NSMutableArray array];
+		_fragments = [NSMutableData data];
+		_maps = [NSMutableDictionary dictionary];
+		_order = [NSMutableArray array];
+		_map = @"";
+	}
+	return self;
+}
+
+- (PreparedMap *)current
+{
+	PreparedMap *set = self.maps[self.map];
+
+	if (!set)
+	{
+		set = [PreparedMap new];
+		self.maps[self.map] = set;
+		[self.order addObject:self.map];
+	}
+	return set;
+}
+@end
+
 static struct
 {
-	/* every recorded shader, in the record's order (the pipelines' indices),
-	and the ones not compiled yet by text (fragment's '1' or '0' first) */
+	BOOL enabled;
+	struct shader_manifest manifest;
+	/* each shader handle's record, plus 1 (0: none), and the map (epoch) it
+	was last drawn in */
+	uint32_t *shader_records, *shader_marks;
+	/* the current map's: its number (from 1), its name (nil before the
+	first), and the records' count when its map record was written (a
+	shader recorded since is its own) */
+	uint32_t epoch, segment_first;
+	NSString *map;
+	/* the records' sources (a hash of the kind and the source) to their
+	indices; each map's shaders and pipelines the record has */
+	NSMutableDictionary<NSNumber *, NSNumber *> *sources;
+	NSMutableDictionary<NSString *, NSMutableSet<NSNumber *> *> *known_shaders;
+	NSMutableDictionary<NSString *, NSMutableSet<NSData *> *> *known_pipelines;
+	/* each vertex layout handle's layout */
+	NSMutableDictionary<NSNumber *, NSData *> *layouts;
+	/* the current map's draws' shaders: prepared, the draw's own compile of
+	one queued, in no record (for the log) */
+	uint32_t found, claimed, missed;
+} shader_cache;
+
+static struct
+{
+	/* the library (the prepare queue's, but each shader's state and
+	function, which are under the lock): every recorded shader, the
+	index of each source (by hash), each map's set, and the maps' order
+	(the pack's, then the app record's) */
 	NSMutableArray<PreparedShader *> *shaders;
+	NSMutableDictionary<NSNumber *, NSNumber *> *by_source;
+	NSMutableDictionary<NSString *, PreparedMap *> *maps;
+	NSMutableArray<NSString *> *order;
+	/* the queued and compiled ones by text (fragment's '1' or '0' first),
+	and the texts the main thread compiled itself (not to be prepared) */
 	NSMutableDictionary<NSString *, PreparedShader *> *by_text;
-	NSMutableArray<NSData *> *pipelines;
-	/* guards the shaders' state and functions, and by_text */
+	NSMutableSet<NSString *> *compiled;
+	/* guards the shaders' state and functions, by_text and compiled */
 	NSCondition *condition;
+	/* the maps' preparation, in order, and the next map's, at a low
+	priority; a map's loading makes the number new, which ends both */
+	dispatch_queue_t queue, next_queue;
+	_Atomic uint32_t generation;
+	int jobs;
+	double next_seconds;
+	/* the map host_metal_map gave before the cache started */
+	NSString *pending_map;
 } prepared;
+
+static uint64_t shader_cache_source_hash(const void *source, size_t length, int fragment)
+{
+	return hash_bytes(source, length) * 31 + (fragment ? 1 : 0);
+}
 
 static NSString *prepared_key(NSString *text, int fragment)
 {
 	return [(fragment ? @"1" : @"0") stringByAppendingString:text];
 }
 
+/* the app record's PreparedRead while it is read (its indices are the
+record's: shader_cache.sources) */
+static PreparedRead *shader_cache_read_target;
+
+/* (the reader's, into a PreparedRead) */
 static void shader_cache_read_shader(void *context, uint32_t index, int fragment, const char *source, uint32_t length)
 {
-	PreparedShader *shader = [PreparedShader new];
-	char *copy = malloc(length + 1);
+	PreparedRead *read = (__bridge PreparedRead *)context;
+	unsigned char kind = fragment ? 1 : 0;
 
-	(void)context;
-	if (!copy)
-		return;
-	memcpy(copy, source, length);
-	copy[length] = 0;
-	/* (an entry for every record, compiled or not, as the pipelines name
-	them by index) */
-	shader.text = strlen(copy) == length ? shader_text(copy, fragment) : nil;
-	shader.fragment = fragment;
-	shader.state = shader.text ? _prepared_waiting : _prepared_taken;
-	[prepared.shaders addObject:shader];
-	if (shader.text)
-		prepared.by_text[prepared_key(shader.text, fragment)] = shader;
-	if (shader_cache.manifest.kept)
-	{
-		NSMutableData *key = [NSMutableData dataWithBytes:fragment ? "1" : "0" length:1];
-
-		[key appendBytes:source length:length];
-		shader_cache.sources[key] = @(index);
-	}
-	free(copy);
+	(void)index;
+	[read.sources addObject:[NSData dataWithBytes:source length:length]];
+	[read.fragments appendBytes:&kind length:1];
+	[read.current.shaders addObject:@(read.sources.count - 1)];
+	if (shader_cache.manifest.kept && shader_cache.sources && context == (__bridge void *)shader_cache_read_target)
+		shader_cache.sources[@(shader_cache_source_hash(source, length, fragment))] = @(read.sources.count - 1);
 }
 
 static void shader_cache_read_pipeline(void *context, const struct shader_manifest_pipeline *pipeline)
 {
-	NSData *record = [NSData dataWithBytes:pipeline length:sizeof(*pipeline)];
+	PreparedRead *read = (__bridge PreparedRead *)context;
 
-	(void)context;
-	[prepared.pipelines addObject:record];
-	if (shader_cache.manifest.kept)
-		[shader_cache.pipelines addObject:record];
+	[read.current.pipelines addObject:[NSData dataWithBytes:pipeline length:sizeof(*pipeline)]];
+}
+
+static void shader_cache_read_map(void *context, const char *name)
+{
+	PreparedRead *read = (__bridge PreparedRead *)context;
+
+	read.map = [NSString stringWithUTF8String:name];
+}
+
+static void shader_cache_read_shader_used(void *context, uint32_t index)
+{
+	PreparedRead *read = (__bridge PreparedRead *)context;
+
+	[read.current.shaders addObject:@(index)];
+}
+
+static const struct shader_manifest_reader shader_cache_reader =
+{
+	NULL, shader_cache_read_shader, shader_cache_read_pipeline, shader_cache_read_map, shader_cache_read_shader_used,
+};
+
+/* a file's records into the library (the prepare queue's) */
+static void prepared_merge(PreparedRead *read)
+{
+	NSMutableArray<NSNumber *> *global = [NSMutableArray arrayWithCapacity:read.sources.count];
+	const unsigned char *fragments = read.fragments.bytes;
+	NSUInteger index;
+
+	for (index = 0; index < read.sources.count; index++)
+	{
+		NSData *source = read.sources[index];
+		NSNumber *hash = @(shader_cache_source_hash(source.bytes, source.length, fragments[index]));
+		NSNumber *found = prepared.by_source[hash];
+
+		if (!found)
+		{
+			PreparedShader *shader = [PreparedShader new];
+
+			shader.source = source;
+			shader.fragment = fragments[index];
+			shader.state = _prepared_idle;
+			found = @(prepared.shaders.count);
+			[prepared.shaders addObject:shader];
+			prepared.by_source[hash] = found;
+		}
+		[global addObject:found];
+	}
+	for (NSString *name in read.order)
+	{
+		PreparedMap *from = read.maps[name], *into = prepared.maps[name];
+
+		if (!into)
+		{
+			into = [PreparedMap new];
+			prepared.maps[name] = into;
+			[prepared.order addObject:name];
+		}
+		for (NSNumber *shader in from.shaders)
+			[into.shaders addObject:global[shader.unsignedIntValue]];
+		for (NSData *record in from.pipelines)
+		{
+			struct shader_manifest_pipeline pipeline;
+
+			memcpy(&pipeline, record.bytes, sizeof(pipeline));
+			if (pipeline.vertex_shader >= global.count || pipeline.fragment_shader >= global.count)
+				continue;
+			pipeline.vertex_shader = global[pipeline.vertex_shader].unsignedIntValue;
+			pipeline.fragment_shader = global[pipeline.fragment_shader].unsignedIntValue;
+			[into.pipelines addObject:[NSData dataWithBytes:&pipeline length:sizeof(pipeline)]];
+		}
+	}
+}
+
+/* a library shader's text (shader_text of its source), made once */
+static NSString *prepared_text(PreparedShader *shader)
+{
+	NSString *text = shader.text;
+
+	if (!text)
+	{
+		NSData *source = shader.source;
+		char *copy = malloc(source.length + 1);
+
+		if (!copy)
+			return nil;
+		memcpy(copy, source.bytes, source.length);
+		copy[source.length] = 0;
+		text = strlen(copy) == source.length ? shader_text(copy, shader.fragment) : nil;
+		free(copy);
+		shader.text = text;
+	}
+	return text;
 }
 
 /* the main thread's compile of this text: the prepared function, after
 waiting for a thread compiling it; nil if it is the main thread's to compile
-(*claimed then the record's entry, if there is one, for prepared_give) */
+(*claimed then the library's entry, if it was queued, for prepared_give) */
 static id<MTLFunction> prepared_take(NSString *text, int fragment, PreparedShader **claimed)
 {
 	PreparedShader *shader;
 	id<MTLFunction> function = nil;
+	NSString *key;
 
 	*claimed = nil;
 	if (!prepared.condition)
 		return nil;
+	key = prepared_key(text, fragment);
 	[prepared.condition lock];
-	shader = prepared.by_text[prepared_key(text, fragment)];
+	shader = prepared.by_text[key];
 	if (shader)
 	{
 		while (shader.state == _prepared_compiling)
 			[prepared.condition wait];
 		if (shader.state == _prepared_done)
 			function = shader.function;
-		else if (shader.state == _prepared_waiting)
+		else if (shader.state == _prepared_queued)
 		{
 			shader.state = _prepared_taken;
 			*claimed = shader;
 		}
 		/* (one entry for one handle: a second shader of the same source
 		compiles its own, as before) */
-		[prepared.by_text removeObjectForKey:prepared_key(text, fragment)];
+		[prepared.by_text removeObjectForKey:key];
 	}
+	[prepared.compiled addObject:key];
 	[prepared.condition unlock];
+	if (function)
+		shader_cache.found++;
+	else if (*claimed)
+		shader_cache.claimed++;
+	else
+		shader_cache.missed++;
 	return function;
 }
 
@@ -2503,104 +2713,249 @@ static BOOL shader_cache_pipeline_sane(const struct shader_manifest_pipeline *pi
 	return YES;
 }
 
-/* the shaders and then the pipelines of the record, compiled on threads
-(two at a time: the game's main thread keeps a core), the shaders' kept for
-the draws (prepared_take) and the pipelines dropped */
-static void shader_cache_prepare(void)
+static MTLRenderPipelineDescriptor *prepared_pipeline_descriptor(const struct shader_manifest_pipeline *pipeline,
+	id<MTLFunction> vertex, id<MTLFunction> fragment)
 {
-	MTLCompileOptions *options = compile_options();
+	if (!vertex || !fragment || !shader_cache_pipeline_sane(pipeline))
+		return nil;
+	return pipeline_descriptor_make(vertex, fragment, vertex_descriptor_make(&pipeline->layout), pipeline->color_format,
+		pipeline->depth_format, &pipeline->blend);
+}
+
+static BOOL prepared_current(uint32_t generation)
+{
+	return atomic_load(&prepared.generation) == generation;
+}
+
+static void prepare_next_schedule(NSString *name, uint32_t generation);
+
+/* a map's set compiled (the prepare queue's): its shaders, kept for the
+draws, then its pipelines, dropped; the previous map's that no draw took
+dropped first. Ends early if another map begins to load */
+static void prepare_map(NSString *name, uint32_t generation)
+{
+	PreparedMap *set = prepared.maps[name];
 	id<MTLDevice> device = metal.device;
-	uint64_t started = SDL_GetTicksNS();
-	/* (user-initiated: the main thread may wait for one, during the load) */
-	dispatch_queue_t queue = dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0);
-	NSArray<PreparedShader *> *shaders = [prepared.shaders copy];
-	NSArray<NSData *> *pipelines = [prepared.pipelines copy];
+	MTLCompileOptions *options = compile_options();
+	NSMutableArray<PreparedShader *> *todo = [NSMutableArray array];
+	NSMutableSet<NSNumber *> *members = [NSMutableSet set];
+	dispatch_semaphore_t slots = dispatch_semaphore_create(prepared.jobs);
+	dispatch_group_t group = dispatch_group_create();
+	__block _Atomic uint32_t compiled = 0, failed_shaders = 0, made_pipelines = 0, failed_pipelines = 0;
+	uint64_t started = SDL_GetTicksNS(), shaders_done;
+	NSUInteger skipped = 0, dropped = 0, pipelines_tried = 0;
 
-	dispatch_async(queue, ^
+	if (!set)
 	{
-		dispatch_group_t group = dispatch_group_create();
-		__block _Atomic NSUInteger next = 0;
-		__block _Atomic uint32_t compiled = 0, failed_shaders = 0, failed_pipelines = 0;
-		int worker;
-		uint64_t shaders_done;
+		if (name.length)
+			host_log("Metal: shader cache: no shaders recorded for map %s", name.UTF8String);
+		return;
+	}
+	for (NSNumber *index in set.shaders)
+	{
+		[members addObject:index];
+		prepared_text(prepared.shaders[index.unsignedIntValue]);
+	}
+	[prepared.condition lock];
+	/* (what the last map's draws did not take, and this map has not, is
+	dropped: its memory, and the dictionary's) */
+	for (NSString *key in prepared.by_text.allKeys)
+	{
+		PreparedShader *shader = prepared.by_text[key];
+		NSNumber *index = prepared.by_source[@(shader_cache_source_hash(shader.source.bytes, shader.source.length,
+			shader.fragment))];
 
-		for (worker = 0; worker < 2; worker++)
+		if ((shader.state == _prepared_done || shader.state == _prepared_queued) && ![members containsObject:index])
 		{
-			dispatch_group_async(group, queue, ^
-			{
-				NSUInteger at;
-
-				while ((at = atomic_fetch_add(&next, 1)) < shaders.count)
-				{
-					@autoreleasepool
-					{
-						PreparedShader *shader = shaders[at];
-						NSError *error = nil;
-						id<MTLLibrary> library;
-						id<MTLFunction> function;
-
-						[prepared.condition lock];
-						if (shader.state != _prepared_waiting)
-						{
-							[prepared.condition unlock];
-							continue;
-						}
-						shader.state = _prepared_compiling;
-						[prepared.condition unlock];
-						library = [device newLibraryWithSource:shader.text options:options error:&error];
-						function = [library newFunctionWithName:shader_entry_point(shader.fragment)];
-						[prepared.condition lock];
-						shader.function = function;
-						shader.state = function ? _prepared_done : _prepared_taken;
-						[prepared.condition broadcast];
-						[prepared.condition unlock];
-						atomic_fetch_add(function ? &compiled : &failed_shaders, 1);
-					}
-				}
-			});
+			shader.function = nil;
+			shader.state = _prepared_idle;
+			[prepared.by_text removeObjectForKey:key];
+			dropped++;
 		}
-		dispatch_group_wait(group, DISPATCH_TIME_FOREVER);
-		shaders_done = SDL_GetTicksNS();
-		atomic_store(&next, 0);
-		for (worker = 0; worker < 2; worker++)
+	}
+	for (NSNumber *index in set.shaders)
+	{
+		PreparedShader *shader = prepared.shaders[index.unsignedIntValue];
+		NSString *key;
+
+		if (shader.state != _prepared_idle || !shader.text)
+			continue;
+		key = prepared_key(shader.text, shader.fragment);
+		if ([prepared.compiled containsObject:key] || prepared.by_text[key])
 		{
-			dispatch_group_async(group, queue, ^
-			{
-				NSUInteger at;
-
-				while ((at = atomic_fetch_add(&next, 1)) < pipelines.count)
-				{
-					@autoreleasepool
-					{
-						struct shader_manifest_pipeline pipeline;
-						id<MTLFunction> vertex, fragment;
-						NSError *error = nil;
-
-						memcpy(&pipeline, pipelines[at].bytes, sizeof(pipeline));
-						[prepared.condition lock];
-						vertex = shaders[pipeline.vertex_shader].function;
-						fragment = shaders[pipeline.fragment_shader].function;
-						[prepared.condition unlock];
-						/* (one whose shader failed, or the main thread is still
-						compiling, is the draw's to make) */
-						if (!vertex || !fragment)
-							continue;
-						if (!shader_cache_pipeline_sane(&pipeline) ||
-							![device newRenderPipelineStateWithDescriptor:pipeline_descriptor_make(vertex, fragment,
-								vertex_descriptor_make(&pipeline.layout), pipeline.color_format, pipeline.depth_format,
-								&pipeline.blend) error:&error])
-						{
-							atomic_fetch_add(&failed_pipelines, 1);
-						}
-					}
-				}
-			});
+			skipped++;
+			continue;
 		}
-		dispatch_group_wait(group, DISPATCH_TIME_FOREVER);
-		host_log("Metal: shader cache: %u of %lu shaders prepared in %.0f ms (%u failed; the rest the draws "
-			"compiled first), %lu pipelines in %.0f ms (%u failed), on other threads", atomic_load(&compiled),
-			(unsigned long)shaders.count, (shaders_done - started) / 1e6, atomic_load(&failed_shaders),
-			(unsigned long)pipelines.count, (SDL_GetTicksNS() - shaders_done) / 1e6, atomic_load(&failed_pipelines));
+		prepared.by_text[key] = shader;
+		shader.state = _prepared_queued;
+		[todo addObject:shader];
+	}
+	[prepared.condition unlock];
+
+	for (PreparedShader *shader in todo)
+	{
+		dispatch_semaphore_wait(slots, DISPATCH_TIME_FOREVER);
+		[prepared.condition lock];
+		if (!prepared_current(generation) || shader.state != _prepared_queued)
+		{
+			/* (another map's loading: the rest are not compiled) */
+			if (shader.state == _prepared_queued && !prepared_current(generation))
+			{
+				shader.state = _prepared_idle;
+				[prepared.by_text removeObjectForKey:prepared_key(shader.text, shader.fragment)];
+			}
+			[prepared.condition unlock];
+			dispatch_semaphore_signal(slots);
+			continue;
+		}
+		shader.state = _prepared_compiling;
+		[prepared.condition unlock];
+		dispatch_group_enter(group);
+		[device newLibraryWithSource:shader.text options:options
+			completionHandler:^(id<MTLLibrary> library, NSError *error)
+		{
+			id<MTLFunction> function = [library newFunctionWithName:shader_entry_point(shader.fragment)];
+
+			(void)error;
+			[prepared.condition lock];
+			shader.function = function;
+			shader.state = function ? _prepared_done : _prepared_taken;
+			[prepared.condition broadcast];
+			[prepared.condition unlock];
+			atomic_fetch_add(function ? &compiled : &failed_shaders, 1);
+			dispatch_semaphore_signal(slots);
+			dispatch_group_leave(group);
+		}];
+	}
+	dispatch_group_wait(group, DISPATCH_TIME_FOREVER);
+	shaders_done = SDL_GetTicksNS();
+	for (NSData *record in set.pipelines)
+	{
+		struct shader_manifest_pipeline pipeline;
+		id<MTLFunction> vertex, fragment;
+		MTLRenderPipelineDescriptor *descriptor;
+
+		if (!prepared_current(generation))
+			break;
+		memcpy(&pipeline, record.bytes, sizeof(pipeline));
+		[prepared.condition lock];
+		vertex = prepared.shaders[pipeline.vertex_shader].function;
+		fragment = prepared.shaders[pipeline.fragment_shader].function;
+		[prepared.condition unlock];
+		/* (one whose shader failed, or that a draw compiled itself before
+		it was prepared, is the draw's to make) */
+		if (!(descriptor = prepared_pipeline_descriptor(&pipeline, vertex, fragment)))
+			continue;
+		pipelines_tried++;
+		dispatch_semaphore_wait(slots, DISPATCH_TIME_FOREVER);
+		dispatch_group_enter(group);
+		[device newRenderPipelineStateWithDescriptor:descriptor
+			completionHandler:^(id<MTLRenderPipelineState> state, NSError *error)
+		{
+			(void)error;
+			atomic_fetch_add(state ? &made_pipelines : &failed_pipelines, 1);
+			dispatch_semaphore_signal(slots);
+			dispatch_group_leave(group);
+		}];
+	}
+	dispatch_group_wait(group, DISPATCH_TIME_FOREVER);
+	host_log("Metal: shader cache: map %s: %u of %lu shaders prepared in %.0f ms (%u failed, %lu the draws had "
+		"already, %lu dropped), %u of %lu pipelines in %.0f ms (%u failed), %d at a time, on other threads%s",
+		name.length ? name.UTF8String : "(none)", atomic_load(&compiled), (unsigned long)set.shaders.count,
+		(shaders_done - started) / 1e6, atomic_load(&failed_shaders), (unsigned long)skipped, (unsigned long)dropped,
+		atomic_load(&made_pipelines), (unsigned long)set.pipelines.count, (SDL_GetTicksNS() - shaders_done) / 1e6,
+		atomic_load(&failed_pipelines), prepared.jobs, prepared_current(generation) ? "" : " (cut short: another map)");
+	(void)pipelines_tried;
+	if (prepared_current(generation) && name.length)
+		prepare_next_schedule(name, generation);
+}
+
+/* the next map's set (the pack's order) compiled at a low priority, one at
+a time, and dropped: the system's caches have them when it loads (the next
+queue's). Ends as soon as a map begins to load */
+static void prepare_next(NSString *name, uint32_t generation)
+{
+	__block PreparedMap *set = nil;
+	__block NSArray<PreparedShader *> *shaders = nil;
+	id<MTLDevice> device = metal.device;
+	MTLCompileOptions *options = compile_options();
+	NSMutableDictionary<NSNumber *, id<MTLFunction>> *functions = [NSMutableDictionary dictionary];
+	uint64_t started = SDL_GetTicksNS();
+	uint32_t compiled = 0, pipelines = 0;
+
+	/* (the library is the prepare queue's: its set is taken there) */
+	dispatch_sync(prepared.queue, ^
+	{
+		set = prepared.maps[name];
+		shaders = [prepared.shaders copy];
+	});
+	if (!set)
+		return;
+	for (NSNumber *index in set.shaders)
+	{
+		@autoreleasepool
+		{
+			PreparedShader *shader = shaders[index.unsignedIntValue];
+			NSString *text = prepared_text(shader);
+			BOOL skip;
+			id<MTLLibrary> library;
+			NSError *error = nil;
+
+			if (!prepared_current(generation))
+				return;
+			if (!text)
+				continue;
+			[prepared.condition lock];
+			skip = shader.state != _prepared_idle ||
+				[prepared.compiled containsObject:prepared_key(text, shader.fragment)];
+			if (shader.function)
+				functions[index] = shader.function;
+			[prepared.condition unlock];
+			if (skip)
+				continue;
+			library = [device newLibraryWithSource:text options:options error:&error];
+			if ((functions[index] = [library newFunctionWithName:shader_entry_point(shader.fragment)]))
+				compiled++;
+		}
+	}
+	for (NSData *record in set.pipelines)
+	{
+		@autoreleasepool
+		{
+			struct shader_manifest_pipeline pipeline;
+			MTLRenderPipelineDescriptor *descriptor;
+			NSError *error = nil;
+
+			if (!prepared_current(generation))
+				return;
+			memcpy(&pipeline, record.bytes, sizeof(pipeline));
+			descriptor = prepared_pipeline_descriptor(&pipeline, functions[@(pipeline.vertex_shader)],
+				functions[@(pipeline.fragment_shader)]);
+			if (descriptor && [device newRenderPipelineStateWithDescriptor:descriptor error:&error])
+				pipelines++;
+		}
+	}
+	host_log("Metal: shader cache: the next map's (%s) %u shaders and %u pipelines compiled ahead in %.0f ms, "
+		"at a low priority", name.UTF8String, compiled, pipelines, (SDL_GetTicksNS() - started) / 1e6);
+}
+
+/* (the prepare queue's, after a map's set) the next map's, a while into
+this one, if this one is still loaded then */
+static void prepare_next_schedule(NSString *name, uint32_t generation)
+{
+	NSUInteger at = [prepared.order indexOfObject:name];
+	NSString *next;
+
+	if (prepared.next_seconds <= 0 || at == NSNotFound || at + 1 >= prepared.order.count)
+		return;
+	next = prepared.order[at + 1];
+	if (!next.length || [next isEqualToString:@"ui"])
+		return;
+	dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(prepared.next_seconds * NSEC_PER_SEC)),
+		prepared.next_queue, ^
+	{
+		if (prepared_current(generation))
+			prepare_next(next, generation);
 	});
 }
 
@@ -2631,93 +2986,242 @@ static NSString *build_identifier(void)
 	return @"unknown";
 }
 
-/* the record opened, and what it holds prepared */
+/* how many of the map's draws' new shaders were prepared, for the log */
+static void shader_cache_coverage_log(void)
+{
+	uint32_t total = shader_cache.found + shader_cache.claimed + shader_cache.missed;
+
+	if (!total || !prepared.condition)
+		return;
+	host_log("Metal: shader cache: map %s: of the %u shaders its draws compiled, %u were prepared, %u queued but "
+		"compiled by the draw first, %u in no record", shader_cache.map ? shader_cache.map.UTF8String : "(none)",
+		total, shader_cache.found, shader_cache.claimed, shader_cache.missed);
+	shader_cache.found = shader_cache.claimed = shader_cache.missed = 0;
+}
+
+/* the pack: the bundle's, or HALO_METAL_SHADER_PACK's; NULL for none */
+static NSString *shader_pack_path(BOOL *any_build)
+{
+	const char *setting = getenv("HALO_METAL_SHADER_PACK");
+
+	*any_build = NO;
+	if (setting && *setting)
+	{
+		if (!strcmp(setting, "0") || !strcmp(setting, "off"))
+			return nil;
+		*any_build = YES;
+		return [NSString stringWithUTF8String:setting];
+	}
+	return [[NSBundle mainBundle] pathForResource:@"metal_shaders" ofType:@"pack"];
+}
+
+/* the record opened, the pack read, and the records of no map prepared */
 static void shader_cache_start(void)
 {
 	const char *setting = getenv("HALO_METAL_SHADER_CACHE");
-	NSString *path, *key, *build;
-	struct shader_manifest_reader reader;
+	const char *jobs = getenv("HALO_METAL_SHADER_PREPARE_JOBS"), *next = getenv("HALO_METAL_SHADER_PREPARE_NEXT");
+	NSString *path, *key, *pack_key, *build, *pack;
+	struct shader_manifest_reader reader = shader_cache_reader;
 	MTLCompileOptions *options = compile_options();
 	uint64_t started = SDL_GetTicksNS();
+	PreparedRead *read = [PreparedRead new];
+	BOOL recorded, any_build;
 
-	if (setting && (!strcmp(setting, "0") || !strcmp(setting, "off")))
+
+	shader_settings_read();
+	prepared.shaders = [NSMutableArray array];
+	prepared.by_source = [NSMutableDictionary dictionary];
+	prepared.maps = [NSMutableDictionary dictionary];
+	prepared.order = [NSMutableArray array];
+	prepared.by_text = [NSMutableDictionary dictionary];
+	prepared.compiled = [NSMutableSet set];
+	prepared.jobs = jobs && atoi(jobs) > 0 ? MIN(atoi(jobs), 16) : 4;
+	prepared.next_seconds = next && *next ? atof(next) : 120.0;
+	prepared.queue = dispatch_queue_create("opence.shader-prepare",
+		dispatch_queue_attr_make_with_qos_class(DISPATCH_QUEUE_SERIAL, QOS_CLASS_USER_INITIATED, 0));
+	prepared.next_queue = dispatch_queue_create("opence.shader-prepare-next",
+		dispatch_queue_attr_make_with_qos_class(DISPATCH_QUEUE_SERIAL, QOS_CLASS_UTILITY, 0));
+	/* (what must match for the records to be read: what the shaders are
+	compiled as, and for the app's own the GPU; what must match for the
+	app's to be kept: the build that wrote them, and the system; for the
+	pack's to be read: the shader translators it was made by) */
+	pack_key = [NSString stringWithFormat:@"msl %lx|invariance %d|layout %zu", (unsigned long)options.languageVersion,
+		options.preserveInvariance ? 1 : 0, sizeof(struct shader_manifest_pipeline)];
+	key = [NSString stringWithFormat:@"gpu %@|%@", metal.device.name, pack_key];
+	build = [NSString stringWithFormat:@"%@|%@", build_identifier(),
+		[NSProcessInfo processInfo].operatingSystemVersionString];
+
+	recorded = !(setting && (!strcmp(setting, "0") || !strcmp(setting, "off")));
+	if (!recorded)
+		host_log("Metal: shader cache: no record kept (HALO_METAL_SHADER_CACHE)");
+	if (recorded)
 	{
-		host_log("Metal: shader cache: off (HALO_METAL_SHADER_CACHE)");
+		if (setting && *setting == '/')
+		{
+			path = [NSString stringWithUTF8String:setting];
+		}
+		else
+		{
+			NSURL *caches = [[NSFileManager defaultManager] URLsForDirectory:NSCachesDirectory
+				inDomains:NSUserDomainMask].firstObject;
+			NSString *folder = [caches.path stringByAppendingPathComponent:
+				[NSBundle mainBundle].bundleIdentifier ? [NSBundle mainBundle].bundleIdentifier : @"OpenCE"];
+
+			[[NSFileManager defaultManager] createDirectoryAtPath:folder withIntermediateDirectories:YES
+				attributes:nil error:nil];
+			path = [folder stringByAppendingPathComponent:setting && *setting ?
+				[[NSString stringWithUTF8String:setting] lastPathComponent] : @"metal_shaders.manifest"];
+		}
+		if (getenv("HALO_METAL_SHADER_CACHE_RESET") && atoi(getenv("HALO_METAL_SHADER_CACHE_RESET")))
+			unlink(path.fileSystemRepresentation);
+		shader_cache.sources = [NSMutableDictionary dictionary];
+		shader_cache.known_shaders = [NSMutableDictionary dictionary];
+		shader_cache.known_pipelines = [NSMutableDictionary dictionary];
+		shader_cache.layouts = [NSMutableDictionary dictionary];
+		reader.context = (__bridge void *)read;
+		shader_cache_read_target = read;
+		if (!shader_manifest_open(&shader_cache.manifest, path.fileSystemRepresentation, key.UTF8String,
+			build.UTF8String, &reader))
+		{
+			host_log("Metal: shader cache: %s cannot be opened (another copy of the game has it?): none kept",
+				path.fileSystemRepresentation);
+			shader_cache.sources = nil;
+			shader_cache.layouts = nil;
+		}
+		else
+		{
+			shader_cache.shader_records = calloc(HANDLE_COUNT, sizeof(*shader_cache.shader_records));
+			shader_cache.shader_marks = calloc(HANDLE_COUNT, sizeof(*shader_cache.shader_marks));
+			shader_cache.enabled = shader_cache.shader_records && shader_cache.shader_marks;
+			shader_cache_noting = shader_cache.enabled;
+			shader_cache.epoch = 1;
+			/* (what each map has in the record, so that none is recorded
+			twice) */
+			if (shader_cache.manifest.kept)
+			{
+				for (NSString *name in read.order)
+				{
+					NSMutableSet<NSNumber *> *shaders = [NSMutableSet setWithArray:read.maps[name].shaders.array];
+					NSMutableSet<NSData *> *pipelines = [NSMutableSet setWithArray:read.maps[name].pipelines.array];
+
+					shader_cache.known_shaders[name] = shaders;
+					shader_cache.known_pipelines[name] = pipelines;
+				}
+			}
+		}
+		shader_cache_read_target = nil;
+		host_log("Metal: shader cache: %s: %lu shaders of %lu maps read in %.1f ms%s%s%s",
+			path.fileSystemRepresentation, (unsigned long)read.sources.count, (unsigned long)read.order.count,
+			(SDL_GetTicksNS() - started) / 1e6,
+			shader_cache.manifest.kept || !read.sources.count ? "" : " (another build's: started again)",
+			shader_cache.manifest.discarded[0] ? "; not read past " : "", shader_cache.manifest.discarded);
+	}
+	prepared.condition = [NSCondition new];
+	atexit(shader_cache_coverage_log);
+
+	pack = shader_pack_path(&any_build);
+	dispatch_async(prepared.queue, ^
+	{
+		uint64_t pack_started = SDL_GetTicksNS();
+
+		if (pack)
+		{
+			PreparedRead *pack_read = [PreparedRead new];
+			struct shader_manifest_reader pack_reader = shader_cache_reader;
+			struct shader_manifest info;
+
+			pack_reader.context = (__bridge void *)pack_read;
+			if (shader_manifest_read_pack(pack.fileSystemRepresentation, pack_key.UTF8String, NULL,
+				&pack_reader, &info))
+			{
+				prepared_merge(pack_read);
+				host_log("Metal: shader cache: the pack %s (%s): %lu shaders of %lu maps read in %.1f ms%s%s",
+					pack.lastPathComponent.UTF8String, info.build, (unsigned long)pack_read.sources.count,
+					(unsigned long)pack_read.order.count, (SDL_GetTicksNS() - pack_started) / 1e6,
+					info.discarded[0] ? "; not read past " : "", info.discarded);
+			}
+			else
+			{
+				/* (silent but for the log: none, or another build's) */
+				host_log("Metal: shader cache: the pack %s is not read: %s", pack.fileSystemRepresentation,
+					info.discarded);
+			}
+		}
+		prepared_merge(read);
+		/* (the records of no map: an earlier build's, prepared now) */
+		prepare_map(@"", atomic_load(&prepared.generation));
+	});
+	if (prepared.pending_map)
+	{
+		NSString *map = prepared.pending_map;
+
+		prepared.pending_map = nil;
+		host_metal_map(map.UTF8String);
+	}
+}
+
+/* a map begins to load (the guest's game_load: "levels\\a10\\a10"): the
+record's records are of it from now on, and its set is prepared */
+void host_metal_map(const char *scenario)
+{
+	NSMutableString *name = [NSMutableString string];
+	const char *at, *start = scenario;
+	uint32_t generation;
+
+	if (!scenario)
+		return;
+	for (at = scenario; *at; at++)
+	{
+		if (*at == '\\' || *at == '/')
+			start = at + 1;
+	}
+	for (at = start; *at && name.length < SHADER_MANIFEST_MAP_NAME_LIMIT; at++)
+	{
+		char letter = *at >= 'A' && *at <= 'Z' ? (char)(*at - 'A' + 'a') : *at;
+
+		if ((letter >= 'a' && letter <= 'z') || (letter >= '0' && letter <= '9') || letter == '_' || letter == '-')
+			[name appendFormat:@"%c", letter];
+	}
+	if (!name.length)
+		return;
+	host_frame_log_event("shader-map", name.UTF8String);
+	if (!prepared.queue)
+	{
+		prepared.pending_map = name;
 		return;
 	}
-	shader_settings_read();
-	if (setting && *setting == '/')
+	shader_cache_coverage_log();
+	if (shader_cache.enabled)
 	{
-		path = [NSString stringWithUTF8String:setting];
+		shader_cache.epoch++;
+		shader_cache.map = name;
+		shader_manifest_add_map(&shader_cache.manifest, name.UTF8String);
+		shader_cache.segment_first = shader_cache.manifest.shaders;
+		if (!shader_cache.known_shaders[name])
+			shader_cache.known_shaders[name] = [NSMutableSet set];
+		if (!shader_cache.known_pipelines[name])
+			shader_cache.known_pipelines[name] = [NSMutableSet set];
 	}
 	else
 	{
-		NSURL *caches = [[NSFileManager defaultManager] URLsForDirectory:NSCachesDirectory
-			inDomains:NSUserDomainMask].firstObject;
-		NSString *folder = [caches.path stringByAppendingPathComponent:
-			[NSBundle mainBundle].bundleIdentifier ? [NSBundle mainBundle].bundleIdentifier : @"OpenCE"];
-
-		[[NSFileManager defaultManager] createDirectoryAtPath:folder withIntermediateDirectories:YES attributes:nil
-			error:nil];
-		path = [folder stringByAppendingPathComponent:setting && *setting ?
-			[[NSString stringWithUTF8String:setting] lastPathComponent] : @"metal_shaders.manifest"];
+		shader_cache.map = name;
 	}
-	if (getenv("HALO_METAL_SHADER_CACHE_RESET") && atoi(getenv("HALO_METAL_SHADER_CACHE_RESET")))
-		unlink(path.fileSystemRepresentation);
-	/* (what must match for the records to be read: the GPU, and what the
-	shaders are compiled as; what must match for them to be kept: the build
-	that wrote them, and the system) */
-	key = [NSString stringWithFormat:@"gpu %@|msl %lx|invariance %d|layout %zu", metal.device.name,
-		(unsigned long)options.languageVersion, options.preserveInvariance ? 1 : 0,
-		sizeof(struct shader_manifest_pipeline)];
-	build = [NSString stringWithFormat:@"%@|%@", build_identifier(),
-		[NSProcessInfo processInfo].operatingSystemVersionString];
-	shader_cache.sources = [NSMutableDictionary dictionary];
-	shader_cache.pipelines = [NSMutableSet set];
-	shader_cache.layouts = [NSMutableDictionary dictionary];
-	prepared.shaders = [NSMutableArray array];
-	prepared.by_text = [NSMutableDictionary dictionary];
-	prepared.pipelines = [NSMutableArray array];
-	prepared.condition = [NSCondition new];
-	reader.context = NULL;
-	reader.shader = shader_cache_read_shader;
-	reader.pipeline = shader_cache_read_pipeline;
-	if (!shader_manifest_open(&shader_cache.manifest, path.fileSystemRepresentation, key.UTF8String,
-		build.UTF8String, &reader))
+	generation = atomic_fetch_add(&prepared.generation, 1) + 1;
+	dispatch_async(prepared.queue, ^
 	{
-		host_log("Metal: shader cache: %s cannot be opened (another copy of the game has it?): none kept",
-			path.fileSystemRepresentation);
-		shader_cache.sources = nil;
-		shader_cache.pipelines = nil;
-		shader_cache.layouts = nil;
-		prepared.shaders = nil;
-		prepared.by_text = nil;
-		prepared.pipelines = nil;
-		prepared.condition = nil;
-		return;
-	}
-	shader_cache.shader_records = calloc(HANDLE_COUNT, sizeof(*shader_cache.shader_records));
-	shader_cache.enabled = shader_cache.shader_records != NULL;
-	host_log("Metal: shader cache: %s: %lu shaders and %lu pipelines read in %.1f ms%s%s%s", path.fileSystemRepresentation,
-		(unsigned long)prepared.shaders.count, (unsigned long)prepared.pipelines.count,
-		(SDL_GetTicksNS() - started) / 1e6,
-		shader_cache.manifest.kept || !prepared.shaders.count ? "" : " (another build's: started again)",
-		shader_cache.manifest.discarded[0] ? "; not read past " : "", shader_cache.manifest.discarded);
-	if (prepared.shaders.count)
-		shader_cache_prepare();
+		prepare_map(name, generation);
+	});
 }
 
 static void shader_cache_record_shader(uint32_t handle, const char *source, int fragment)
 {
-	NSMutableData *key;
-	NSNumber *index;
+	NSNumber *key, *index;
 	size_t length;
 
 	if (!shader_cache.enabled || handle >= HANDLE_COUNT)
 		return;
 	length = strlen(source);
-	key = [NSMutableData dataWithBytes:fragment ? "1" : "0" length:1];
-	[key appendBytes:source length:length];
+	key = @(shader_cache_source_hash(source, length, fragment));
 	index = shader_cache.sources[key];
 	if (!index)
 	{
@@ -2740,6 +3244,29 @@ static void shader_cache_record_shader(uint32_t handle, const char *source, int 
 	shader_cache.shader_records[handle] = index.unsignedIntValue + 1;
 }
 
+/* a draw's shader: if it is the first of this map's draws to use it, and
+an earlier map's record has it, recorded as this map's too */
+static void shader_cache_note(uint32_t handle)
+{
+	NSMutableSet<NSNumber *> *known;
+	uint32_t index;
+
+	if (handle >= HANDLE_COUNT || shader_cache.shader_marks[handle] == shader_cache.epoch)
+		return;
+	shader_cache.shader_marks[handle] = shader_cache.epoch;
+	if (!shader_cache.shader_records[handle] || !shader_cache.map)
+		return;
+	index = shader_cache.shader_records[handle] - 1;
+	/* (recorded since the map's record: its own) */
+	if (index >= shader_cache.segment_first)
+		return;
+	known = shader_cache.known_shaders[shader_cache.map];
+	if ([known containsObject:@(index)])
+		return;
+	if (shader_manifest_add_shader_use(&shader_cache.manifest, index))
+		[known addObject:@(index)];
+}
+
 static void shader_cache_record_layout(uint32_t handle, const struct metal_vertex_layout *layout)
 {
 	if (shader_cache.enabled)
@@ -2750,6 +3277,7 @@ static void shader_cache_record_pipeline(const struct pipeline_key *key)
 {
 	struct shader_manifest_pipeline pipeline;
 	NSData *layout, *record;
+	NSMutableSet<NSData *> *known;
 
 	if (!shader_cache.enabled || key->vertex_shader >= HANDLE_COUNT || key->fragment_shader >= HANDLE_COUNT ||
 		!shader_cache.shader_records[key->vertex_shader] || !shader_cache.shader_records[key->fragment_shader] ||
@@ -2765,13 +3293,19 @@ static void shader_cache_record_pipeline(const struct pipeline_key *key)
 	pipeline.blend = key->blend;
 	memcpy(&pipeline.layout, layout.bytes, sizeof(pipeline.layout));
 	record = [NSData dataWithBytes:&pipeline length:sizeof(pipeline)];
-	if ([shader_cache.pipelines containsObject:record])
+	known = shader_cache.known_pipelines[shader_cache.map ? shader_cache.map : @""];
+	if (!known)
+	{
+		known = [NSMutableSet set];
+		shader_cache.known_pipelines[shader_cache.map ? shader_cache.map : @""] = known;
+	}
+	if ([known containsObject:record])
 		return;
 	{
 		uint64_t started = host_frame_log_detail() ? host_frame_log_now() : 0;
 
 		if (shader_manifest_add_pipeline(&shader_cache.manifest, &pipeline))
-			[shader_cache.pipelines addObject:record];
+			[known addObject:record];
 		if (started)
 		{
 			host_frame_acc.manifest_writes++;

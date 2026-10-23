@@ -55,7 +55,7 @@ target_include_directories(OpenCETV PRIVATE "${APPLE_HOST}" "${ROOT}/port/macos/
     "${PLATFORM}" "${OPENCE_W2C}" "${OPENCE_WASM_RUNTIME}" "${OPENCE_SIMDE}"
     "${THIRD_PARTY}/mbedtls/include" "${THIRD_PARTY}/mbedtls/library"
     "${THIRD_PARTY}/miniupnpc/include" "${THIRD_PARTY}/miniupnpc/src")
-target_link_libraries(OpenCETV PRIVATE SDL3::SDL3-static iconv
+target_link_libraries(OpenCETV PRIVATE SDL3::SDL3-static iconv z
     "-framework Foundation" "-framework UIKit" "-framework Metal" "-framework QuartzCore"
     "-framework GameController" "-framework CoreAudio" "-framework AudioToolbox"
     "-framework AVFoundation" "-framework CoreMedia" "-framework CoreVideo" "-framework CoreGraphics"

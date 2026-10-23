@@ -124,6 +124,10 @@ int host_sdl_glob_directory(const char *path, const char *pattern, unsigned int 
 
 /* the window's CAMetalLayer made, and the device's state with it */
 int host_metal_attach(unsigned int window);
+/* a map begins to load (its scenario's name, "levels\\a10\\a10"): the
+shader cache's records are of it from now on, and what it recorded of the
+map before (and the bundled pack has) is compiled on other threads */
+void host_metal_map(const char *scenario);
 int host_metal_supports_bc(void);
 /* a DXT texture on a GPU without BC formats: its blocks (one face's levels
 after another's, face_bytes apart) converted on the host (host_textures.h)

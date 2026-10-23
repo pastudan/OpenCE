@@ -438,7 +438,7 @@ def generate_macos_build(n: Writer, sln: Any) -> None:
     )
     n.build(outputs=executable, rule="macos_link", inputs=host_objects, implicit=[libsdl], variables={
         "ldflags": " ".join(HOST_FLAGS),
-        "libs": " ".join([_quote(libsdl), "-liconv", *(f"-framework {name}" for name in frameworks)]),
+        "libs": " ".join([_quote(libsdl), "-liconv", "-lz", *(f"-framework {name}" for name in frameworks)]),
     })
     info_plist = build_dir / "OpenCE.app" / "Contents" / "Info.plist"
     n.rule(name="macos_copy", command="cp $in $out", description="MACOS COPY $out")

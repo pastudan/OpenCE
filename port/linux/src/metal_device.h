@@ -14,6 +14,8 @@ side is port/macos/guest/guest_metal.c.
 
 /* the window's drawable (a CAMetalLayer); FALSE if Metal cannot draw in it */
 int metal_device_attach(SDL_Window *window);
+/* a map begins to load (game_load): the shader cache prepares its shaders */
+void metal_device_map(const char *scenario);
 /* each frame waits for the display (display.vsync) */
 void metal_device_set_vsync(int vsync);
 /* the frame drawn so far, shown */

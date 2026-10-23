@@ -18,6 +18,11 @@ int metal_device_attach(SDL_Window *window)
 	return host_metal_attach((unsigned int)(uintptr_t)window);
 }
 
+void metal_device_map(const char *scenario)
+{
+	host_metal_map(scenario);
+}
+
 void metal_device_set_vsync(int vsync)
 {
 	host_metal_set_vsync(vsync);
