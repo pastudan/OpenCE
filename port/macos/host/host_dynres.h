@@ -38,15 +38,14 @@ extern const double host_dynres_steps[HOST_DYNRES_STEPS];
 where they are times) */
 struct host_dynres_parameters
 {
-	/* a frame's GPU time past this share of the interval is late for the
-	GPU's sake; the model aims a step down at target_share; a step up is
-	tried only while the 90th percentile is at most clear_share */
-	double hot_share, target_share, clear_share;
+	/* a frame's GPU time past this share of the interval is "hot" (at the
+	fastest clock, or nearly); the model aims a step down at target_share */
+	double hot_share, target_share;
 	/* the share of a frame's GPU time that does not shrink with the pixels */
 	double fixed_share;
-	/* hot frames of the last 8 that step down; frames at a step before a
-	step down can happen; frames in a row clear before a step up is tried */
-	uint32_t hot_frames, down_frames, up_frames;
+	/* frames at a step before a step down can happen; frames in a row
+	clear before a step up is tried */
+	uint32_t down_frames, up_frames;
 	/* after a step up, the frames that decide whether it holds */
 	uint32_t probe_frames;
 	/* the wait after a step down before a step up (ms), the most it

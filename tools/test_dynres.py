@@ -50,7 +50,9 @@ static struct run simulate(double fixed_ms, double pixel_ms, double minutes, dou
 		if (spike_every_s > 0 && serial % (uint64_t)(spike_every_s * 60.0) == 0)
 			cost += spike_ms;
 		late = cost > SLOT / 1e6;
-		busy = late ? cost : SLOT / 1e6 * 0.88 * (1.0 + 0.02 * noise());
+		/* (with room, the clock fills ~88% of the interval, and 6% of the
+		frames come out past 97%: the device's noise, PERFORMANCE.md) */
+		busy = late ? cost : SLOT / 1e6 * (noise() > 0.44 ? 0.975 : 0.88 * (1.0 + 0.02 * noise()));
 		now += late ? (uint64_t)(2 * SLOT) : (uint64_t)SLOT;
 		shown = now;
 		host_dynres_frame_done(serial, f);
@@ -106,7 +108,8 @@ int main(void)
 	host_dynres_configure(1, 1440.0, 1080.0);
 	assert(fabs(host_dynres_frame_fraction(10, 1, 2, (uint64_t)SLOT, 1, 2160.0, 2160.0) - 1872.0 / 2160.0) < 1e-9);
 
-	/* a light scene (cryo: 13.5 ms at 2160): stays at 2160 */
+	/* a light scene (cryo: 13.5 ms at 2160) with the device's 5% hot noise:
+	stays at 2160 */
 	r = simulate(3.0, 10.5, 3.0, 0.0, 1, 0, 0);
 	print("light", r);
 	assert(r.least_fraction == 1.0 && r.late == 0);
@@ -158,7 +161,7 @@ int main(void)
 
 			now += is_late ? (uint64_t)(2 * SLOT) : (uint64_t)SLOT;
 			host_dynres_frame_done(serial, f);
-			host_dynres_gpu(serial, (uint64_t)((is_late ? cost : SLOT / 1e6 * 0.88) * 1e6));
+			host_dynres_gpu(serial, (uint64_t)((is_late ? cost : SLOT / 1e6 * (noise() > 0.44 ? 0.975 : 0.88)) * 1e6));
 			host_dynres_shown(serial, now);
 			late += is_late;
 			late_run = is_late ? late_run + 1 : 0;
