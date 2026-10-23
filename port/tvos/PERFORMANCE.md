@@ -2548,3 +2548,113 @@ override and the render work an `os_workgroup` (the audio/Metal frame
 interval workgroup API) so the scheduler keeps it on performance cores,
 and tvOS's Game Mode (`GCSupportsGameMode` in Info.plist) where the TV
 honours it.
+
+## Shadows (A12)
+
+### What "shadows" is
+
+One technique, per object (`rasterizer_xbox_shadows.c`, `render_objects.c`):
+each shadow-casting object is drawn from its light into a 128x128 R5G6B5
+map (a BGRA8 128x128 Metal texture here), the map is blurred into a second
+128x128 target, and the shadow is *applied* by drawing again every level
+(BSP) triangle inside the object's shadow volume, onto the 4K screen, with
+a multiply blend (`dst *= 1 - a * map * (1 - shadow colour)`), depth EQUAL,
+stencil reject. There is no full-screen pass and no static-shadow cache to
+add (every shadow follows a moving object; the map is redrawn because the
+object or its light moved).
+
+A12 split per phase (the bandwidth session's pass-split log, 3840x2160,
+fragment ms a frame; the split's 4K load+store, ~0.5 ms a phase pass, is
+in the apply's figure):
+
+| scene | shadow-map passes (draw + clear) | blur passes | screen apply | apply draws/frame |
+|---|---|---|---|---|
+| bridge | 0.04 | 0.03 | 2.67 | 17 |
+| b30 | 0.06 | 0.04 | 3.45 | 6 |
+| cryo | 0.06 | 0.04 | 2.86 | 34 |
+
+So the maps cost nothing worth saving (they are tiny, cleared once, hoisted
+out of the screen pass, and already only read by the apply): no load/store,
+format or memoryless change can win anything there. All of the cost is the
+apply: shading and blending the whole of each level triangle under a
+shadow, on a 4K screen, when the shadow covers a small part of it.
+
+### Change: clip the apply to where it can change a pixel (default on)
+
+`2e1c4813`. The apply leaves a pixel *exactly* as it was wherever the map
+(border colour 0) is 0 or the light-axis fade is 1, i.e. outside the box
+forward/left in [-r, r] (plus 4 map texels), up in [-0.5r, 4r] around the
+object. That fade (`linear_corner_fade`) was read from the map: a 16x16
+`max(s, t) * 0x11` ramp, 1 for `d >= 3.875r` and `d <= -0.484r` along the
+light axis, inside the volume's own planes. `rasterizer_shadow_screen_bounds`
+projects the box, cut at the near plane, with the frustum's own world to
+clip transform; `halo_draw_bounds` gives the rectangle (plus 2 units of
+slack) to the Metal device, which intersects the draws' scissors with it.
+No clip when the box cannot be bounded on screen, in `rasterizer_shadows_debug`,
+or on the GL renderer. `HALO_SHADOW_BOUNDS=0` turns it off;
+`toggle:N` alternates in N-frame blocks (diagnostic). `HALO_GPU_STATS=1`
+logs the clipped draws' scissor area before and after.
+
+Byte-identical (Mac M4, 3840x2160, game time frozen with `game_speed 0`
+14 s in, a shot every 60 frames with `HALO_SHADOW_BOUNDS=toggle:60`, so
+consecutive shots alternate clip on/off): **every pair after the freeze
+settles is identical (max diff 0)**: bridge 26/26, b30 26/26, cryo 26/26
+(the one differing pair in bridge and b30 straddles the freeze itself, as
+it does with the hoist toggle). b30 split screen (two viewports, no bot,
+frozen 100 s in, toggle:240, a shot every 240 frames): 24/24 identical
+after the freeze settled.
+
+Second step (`8f7b0f3c`, the same switch): the screen rectangle
+bounds the whole box, which for close shadows (the player's own, the
+marines beside him: a box 4.5 r long, often around the camera) is most of
+the view. So the game also hands the box itself (`halo_draw_bounds_box`,
+its 6 planes), and the device cuts each apply draw's triangles (positions
+read from the level's vertex buffer, as the GPU will) to the box and the
+near plane, projects them with the shadow's own world-to-clip constants
+(c[-96..-93]) and narrows that draw's scissor to what is left, plus
+half a game unit and 2 pixels of slack. A draw with nothing left in the
+box is skipped. Same argument: a pixel only changes inside the box.
+
+Re-checked after the second step, same method: bridge 26/26, b30 26/26,
+cryo 25/25 identical after the freeze; b30 split (frozen, no bot,
+toggle:240) 24/24.
+
+Scissor area the apply's draws cover (Mac, frozen, `HALO_GPU_STATS=1`):
+
+| scene | apply draws/frame | full viewport | box rectangle | each draw cut to the box | draws skipped |
+|---|---|---|---|---|---|
+| bridge | 7 | 58.1 Mpx | 58.1 Mpx | 3.5 Mpx (-94%) | 5 |
+| b30 | 6 | 49.8 Mpx | 41.6 Mpx | 6.7 Mpx (-87%) | 3 |
+| cryo | 34 | 282 Mpx | 116 Mpx | 4.4 Mpx (-98%) | 18 |
+| b30 split (frozen view) | 10 | 41.5 Mpx | 41.5 Mpx | 8.4 Mpx (-80%) | 6 |
+
+The scissor is a bound, not the shaded area: fragments are shaded only
+where the triangles are and the depth/stencil tests pass. Mac (M4,
+pass per phase, the on/off blocks of one frozen toggle:60 run), shadow
+phase fragment ms a frame (includes the split's 4K load+store):
+
+| scene | clip off | clip on |
+|---|---|---|
+| bridge | 1.11 | 0.65 (-42%) |
+| b30 | 0.94 | 0.72 (-23%) |
+| cryo | 1.13 | 0.73 (-35%) |
+
+CPU cost: a few hundred triangles a frame clipped on the guest (the apply
+draws are small index ranges); not visible in the Mac's frame times.
+
+A12 before/after: **not measured yet** (see "What remains").
+
+### Not done, and why
+
+- **Map formats, clears, stores, memoryless**: the maps total < 0.1 ms.
+- **Skipping zero-pixel shadows**: done by the second step (a draw with
+  nothing in the box, or an empty scissor, is not sent).
+- **Static shadow cache**: nothing static to cache (the game draws shadows
+  only for objects, and redraws when they or their light move).
+- **Per-triangle stencil/scissor beyond a rectangle per draw**: a draw's
+  rectangle still contains its triangles' parts outside the box's
+  silhouette; finer cuts would need geometry changes (no visual risk, but
+  more CPU), not attempted.
+- **Opt-in lower shadow resolution / no blur**: the maps are not where the
+  time goes; the apply's cost is per screen pixel, so a smaller map would
+  not reduce it.
