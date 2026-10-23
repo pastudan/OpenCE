@@ -2350,10 +2350,14 @@ Two records of the shaders and pipelines the game has made
 Nothing is compiled at launch. When a map begins to load (host_metal_map,
 the guest's game_load) its shaders, of both, are compiled on other threads,
 HALO_METAL_SHADER_PREPARE_JOBS (default 4) at a time, and then its
-pipelines; HALO_METAL_SHADER_PREPARE_NEXT seconds into the map (default 120,
-0 never) the next map's, in the pack's order, are compiled at a low
-priority and dropped, which leaves them in the system's caches for when it
-loads. (The records of a build before the maps were recorded, no map's,
+pipelines; HALO_METAL_SHADER_PREPARE_REST seconds after that (default 5, a
+negative number never) every other shader the records have (the other maps'
+sets: a map's draws sometimes use one only another map's visit recorded) is
+compiled at a low priority, two at a time, and kept for the draws, which
+for the whole campaign is about 260 shaders; HALO_METAL_SHADER_PREPARE_NEXT
+seconds into the map (default 120, 0 never) the next map's pipelines, in
+the pack's order, are made at a low priority and dropped, which leaves them
+in the system's caches for when it loads. (The records of a build before the maps were recorded, no map's,
 are compiled when the cache starts, as before.)
 
 A draw's shader whose text is exactly a prepared one's (the same source,
@@ -2473,8 +2477,9 @@ static struct
 	/* each vertex layout handle's layout */
 	NSMutableDictionary<NSNumber *, NSData *> *layouts;
 	/* the current map's draws' shaders: prepared, the draw's own compile of
-	one queued, in no record (for the log) */
-	uint32_t found, claimed, missed;
+	one queued, in no record, and a text compiled before (a second handle of
+	the same source: the system's cache has it) (for the log) */
+	uint32_t found, claimed, missed, again;
 } shader_cache;
 
 static struct
@@ -2498,7 +2503,7 @@ static struct
 	dispatch_queue_t queue, next_queue;
 	_Atomic uint32_t generation;
 	int jobs;
-	double next_seconds;
+	double next_seconds, rest_seconds;
 	/* the map host_metal_map gave before the cache started */
 	NSString *pending_map;
 } prepared;
@@ -2638,6 +2643,7 @@ static id<MTLFunction> prepared_take(NSString *text, int fragment, PreparedShade
 	PreparedShader *shader;
 	id<MTLFunction> function = nil;
 	NSString *key;
+	BOOL seen;
 
 	*claimed = nil;
 	if (!prepared.condition)
@@ -2660,12 +2666,15 @@ static id<MTLFunction> prepared_take(NSString *text, int fragment, PreparedShade
 		compiles its own, as before) */
 		[prepared.by_text removeObjectForKey:key];
 	}
+	seen = !shader && [prepared.compiled containsObject:key];
 	[prepared.compiled addObject:key];
 	[prepared.condition unlock];
 	if (function)
 		shader_cache.found++;
 	else if (*claimed)
 		shader_cache.claimed++;
+	else if (seen)
+		shader_cache.again++;
 	else
 		shader_cache.missed++;
 	return function;
@@ -2728,6 +2737,7 @@ static BOOL prepared_current(uint32_t generation)
 }
 
 static void prepare_next_schedule(NSString *name, uint32_t generation);
+static void prepare_rest_schedule(uint32_t generation);
 
 /* a map's set compiled (the prepare queue's): its shaders, kept for the
 draws, then its pipelines, dropped; the previous map's that no draw took
@@ -2867,7 +2877,95 @@ static void prepare_map(NSString *name, uint32_t generation)
 		atomic_load(&failed_pipelines), prepared.jobs, prepared_current(generation) ? "" : " (cut short: another map)");
 	(void)pipelines_tried;
 	if (prepared_current(generation) && name.length)
+	{
+		prepare_rest_schedule(generation);
 		prepare_next_schedule(name, generation);
+	}
+}
+
+/* every library shader no map loading has queued, compiled at a low
+priority, a few at a time, and kept for the draws as a map's are (the next
+queue's). Ends as soon as a map begins to load */
+static void prepare_rest(uint32_t generation)
+{
+	__block NSArray<PreparedShader *> *shaders = nil;
+	NSMutableArray<PreparedShader *> *todo = [NSMutableArray array];
+	id<MTLDevice> device = metal.device;
+	MTLCompileOptions *options = compile_options();
+	dispatch_semaphore_t slots = dispatch_semaphore_create(2);
+	dispatch_group_t group = dispatch_group_create();
+	__block _Atomic uint32_t compiled = 0;
+	uint64_t started = SDL_GetTicksNS();
+
+	dispatch_sync(prepared.queue, ^
+	{
+		shaders = [prepared.shaders copy];
+	});
+	for (PreparedShader *shader in shaders)
+	{
+		NSString *text, *key;
+
+		if (!prepared_current(generation))
+			return;
+		if (!(text = prepared_text(shader)))
+			continue;
+		key = prepared_key(text, shader.fragment);
+		[prepared.condition lock];
+		if (shader.state == _prepared_idle && ![prepared.compiled containsObject:key] && !prepared.by_text[key])
+		{
+			prepared.by_text[key] = shader;
+			shader.state = _prepared_queued;
+			[todo addObject:shader];
+		}
+		[prepared.condition unlock];
+	}
+	for (PreparedShader *shader in todo)
+	{
+		dispatch_semaphore_wait(slots, DISPATCH_TIME_FOREVER);
+		[prepared.condition lock];
+		if (shader.state != _prepared_queued || !prepared_current(generation))
+		{
+			[prepared.condition unlock];
+			dispatch_semaphore_signal(slots);
+			continue;
+		}
+		shader.state = _prepared_compiling;
+		[prepared.condition unlock];
+		dispatch_group_enter(group);
+		[device newLibraryWithSource:shader.text options:options
+			completionHandler:^(id<MTLLibrary> library, NSError *error)
+		{
+			id<MTLFunction> function = [library newFunctionWithName:shader_entry_point(shader.fragment)];
+
+			(void)error;
+			[prepared.condition lock];
+			shader.function = function;
+			shader.state = function ? _prepared_done : _prepared_taken;
+			[prepared.condition broadcast];
+			[prepared.condition unlock];
+			if (function)
+				atomic_fetch_add(&compiled, 1);
+			dispatch_semaphore_signal(slots);
+			dispatch_group_leave(group);
+		}];
+	}
+	dispatch_group_wait(group, DISPATCH_TIME_FOREVER);
+	if (todo.count)
+		host_log("Metal: shader cache: the other maps' %u of %lu shaders compiled in %.0f ms at a low priority%s",
+			atomic_load(&compiled), (unsigned long)todo.count, (SDL_GetTicksNS() - started) / 1e6,
+			prepared_current(generation) ? "" : " (cut short: another map)");
+}
+
+static void prepare_rest_schedule(uint32_t generation)
+{
+	if (prepared.rest_seconds < 0)
+		return;
+	dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(prepared.rest_seconds * NSEC_PER_SEC)),
+		prepared.next_queue, ^
+	{
+		if (prepared_current(generation))
+			prepare_rest(generation);
+	});
 }
 
 /* the next map's set (the pack's order) compiled at a low priority, one at
@@ -2993,10 +3091,11 @@ static void shader_cache_coverage_log(void)
 
 	if (!total || !prepared.condition)
 		return;
-	host_log("Metal: shader cache: map %s: of the %u shaders its draws compiled, %u were prepared, %u queued but "
-		"compiled by the draw first, %u in no record", shader_cache.map ? shader_cache.map.UTF8String : "(none)",
-		total, shader_cache.found, shader_cache.claimed, shader_cache.missed);
-	shader_cache.found = shader_cache.claimed = shader_cache.missed = 0;
+	host_log("Metal: shader cache: map %s: of the %u new shader texts its draws compiled, %u were prepared, %u "
+		"queued but compiled by the draw first, %u in no record (and %u texts again, for another handle)",
+		shader_cache.map ? shader_cache.map.UTF8String : "(none)", total, shader_cache.found, shader_cache.claimed,
+		shader_cache.missed, shader_cache.again);
+	shader_cache.found = shader_cache.claimed = shader_cache.missed = shader_cache.again = 0;
 }
 
 /* the pack: the bundle's, or HALO_METAL_SHADER_PACK's; NULL for none */
@@ -3037,6 +3136,8 @@ static void shader_cache_start(void)
 	prepared.compiled = [NSMutableSet set];
 	prepared.jobs = jobs && atoi(jobs) > 0 ? MIN(atoi(jobs), 16) : 4;
 	prepared.next_seconds = next && *next ? atof(next) : 120.0;
+	prepared.rest_seconds = getenv("HALO_METAL_SHADER_PREPARE_REST") && *getenv("HALO_METAL_SHADER_PREPARE_REST") ?
+		atof(getenv("HALO_METAL_SHADER_PREPARE_REST")) : 5.0;
 	prepared.queue = dispatch_queue_create("opence.shader-prepare",
 		dispatch_queue_attr_make_with_qos_class(DISPATCH_QUEUE_SERIAL, QOS_CLASS_USER_INITIATED, 0));
 	prepared.next_queue = dispatch_queue_create("opence.shader-prepare-next",

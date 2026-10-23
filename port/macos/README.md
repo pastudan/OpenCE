@@ -132,6 +132,7 @@ Without the secrets it uploads the app signed ad hoc, as before.
 | `HALO_METAL_SHADER_CACHE` | The shader cache's record: a file name in the app's caches, a path, or `0` for none (default `metal_shaders.manifest`); `HALO_METAL_SHADER_CACHE_RESET=1` empties it first |
 | `HALO_METAL_SHADER_PACK` | The bundled shader pack to read instead of the bundle's `metal_shaders.pack` (`tools/shader_pack.py`), or `0` for none |
 | `HALO_METAL_SHADER_PREPARE_JOBS` | Shaders a map's preparation compiles at once at its load (default 4) |
+| `HALO_METAL_SHADER_PREPARE_REST` | Seconds after a map's own shaders are prepared before every other recorded shader is compiled at a low priority and kept (default 5, negative never) |
 | `HALO_METAL_SHADER_PREPARE_NEXT` | Seconds into a map before the next map's shaders are compiled ahead at a low priority (default 120, `0` never) |
 | `HALO_METAL_TEXTURE_SHARED=1` | the converted DXT textures in shared memory, written by the CPU, instead of the GPU's own (which it may compress losslessly) |
 | `HALO_TELEMETRY=on` | the play telemetry (`host_telemetry.h`; on by default only on the TV): `HALO_TELEMETRY_DIR`, `HALO_TELEMETRY_HITCH_MS` (50), `HALO_TELEMETRY_KEEP` (40 sessions), `HALO_TELEMETRY_MAX_MB` (200) |
