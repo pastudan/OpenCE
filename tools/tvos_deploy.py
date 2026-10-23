@@ -58,12 +58,19 @@ import sys
 import time
 
 ROOT = Path(__file__).resolve().parent.parent
-SCRATCH = Path(os.environ.get("OPENCE_TV_SCRATCH", "/var/folders/15/6xlrw1ln4w90d9z8q732vyy00000gn/T/bridge/halo-e6af79dd"))
-LOCK = SCRATCH / "tv-perf.lock"
-DEVICE = "443953B8-9072-5EAD-A947-95563A1C3D52"  # Apple TV 4K (2nd gen), A12: CoreDevice identifier
-BUNDLE = "com.pastudan.opence.tv"
-IDENTITY = "0DE31AA707B2320C376624A7D5A10C968F432235"  # Apple Development (team 426324Q3LG), by SHA-1
-PROFILE = SCRATCH / "tvos-provision-xcode/Debug-appletvos/TVDevelopmentProvision.app/embedded.mobileprovision"
+# (the defaults are the bench Mac mini's; another Mac sets OPENCE_TV_* or the
+# flags. Without OPENCE_TV_SCRATCH, a Mac without the mini's folder uses
+# $TMPDIR/opence-tv)
+MINI_SCRATCH = Path("/var/folders/15/6xlrw1ln4w90d9z8q732vyy00000gn/T/bridge/halo-e6af79dd")
+SCRATCH = Path(os.environ.get("OPENCE_TV_SCRATCH") or (
+    MINI_SCRATCH if MINI_SCRATCH.is_dir() else Path(os.environ.get("TMPDIR", "/tmp")) / "opence-tv"))
+LOCK = Path(os.environ.get("OPENCE_TV_LOCK") or SCRATCH / "tv-perf.lock")
+DEVICE = os.environ.get("OPENCE_TV_DEVICE") or "443953B8-9072-5EAD-A947-95563A1C3D52"  # A12 TV: CoreDevice id
+BUNDLE = os.environ.get("OPENCE_TV_BUNDLE") or "com.pastudan.opence.tv"
+# Apple Development (team 426324Q3LG), by SHA-1
+IDENTITY = os.environ.get("OPENCE_TV_IDENTITY") or "0DE31AA707B2320C376624A7D5A10C968F432235"
+PROFILE = Path(os.environ.get("OPENCE_TV_PROFILE") or
+               SCRATCH / "tvos-provision-xcode/Debug-appletvos/TVDevelopmentProvision.app/embedded.mobileprovision")
 ENTITLEMENTS = ROOT / "port/tvos/game-development.entitlements"
 APP = ROOT / "build/tvos/device/OpenCETV.app"
 SIGNED = SCRATCH / "tv-deploy" / "OpenCETV.app"
@@ -311,7 +318,40 @@ def check_signing_inputs(profile=PROFILE, entitlements=ENTITLEMENTS, identity=ID
     return problems
 
 
-def sign(app=APP, output=SIGNED, profile=PROFILE, entitlements=ENTITLEMENTS, identity=IDENTITY):
+def profile_plist(profile):
+    """a provisioning profile's contents (it is a signed plist)"""
+    import plistlib
+    decoded = subprocess.run(["security", "cms", "-D", "-i", str(profile)], capture_output=True, check=True).stdout
+    return plistlib.loads(decoded)
+
+
+def profile_identity(profile):
+    """the SHA-1 of the profile's first development certificate that is in
+    this Mac's keychain as a signing identity (only hashes are compared)"""
+    import hashlib
+    found = subprocess.run(["security", "find-identity", "-v", "-p", "codesigning"], capture_output=True,
+                           text=True).stdout
+    for certificate in profile_plist(profile).get("DeveloperCertificates", []):
+        digest = hashlib.sha1(certificate).hexdigest().upper()
+        if digest in found:
+            return digest
+    raise DeployError(f"no signing identity in this Mac's keychain matches a certificate of {profile}")
+
+
+def entitlements_for(team, bundle):
+    """the development entitlements (as port/tvos/game-development.entitlements)
+    for another team and bundle identifier"""
+    import plistlib
+    return plistlib.dumps({"application-identifier": f"{team}.{bundle}",
+                           "com.apple.developer.team-identifier": team, "get-task-allow": True})
+
+
+def sign(app=APP, output=SIGNED, profile=PROFILE, entitlements=ENTITLEMENTS, identity=IDENTITY, bundle=None):
+    """bundle: when not the app's own, the copy's CFBundleIdentifier is
+    rewritten and the entitlements made for the profile's team and it (for a
+    profile of another team, e.g. a personal team)"""
+    if identity == "auto" and Path(profile).is_file():
+        identity = profile_identity(profile)
     problems = check_signing_inputs(profile, entitlements, identity)
     if problems:
         raise DeployError("cannot sign:\n" + "\n".join(problems))
@@ -323,6 +363,11 @@ def sign(app=APP, output=SIGNED, profile=PROFILE, entitlements=ENTITLEMENTS, ide
     output.parent.mkdir(parents=True, exist_ok=True)
     run(["ditto", app, output])
     shutil.copyfile(profile, output / "embedded.mobileprovision")
+    if bundle and bundle != "com.pastudan.opence.tv":
+        team = profile_plist(profile)["TeamIdentifier"][0]
+        run(["plutil", "-replace", "CFBundleIdentifier", "-string", bundle, output / "Info.plist"])
+        entitlements = output.parent / f"{team}.{bundle}.entitlements"
+        entitlements.write_bytes(entitlements_for(team, bundle))
     run(["codesign", "--force", "--sign", identity, "--entitlements", entitlements, "--generate-entitlement-der",
          "--timestamp=none", output])
     run(["codesign", "--verify", "--strict", output])
@@ -345,7 +390,7 @@ def command_build(args):
 
 
 def command_sign(args):
-    sign(Path(args.app), Path(args.output), Path(args.profile), Path(args.entitlements))
+    sign(Path(args.app), Path(args.output), Path(args.profile), Path(args.entitlements), args.identity, BUNDLE)
 
 
 def command_install(args):
@@ -548,6 +593,8 @@ def main(argv=None):
     p.add_argument("--output", default=SIGNED)
     p.add_argument("--profile", default=PROFILE)
     p.add_argument("--entitlements", default=ENTITLEMENTS)
+    p.add_argument("--identity", default=IDENTITY,
+                   help="signing identity's SHA-1, or 'auto': the keychain's identity for the profile's certificate")
     p.set_defaults(handler=command_sign)
 
     p = sub.add_parser("install")
