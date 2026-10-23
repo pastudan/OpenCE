@@ -377,7 +377,8 @@ void host_frame_log_start(void)
 			telemetry_only_start();
 		return;
 	}
-	host_frame_log_level = !strcmp(setting, "summary") ? 1 : 2;
+	/* (the telemetry needs the breakdown: summary is the whole of it then) */
+	host_frame_log_level = !strcmp(setting, "summary") && !host_telemetry_wanted() ? 1 : 2;
 	value = getenv("HALO_FRAME_LOG_FRAMES");
 	capacity = value && atoi(value) > 0 ? (uint32_t)atoi(value) : 36000;
 	value = getenv("HALO_FRAME_LOG_INTERVAL");
