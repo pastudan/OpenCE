@@ -55,7 +55,8 @@ static struct run simulate(double fixed_ms, double pixel_ms, double minutes, dou
 		busy = late ? cost : SLOT / 1e6 * (noise() > 0.44 ? 0.975 : 0.88 * (1.0 + 0.02 * noise()));
 		now += late ? (uint64_t)(2 * SLOT) : (uint64_t)SLOT;
 		shown = now;
-		host_dynres_frame_done(serial, f);
+		/* (as the guest gives it back: a float) */
+		host_dynres_frame_done(serial, (float)f);
 		host_dynres_gpu(serial, (uint64_t)(busy * 1e6));
 		host_dynres_shown(serial, shown);
 		r.frames++;
@@ -122,8 +123,10 @@ int main(void)
 	assert(r.least_fraction >= 1440.0 / 2160.0 - 1e-9);
 	assert(r.mean_fraction > 1600.0 / 2160.0);
 	/* no shimmer: a handful of changes in five minutes (failed tries back
-	off: 4, 8, 16 ... s) */
-	assert(r.changes < 40);
+	off: 8, 16, 32 ... s); and it keeps measuring at the steps it reaches
+	(a step's fraction comes back as a float: the controller once stopped
+	counting frames after its first step, and never moved again) */
+	assert(r.changes < 40 && r.changes > 4);
 
 	/* b30 heating up 15% over 25 minutes: still no run of late frames, and
 	the fraction follows the heat down */
@@ -160,7 +163,7 @@ int main(void)
 			int is_late = cost > SLOT / 1e6;
 
 			now += is_late ? (uint64_t)(2 * SLOT) : (uint64_t)SLOT;
-			host_dynres_frame_done(serial, f);
+			host_dynres_frame_done(serial, (float)f);
 			host_dynres_gpu(serial, (uint64_t)((is_late ? cost : SLOT / 1e6 * (noise() > 0.44 ? 0.975 : 0.88)) * 1e6));
 			host_dynres_shown(serial, now);
 			late += is_late;

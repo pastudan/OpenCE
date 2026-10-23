@@ -405,8 +405,10 @@ double host_dynres_frame_fraction(uint64_t serial, int views, int thermal, uint6
 			late = dynres.previous_shown && (double)(shown - dynres.previous_shown) / 1e6 >= LATE_SLOTS * slot_ms;
 			dynres.previous_shown = shown;
 		}
+		/* (the fraction comes back from the guest as a float: a step's
+		within float's precision is the step) */
 		if (dynres.frame_serial[slot] == read && dynres.fraction_of[slot] >= 0.0 &&
-			fabs(dynres.fraction_of[slot] - host_dynres_steps[dynres.step]) < 1e-9)
+			fabs(dynres.fraction_of[slot] - host_dynres_steps[dynres.step]) < 1e-5)
 		{
 			frame_counted(gpu_ms, late, slot_ms, lowest, highest, thermal, now_ns);
 		}
