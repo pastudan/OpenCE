@@ -205,6 +205,21 @@ simulator measurements. Duplicate target snapshots within a draw have been
 reduced; the fog's appearance is unchanged. These changes are not yet
 installed over the owner's running TV session.
 
+## Play telemetry
+
+The TV build records its own performance while it is played
+(`port/macos/host/host_telemetry.h`): a JSON line a second (where the
+players are, fps and frame-time percentiles, display slots missed, guest,
+host and GPU ms, per-view draws, texture conversions, bytes streamed, memory
+footprint, thermal state) and one for each frame over 50 ms, in
+`Library/Caches/OpenCE/telemetry/` (the newest 40 sessions, at most 200 MB).
+`debug.telemetry = "off"` in config.toml turns it off. On the Mac:
+
+    python3 tools/tv_telemetry.py pull      # new sessions into ~/code/halo/tv-telemetry/
+    python3 tools/tv_telemetry.py report --last 1 --out report.md
+
+PERFORMANCE.md's "Play telemetry" has what it records and costs.
+
 ## Remaining gates
 
 - Native WebRTC-only interoperability with the existing WebTorrent seeder,

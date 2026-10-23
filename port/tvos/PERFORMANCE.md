@@ -1043,3 +1043,163 @@ order exact, then exact with `HALO_METAL_TEXTURE_SHARED=1`, then guest
     matters on the TV (an app-memory limit or jetsam).
   - No on-disk transcode cache: `exact` is fast enough, and caching `astc`
     would only win back ~0.25 s per load.
+
+# Play telemetry (tv/telemetry)
+
+The fixed scenes above are 35-80 s; the owner's late-a10 lag ("builds up,
+smooth a while, lags again; quiet downtime, not fights; never early in the
+level; like a buffer filling and being freed") came after ~20+ minutes, in
+**two-player split-screen co-op**. The TV build now records itself while it
+is played (`port/macos/host/host_telemetry.h`), and `tools/tv_telemetry.py`
+pulls and reports it.
+
+## What is recorded
+
+On by default in the TV build (`debug.telemetry = "auto"`; `"off"` in
+config.toml or `HALO_TELEMETRY=off` turns it off; a Mac records only with
+`"on"`). JSON lines in `Library/Caches/OpenCE/telemetry/<UTC start>-<pid>.jsonl`
+in the app's container, the newest 40 sessions and at most 200 MB kept
+(rotated at each start), 64 MB a session at most; ~1.7 KB a second, so a
+2-hour session is ~12 MB.
+
+- **A second** (`"k":"s"`): wall and game time; map, BSP, local players,
+  player views drawn (1 in a cinematic), each view's camera position;
+  frames, fps, wall p50/p95/max, frames over 16.7/33.3/50 ms, **display
+  slots missed** (a frame of n refresh intervals missed n-1); guest ms and
+  host ms (mean, p95), **GPU command-buffer ms p50/p95/max** (read a second
+  late from the frame log's ring: no GPU wait), the GPU span p95, hoisted
+  passes' ms; compile ms, drawable / in-flight / readback waits, sleeps;
+  draws, passes, copies, shadow / fog / transparent draws, and the same **per
+  view** (player 1-4, other) with each view's main-thread ms; textures
+  uploaded (count, MB), DXT-converted on the host (count, MB, ms), dropped;
+  bytes streamed through the frame's ring and ring overflows; the main
+  thread's file reads and writes (count, MB, ms) and shader manifest writes
+  (count, KB, ms); `phys_footprint`, `os_proc_available_memory`, Metal's
+  `currentAllocatedSize`; `NSProcessInfo.thermalState`; whether the app is
+  active; **the render size, the drawable's and their scale** (for dynamic
+  resolution); the recorder's own main-thread and writer ms.
+- **A hitch** (`"k":"hitch"`, a frame over 50 ms): its whole breakdown, the
+  above counts for that one frame, and the last event in it (a map or saved
+  state opened, the views changing, the app's activity).
+- **Events**: map and saved-state opens, views 1 <-> 2, active/inactive,
+  thermal state changes. **End**: totals at a clean exit (tvOS rarely gives
+  one: the file is complete without it).
+
+It runs on the frame log's breakdown (level 2, a 1024-frame ring, no CSV).
+The writer is a serial utility-QoS dispatch queue: the main thread formats
+a second's lines into a buffer and hands it over once a second; `fwrite` +
+`fflush`, never `fsync`.
+
+## Cost (measured)
+
+| where | telemetry off | on |
+|---|---|---|
+| A12, bridge state, 4K, 75 s x2 (frames / p50 / p95 / >33 ms) | 4189, 4285 / 16.69, 16.68 / 17.05, 17.03 / 152, 147 | 4287, 4268 / 16.68, 16.68 / 17.02, 17.07 / 147, 162 |
+| A12, its own clock | - | 0.17 ms a second on the main thread (max 0.44), 0.27 ms a second on the writer |
+| Mac M4, bridge, 720p vsync off, 40 s x2 | 120.0 fps | 120.0 fps; 0.10 ms/s main, 0.06 ms/s writer |
+| Mac M4, process CPU, 40 s x3 | 9.31 s | 9.19 s (noise) |
+
+0.17 ms a second is 0.017% of the main thread: within the runs' noise in
+every measure. It stays on by default.
+
+## Getting the data
+
+    export DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer
+    python3 tools/tv_telemetry.py pull                   # ~/code/halo/tv-telemetry/443953B8/
+    python3 tools/tv_telemetry.py report --last 1 --out ~/code/halo/tv-telemetry/report.md
+
+`pull` lists the TV's telemetry folder and copies only new or grown files
+(`devicectl device copy from`, the app's container; nothing goes to the TV;
+the app need not run). Live mode exists but is off: `debug.telemetry_live =
+"<Mac IPv4>:47777"` in the TV's config.toml and `tools/tv_telemetry.py
+listen` on the Mac. It is plain UDP to a LAN address: tvOS asks for
+local-network permission the first time (Info.plist already has
+`NSLocalNetworkUsageDescription`, for network play); no entitlement is
+needed for that; not tried on the TV (the owner would see the prompt).
+
+## The report
+
+`report` gives a verdict (the metrics that are higher in seconds that
+missed >= 3 display slots than in seconds that missed none, with their
+correlation with the missed slots; the thermal state and its correlation
+with GPU ms and with the misses; the lag's period by autocorrelation; what
+the hitches were), time by map and players, split screen per view, by BSP,
+the worst 10-unit position squares, the hitches by cause and the worst ten,
+and per session: the lag's stretches (how long, how far apart, when the
+first began), trends (footprint, Metal allocations, GPU and guest ms, fps,
+per minute; footprint drops of over 20 MB; texture sweeps and their period),
+thermal state against GPU ms, and a minute-by-minute table.
+
+## First device session (A12, 4K, 2026-10-23)
+
+The split-screen bench scene (`tools/tvos_bench.py`'s `split`:
+`player_spawn_count 2` then `map_name levels\a10\a10`; no second controller,
+player 2 stands still) works: the opening cinematic is one view, then two
+views from ~234 s. Its 50 s window: wall p50 16.68, p95 16.85, max 17.1 ms,
+**GPU 15.1 ms mean (p95 15.6)**, guest 4.6 ms, host 3.0 ms; 0 frames over
+33 ms. Two views at the cryo bay start: 1020 draws a frame (510 each),
+7 passes (one 4K screen pass per frame: views share it, the hoisting
+holds), 25 shadow draws, 85 transparent draws, ~800 MB/s streamed through
+the ring. The single-view cinematic before it was slower (GPU 17.5 ms p50,
+179 missed slots a minute): the opening's fog. So two views at the bay are
+not over budget; the owner's lag was later in the level, with both players
+moving, and the next play session's telemetry is what answers it.
+
+The render target was 3840x2160 and the **drawable 1920x1080** on this TV
+in every run: the picture is drawn at 4K and scaled to a 1080p drawable at
+the present. The session line now records the screen's native size, scale
+and mode to tell whether the TV was in a 1080p output mode or the layer is
+1x (not yet known).
+
+## Code findings on the periodic-lag suspects
+
+1. **Shader manifest (host_shader_manifest.c): not it.** It appends one
+   record per new shader or pipeline with a single `write()` on the main
+   thread, no `fsync`, and never rewrites the file (only `ftruncate` at open
+   for a damaged tail or another build's file). Cost does not grow with the
+   file. The telemetry times every append (`manifest_ms`); on the device
+   they were all in the first seconds (with the compiles).
+2. **Texture sweep + DXT conversion: the strongest code suspect for a
+   sawtooth.** `xbox_textures.c`'s `xgpu_texture_cache_begin_frame` runs
+   every 600 frames (10 s at 60 fps) and deletes every host texture unused
+   for 1800 frames (30 s), and bumps `texture_drop_serial`, which empties
+   the `recent_textures` fast path for every texture. A texture that comes
+   back into view (walking back through an area, the second player looking
+   elsewhere) is made again: on the A12 (no BC) that is a synchronous
+   `host_metal_texture_bc` DXT conversion on the main thread
+   (dispatch_apply across cores, but the main thread waits), ~37 Mtexels/s
+   for ASTC. In quiet downtime fewer textures are drawn, so more age out;
+   with two players in two places, more come and go. Recorded now:
+   `tex_deletes` (the sweep's), `tex_converts`/`tex_convert_ms` per second
+   and per hitch. The report gives the sweep's period. If the next session
+   confirms it, the fix is a longer idle time or a byte budget instead of a
+   fixed 30 s (not changed here: no data yet, and it changes memory use).
+3. **The page-hash write watch** (`host_watch_hash.c`, the guest's
+   `web_memory_watch.c`): pages hashed unchanged 30 times are re-hashed
+   every 60 frames, all at once if they loaded together; freshly read pages
+   every frame for 30 frames. A periodic guest-time cost proportional to
+   the texture bytes drawn: shows as `guest_ms` p95 in the telemetry.
+4. **Ring overflow**: past 64 MB a frame the host makes a new 16 MB buffer
+   per overflow per frame. The device split scene streamed ~13 MB a frame
+   (800 MB/s): no overflows (`ring_overflows` 0). Recorded.
+5. **Memory**: footprint 878 -> 982 MB over the 5-minute split run (Metal
+   406 MB; ~1.2 GB available). Recorded per second; the report gives the
+   slope and any bulk drops.
+6. **Thermal**: thermalState stayed nominal in this ~12-minute session. The
+   earlier session's 12-15% drop over 25-30 min of full GPU load is the
+   thing to confirm: the report correlates thermal state with GPU ms.
+7. **Game caches** (source/cache): the texture cache is 256 MB of 16 KB
+   pages, LRU, flushed only at map change; the sound cache 16 MB, LRU,
+   decoded per packet. `lruv_block_new` walks the cache's block list on
+   every miss and `lruv_cache_verify` walks it again on every new block and
+   delete (asserts are on), so a miss costs more as the cache fills over a
+   level, a cost that grows with play time; it is guest time on a miss
+   (cluster changes: `predicted_resources_precache`), recorded as guest ms
+   and hitches. Object garbage collection (5-10% free, 50 -> 30 garbage
+   objects) is a sawtooth too, unmeasured.
+8. **Split-screen specifics**: per view, everything but mirrors and detail
+   objects is drawn again (shadows into the shadow target, water bump,
+   transparents, fog, lens flares, HUD); the second view's start does not
+   end the 4K screen pass (same targets: `host_metal_set_targets` returns
+   at once; the viewport clear is a quad), and small offscreen passes are
+   still parked and hoisted. Recorded per view.
