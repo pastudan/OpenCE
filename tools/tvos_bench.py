@@ -53,7 +53,11 @@ scene compiles). primed (--modes cold,warm,primed): a launch with a salt of
 its own again, so the system's caches miss, but with the host's shader cache
 as the cold launch left it: what a launch after a system or app update costs
 once the game has been played (the host compiles the recorded shaders on
-other threads from the start). The "steady" window of a run also leaves out its first
+other threads from the start). nopack (--modes cold,nopack): a cold launch
+with a salt of its own and without the app's bundled shader pack
+(HALO_METAL_SHADER_PACK=0), so that cold (with the pack, if the build has
+one) and nopack compare a first launch after an install with and without
+it. The "steady" window of a run also leaves out its first
 WARMUP_SECONDS (5 s) of the scene.
 
 Every result is labelled with its target: "A12 device", "tvOS simulator" or
@@ -102,6 +106,14 @@ SCENES = {
     # to start): ~60 s a run instead of ~285 s
     "cryo": {"init": ["map_name a10", "core_load_name_at_startup tvbench_cryo.bin"], "seconds": 70,
              "window_seconds": 50.0, "core": "tvbench_cryo.bin"},
+    # a level never visited (the bundled shader pack's case): a fresh launch
+    # into a30 or b40, its opening cinematic and first minutes as they play
+    # (no input: a30's and b40's open with a cinematic and the insertion),
+    # measured 60 s from the first frame drawn after the level's map opened
+    "a30": {"init": ["map_name levels\\a30\\a30"], "seconds": 80, "window_seconds": 60.0, "map": "a30.map",
+            "level": True},
+    "b40": {"init": ["map_name levels\\b40\\b40"], "seconds": 80, "window_seconds": 60.0, "map": "b40.map",
+            "level": True},
     # two-player split screen in a10, from a fresh launch (scene_window)
     "split": {"init": ["player_spawn_count 2", "map_name levels\\a10\\a10"], "seconds": 290,
               "window_seconds": 50.0},
@@ -176,7 +188,8 @@ SCENE_LABEL = {"opening": "a10 cutscene (partial)", "bridge": "a10 bridge (gamep
                "b30split": "b30 beach split screen (2 players)",
                "thermal": "b30 beach split screen, 30 min (thermal)",
                "b30long": "b30 split screen, bot player (15 min)",
-               "multimap": "a10, b30, b40, c10, b30 split screen (23 min)"}
+               "multimap": "a10, b30, b40, c10, b30 split screen (23 min)",
+               "a30": "a30 (a new level, fresh launch)", "b40": "b40 (a new level, fresh launch)"}
 FOG_START_DRAWS = 20
 FOG_SUSTAIN_SECONDS = 5.0
 SERIES = ("wall_ms", "gpu_ms", "guest_ms", "host_ms", "compile_ms", "wait_drawable_ms", "wait_inflight_ms",
@@ -267,6 +280,15 @@ def scene_window(scene, events, rows, window_seconds=None):
         start = split
         description = (f"{'b30' if scene in ('b30split', 'thermal') else 'a10'} split screen{' (latelag)' if scene == 'latelag' else ''}: "
                        f"{window_seconds:g} s from frame {rows[start]['serial']}")
+    elif SCENES[scene].get("level"):
+        level = SCENES[scene]["map"]
+        opened = [e for e in events if e["kind"] == "map-open" and e["detail"].lower() == level]
+        if not opened:
+            return [], f"{level} was never opened"
+        start = next((index for index, row in enumerate(rows) if row["serial"] > opened[-1]["serial"]), None)
+        if start is None:
+            return [], f"no frames after {level} was opened"
+        description = f"{scene} (a new level): {window_seconds:g} s from frame {rows[start]['serial']}"
     elif scene in ("bridge", "b30", "cryo"):
         core = SCENES[scene].get("core", CORE_NAME)
         loaded = [e for e in events if e["kind"] == "core-open" and e["detail"] == core]
@@ -418,7 +440,7 @@ def plan(scenes, resolutions, modes, repeats):
                 salt = uuid.uuid4().hex[:12]
                 for mode in modes:
                     runs.append({"scene": scene, "resolution": resolution, "mode": mode, "repeat": repeat,
-                                 "salt": salt + "p" if mode == "primed" else salt})
+                                 "salt": salt + "p" if mode == "primed" else salt + "n" if mode == "nopack" else salt})
     return runs
 
 
@@ -431,11 +453,15 @@ def run_environment(run, frame_log="1", extra=None):
     environment = {"HALO_FRAME_LOG": frame_log, "HALO_FRAME_LOG_INTERVAL": "0",
                    "HALO_RESOLUTION_SCALING": str(run["resolution"]), "HALO_METAL_SHADER_SALT": run["salt"],
                    "HALO_METAL_SHADER_CACHE": SHADER_CACHE,
-                   "HALO_METAL_SHADER_CACHE_RESET": "1" if run["mode"] == "cold" else "0",
+                   "HALO_METAL_SHADER_CACHE_RESET": "1" if run["mode"] in ("cold", "nopack") else "0",
                    "HALO_HIGH_RES_HUD": "true", "HALO_HIGH_RES_TEXT": "true",
                    # (the play telemetry, on by default on the TV, off in a
                    # benchmark's runs unless --env asks: host_telemetry.h)
                    "HALO_TELEMETRY": "off"}
+    # (nopack: a cold launch without the bundled shader pack, as a build
+    # before it had: tools/shader_pack.py)
+    if run["mode"] == "nopack":
+        environment["HALO_METAL_SHADER_PACK"] = "0"
     environment.update(SCENES.get(run["scene"], {}).get("env", {}))
     environment.update(extra or {})
     return environment

@@ -143,6 +143,23 @@ def test_cold_runs_empty_the_shader_cache_and_primed_runs_miss_the_system_cache(
     assert 'getenv("HALO_METAL_SHADER_CACHE_RESET")' in metal
 
 
+def test_new_level_scene_starts_after_its_map_opens():
+    frames = [(16.7 * (i + 1), 16.7, 5.0, 0, 0) for i in range(4000)]
+    events = [(10.0, 1, "map-open", "ui.map"), (20.0, 3, "map-open", "b40.map")]
+    window, description = bench.scene_window("b40", *bench.parse_frame_log(frame_log(frames, events)))
+    assert window[0]["serial"] == 4 and description.startswith("b40 (a new level): 60 s")
+    _, reason = bench.scene_window("a30", *bench.parse_frame_log(frame_log(frames, events)))
+    assert "a30.map was never opened" in reason
+
+
+def test_nopack_runs_are_cold_without_the_bundled_pack():
+    cold, nopack = bench.plan(["b30"], [2160], ["cold", "nopack"], 1)
+    assert cold["salt"] != nopack["salt"]
+    environments = [bench.run_environment(run) for run in (cold, nopack)]
+    assert [e["HALO_METAL_SHADER_CACHE_RESET"] for e in environments] == ["1", "1"]
+    assert "HALO_METAL_SHADER_PACK" not in environments[0] and environments[1]["HALO_METAL_SHADER_PACK"] == "0"
+
+
 def test_split_scene_starts_at_two_views_that_hold():
     frames = [(16.7 * (i + 1), 16.7, 5.0, 0, 0) for i in range(4000)]
     events = [(10.0, 1, "map-open", "a10.map"), (100.0, 5, "views", "2"), (150.0, 8, "views", "1"),
