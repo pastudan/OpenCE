@@ -1146,10 +1146,14 @@ not over budget; the owner's lag was later in the level, with both players
 moving, and the next play session's telemetry is what answers it.
 
 The render target was 3840x2160 and the **drawable 1920x1080** on this TV
-in every run: the picture is drawn at 4K and scaled to a 1080p drawable at
-the present. The session line now records the screen's native size, scale
-and mode to tell whether the TV was in a 1080p output mode or the layer is
-1x (not yet known).
+in every run. The session line (which records the screen) says why:
+`screen 1920x1080 points, native 1920x1080 at 1.0x, mode 1920x1080`: **the
+Apple TV's output was 1080p** during these runs (a 4K output mode would be
+native 3840x2160 at 2.0x). A "4K" run here draws 3840x2160 and scales it
+down to the 1080p screen at the present: 4x the pixels of what is shown.
+Whether the owner plays in this mode, or the TV switches mode (Match
+Content, or the TV's input), is for the owner to say; every session's first
+line now records it, and each second records render and drawable sizes.
 
 ## Code findings on the periodic-lag suspects
 
