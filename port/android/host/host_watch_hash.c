@@ -104,12 +104,22 @@ void watch_hash_protect(struct watch_hash *watch, uint32_t first, uint32_t last)
 	}
 }
 
-/* a stable page hashed recently enough: not hashed again yet
-(host_watch_hash.h) */
+/* a stable page not to be hashed this frame (host_watch_hash.h): each is
+hashed in its own frame of every WATCH_HASH_STABLE_FRAMES (by its index), so
+that the pages of one texture, or of everything loaded together, which all
+became stable in the same frame, are not all hashed again in one frame
+every WATCH_HASH_STABLE_FRAMES (a periodic spike in the guest's frame: on
+a10 in split screen up to 1183 pages in one frame against a mean of 33,
+port/tvos/PERFORMANCE.md); one not asked about in its frame, at the first
+ask after twice that */
 static int stable_for_now(const struct watch_hash *watch, uint32_t page)
 {
-	return watch->unchanged && watch->unchanged[page] >= WATCH_HASH_STABLE_CHECKS &&
-		watch->frame - watch->hashed_frame[page] < WATCH_HASH_STABLE_FRAMES;
+	uint32_t age;
+
+	if (!watch->unchanged || watch->unchanged[page] < WATCH_HASH_STABLE_CHECKS)
+		return 0;
+	age = watch->frame - watch->hashed_frame[page];
+	return age < 2 * WATCH_HASH_STABLE_FRAMES && (watch->frame + page) % WATCH_HASH_STABLE_FRAMES != 0;
 }
 
 uint32_t watch_hash_generation(struct watch_hash *watch, uint32_t first, uint32_t last)

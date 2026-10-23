@@ -13,11 +13,13 @@ as a write. A write is therefore seen in the next frame, not at once.
 Hashing every page drawn from each frame is a large part of the frame on
 the web (port/web/src/web_memory_watch.c), where most of them never change
 once loaded. With the optional unchanged counts, a page whose hash stayed the
-same WATCH_HASH_STABLE_CHECKS times in a row is hashed only every
-WATCH_HASH_STABLE_FRAMES frames, until a write into it is announced
+same WATCH_HASH_STABLE_CHECKS times in a row is hashed only once every
+WATCH_HASH_STABLE_FRAMES frames, in a frame of its own (the page's index
+picks which of them: the stable pages' hashing is spread evenly over the
+frames, not done all at once), until a write into it is announced
 (watch_hash_prepare_write: the file layer's reads, the Direct3D locks) or
 its hash changes. A write that is not announced into such a page is seen up
-to that many frames late.
+to that many frames late (twice that, for a page not drawn in its frame).
 */
 
 #ifndef HOST_WATCH_HASH_H

@@ -215,19 +215,81 @@ static void test_stable_page_is_hashed_less_often(void)
 	}
 	CHECK(f.unchanged[1] == WATCH_HASH_STABLE_CHECKS);
 	before = watch_hash_generation(&f.watch, 1, 1);
-	*byte_of(&f, 1, 40) ^= 1;
-	watch_hash_begin_frame(&f.watch);
-	CHECK(watch_hash_generation(&f.watch, 1, 1) == before);
-	/* seen within WATCH_HASH_STABLE_FRAMES frames all the same */
-	for (frame = 2; frame < WATCH_HASH_STABLE_FRAMES; frame++)
+	/* (written just after its own frame: the longest wait) */
+	while ((f.watch.frame + 1) % WATCH_HASH_STABLE_FRAMES != 0)
 	{
 		watch_hash_begin_frame(&f.watch);
 		watch_hash_generation(&f.watch, 1, 1);
 	}
+	*byte_of(&f, 1, 40) ^= 1;
 	watch_hash_begin_frame(&f.watch);
-	CHECK(watch_hash_generation(&f.watch, 1, 1) > before);
+	CHECK(watch_hash_generation(&f.watch, 1, 1) == before);
+	/* seen within WATCH_HASH_STABLE_FRAMES frames all the same */
+	for (frame = 1; frame < WATCH_HASH_STABLE_FRAMES; frame++)
+	{
+		watch_hash_begin_frame(&f.watch);
+		watch_hash_generation(&f.watch, 1, 1);
+	}
 	CHECK(f.unchanged[1] == 0);
+	CHECK(watch_hash_generation(&f.watch, 1, 1) > before);
 	teardown(&f);
+}
+
+/* stable pages are hashed again in frames of their own (by index), not all
+in one: of many pages that became stable together, at most a page in
+WATCH_HASH_STABLE_FRAMES (and one more) is hashed in any frame, and each
+once a cycle */
+#define MANY_PAGES 240
+
+static void test_stable_pages_are_spread_over_frames(void)
+{
+	static uint8_t watched[MANY_PAGES], unchanged[MANY_PAGES];
+	static uint64_t hash[MANY_PAGES];
+	static uint32_t hashed_frame[MANY_PAGES], generation[MANY_PAGES], hashed[MANY_PAGES];
+	volatile uint32_t current = 1;
+	struct watch_hash watch;
+	uint8_t *memory = aligned_alloc(WATCH_HASH_PAGE_SIZE, MANY_PAGES * WATCH_HASH_PAGE_SIZE);
+	uint32_t check, frame, page, most = 0;
+
+	memset(memory, 0x3c, MANY_PAGES * WATCH_HASH_PAGE_SIZE);
+	memset(&watch, 0, sizeof(watch));
+	watch.base = memory;
+	watch.page_count = MANY_PAGES;
+	watch.watched = watched;
+	watch.hash = hash;
+	watch.hashed_frame = hashed_frame;
+	watch.generation = generation;
+	watch.current_generation = &current;
+	watch.frame = 1;
+	watch.unchanged = unchanged;
+	watch_hash_protect(&watch, 0, MANY_PAGES - 1);
+	for (check = 0; check < WATCH_HASH_STABLE_CHECKS; check++)
+	{
+		watch_hash_begin_frame(&watch);
+		watch_hash_generation(&watch, 0, MANY_PAGES - 1);
+	}
+	for (frame = 0; frame < 4 * WATCH_HASH_STABLE_FRAMES; frame++)
+	{
+		uint32_t count = 0;
+
+		watch_hash_begin_frame(&watch);
+		watch_hash_generation(&watch, 0, MANY_PAGES - 1);
+		for (page = 0; page < MANY_PAGES; page++)
+		{
+			if (hashed_frame[page] == watch.frame)
+			{
+				count++;
+				hashed[page]++;
+			}
+		}
+		if (count > most)
+			most = count;
+	}
+	/* (240 pages over 60 frames: 4 a frame, where all 240 were in one) */
+	CHECK(most <= MANY_PAGES / WATCH_HASH_STABLE_FRAMES + 1);
+	for (page = 0; page < MANY_PAGES; page++)
+		CHECK(hashed[page] == 4);
+	free(memory);
 }
 
 static void test_announced_write_is_seen_next_frame(void)
@@ -263,6 +325,7 @@ int main(void)
 	test_begin_frame_changes_serial();
 	test_ranges_are_clamped();
 	test_stable_page_is_hashed_less_often();
+	test_stable_pages_are_spread_over_frames();
 	test_announced_write_is_seen_next_frame();
 	if (failures)
 		printf("%d failures\n", failures);
