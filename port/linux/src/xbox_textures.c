@@ -1159,6 +1159,19 @@ static void texture_entry_delete(struct texture_entry *entry)
 	free(entry);
 }
 
+/* the host textures' bytes, as the budget counts them: on Metal what the
+host allocated for every sampled texture (with its padding, which for the
+many small textures is half again the texels' bytes on the Apple TV's path,
+and the high-res HUD's and the menus' own), else this cache's estimate */
+static unsigned long long texture_residency_bytes(void)
+{
+#ifdef HALO_METAL
+	return (unsigned long long)host_metal_sampled_bytes();
+#else
+	return texture_residency.bytes;
+#endif
+}
+
 /* past the budget, the least recently drawn dropped: a few a frame, and
 none drawn in the last TEXTURE_RESIDENT_FRAMES (what is in view stays,
 whatever it costs) */
@@ -1167,7 +1180,7 @@ static void texture_residency_trim(void)
 	unsigned long long budget = texture_budget_bytes();
 	int dropped = 0;
 
-	while (texture_residency.bytes > budget && dropped < TEXTURE_EVICTIONS_PER_FRAME && texture_residency.oldest &&
+	while (texture_residency_bytes() > budget && dropped < TEXTURE_EVICTIONS_PER_FRAME && texture_residency.oldest &&
 		texture_frame - texture_residency.oldest->last_used_frame > TEXTURE_RESIDENT_FRAMES)
 	{
 		texture_entry_delete(texture_residency.oldest);
@@ -1475,7 +1488,7 @@ void xgpu_texture_cache_begin_frame(void)
 	if (texture_frame % 3600 == 0 && config_boolean("debug.texture_log"))
 	{
 		platform_log("textures: %lu kept, %.1f MiB of host textures (budget %.0f MiB), %llu dropped for it",
-			texture_residency.count, texture_residency.bytes / 1048576.0, texture_budget_bytes() / 1048576.0,
+			texture_residency.count, texture_residency_bytes() / 1048576.0, texture_budget_bytes() / 1048576.0,
 			texture_residency.evictions);
 	}
 }

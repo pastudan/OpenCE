@@ -231,7 +231,7 @@ def test_texture_cache_keeps_a_budget_and_never_sweeps():
     assert "#define TEXTURE_EVICTIONS_PER_FRAME 4" in source
     trim = source[source.index("static void texture_residency_trim(void)"):]
     trim = trim[:trim.index("\n}\n")]
-    assert "dropped < TEXTURE_EVICTIONS_PER_FRAME" in trim and "texture_residency.bytes > budget" in trim
+    assert "dropped < TEXTURE_EVICTIONS_PER_FRAME" in trim and "texture_residency_bytes() > budget" in trim
     assert "TEXTURE_RESIDENT_FRAMES" in trim
     delete = source[source.index("static void texture_entry_delete("):]
     delete = delete[:delete.index("\n}\n")]
@@ -290,3 +290,11 @@ def test_game_texture_cache_size_is_a_setting_the_tv_lowers():
     assert 'setenv("HALO_TEXTURE_CACHE_MB", "96", 0);' in (ROOT / "port/tvos/tv_main.m").read_text()
     config = (ROOT / "port/linux/src/port_config.c").read_text()
     assert '{ "game.texture_cache_mb", _config_integer, "0", "HALO_TEXTURE_CACHE_MB"' in config
+
+
+def test_texture_budget_counts_what_metal_allocated():
+    source = (ROOT / "port/linux/src/xbox_textures.c").read_text()
+    assert "return (unsigned long long)host_metal_sampled_bytes();" in source
+    trim = source[source.index("static void texture_residency_trim(void)"):]
+    assert "texture_residency_bytes() > budget" in trim[:600]
+    assert "long long host_metal_sampled_bytes(void);" in (ROOT / "port/macos/guest/guest_host.h").read_text()
