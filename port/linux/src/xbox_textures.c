@@ -1255,8 +1255,18 @@ static GLuint texture_entry_result(struct texture_entry *entry, GLenum *target,
 		}
 	}
 	/* These sheets keep the map's art and coordinates. Decode through the
-	 * normal format reader; the HUD module owns only the interpolation. */
-	if (config_boolean("display.high_res_hud"))
+	 * normal format reader; the HUD module owns only the interpolation.
+	 * (the setting read again only once a setting has changed: this runs
+	 * for every texture of every draw, and a lookup by name is a scan) */
+	static int high_res_hud = -1;
+	static unsigned long high_res_hud_changes;
+
+	if (high_res_hud < 0 || high_res_hud_changes != config_changes())
+	{
+		high_res_hud_changes = config_changes();
+		high_res_hud = config_boolean("display.high_res_hud") != 0;
+	}
+	if (high_res_hud)
 	{
 		if (!entry->hud_upscale_checked)
 		{
