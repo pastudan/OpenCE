@@ -1057,10 +1057,14 @@ pulls and reports it.
 
 On by default in the TV build (`debug.telemetry = "auto"`; `"off"` in
 config.toml or `HALO_TELEMETRY=off` turns it off; a Mac records only with
-`"on"`). JSON lines in `Library/Caches/OpenCE/telemetry/<UTC start>-<pid>.jsonl`
-in the app's container, the newest 40 sessions and at most 200 MB kept
-(rotated at each start), 64 MB a session at most; ~1.7 KB a second, so a
-2-hour session is ~12 MB.
+`"on"`). JSON lines in the app's container, written in parts:
+`Library/Caches/OpenCE/telemetry/<UTC start>-<pid>.p001.jsonl`, `.p002`, ...,
+a new part at 8 MB or 30 minutes (`HALO_TELEMETRY_PART_MB`/`_KB`/`_MIN`),
+each beginning with the session's line plus `"part"`. A closed part is
+static, so `tv_telemetry.py pull` can copy it while the game runs
+(devicectl's copy of a growing file breaks off at 10 MB). The newest 40
+sessions and at most 200 MB of parts are kept (rotated at each part), 256
+MB a session at most; ~1.7 KB a second, so a 2-hour session is ~12 MB.
 
 - **A second** (`"k":"s"`): wall and game time; map, BSP, local players,
   player views drawn (1 in a cinematic), each view's camera position;

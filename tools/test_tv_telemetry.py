@@ -3,6 +3,7 @@ records, the recorder's rotation and slot arithmetic
 (port/macos/host/host_telemetry.c) compiled and run, the pull's choice of
 files, and what the recorder must not do on the render thread."""
 import json
+import os
 from pathlib import Path
 import subprocess
 import sys
@@ -168,6 +169,53 @@ int main(int argc, char **argv)
     assert(host_telemetry_rotate(directory, 40, 150) == 1);
     assert(!exists(directory, "20261003T000000Z-1.jsonl") && exists(directory, "20261004T000000Z-1.jsonl"));
     assert(host_telemetry_rotate(directory, 40, 1 << 20) == 0);
+    /* a session's parts count as one session, and go oldest part first */
+    make(directory, "20261005T000000Z-2.p001.jsonl", 100);
+    make(directory, "20261005T000000Z-2.p002.jsonl", 100);
+    make(directory, "20261005T000000Z-2.p003.jsonl", 100);
+    make(directory, "20261006T000000Z-3.p001.jsonl", 100);
+    assert(host_telemetry_rotate(directory, 3, 1 << 20) == 1);
+    assert(!exists(directory, "20261004T000000Z-1.jsonl") && exists(directory, "20261005T000000Z-2.p001.jsonl"));
+    assert(host_telemetry_rotate(directory, 2, 1 << 20) == 3);
+    assert(!exists(directory, "20261005T000000Z-2.p003.jsonl") && exists(directory, "20261006T000000Z-3.p001.jsonl"));
+    make(directory, "20261006T000000Z-3.p002.jsonl", 100);
+    make(directory, "20261006T000000Z-3.p003.jsonl", 100);
+    /* by bytes, a session's oldest parts first */
+    assert(host_telemetry_rotate(directory, 40, 150) == 2);
+    assert(!exists(directory, "20261006T000000Z-3.p002.jsonl") && exists(directory, "20261006T000000Z-3.p003.jsonl"));
+    puts("ok");
+    return 0;
+}
+'''
+
+# a session recorded through the recorder itself, in parts of 4 KB
+PARTS_HARNESS = r'''
+#include <stdio.h>
+#include <stdarg.h>
+#include <string.h>
+#include "host_frame_log.h"
+#include "host_telemetry.h"
+
+void host_log(const char *f, ...) { (void)f; }
+void host_telemetry_platform_sample(struct host_telemetry_platform *p) { memset(p, 0, sizeof(*p)); }
+void host_telemetry_platform_start(void) {}
+double host_telemetry_platform_refresh_hz(void) { return 60.0; }
+void host_telemetry_platform_describe(char *t, unsigned int s) { snprintf(t, s, "test"); }
+uint64_t host_metal_allocated_bytes(void) { return 0; }
+
+int main(void)
+{
+    struct host_frame_accumulators frame;
+    uint64_t now = host_frame_log_now();
+
+    memset(&frame, 0, sizeof(frame));
+    host_telemetry_start();
+    for (uint64_t serial = 1; serial <= 60 * 20; serial++)
+    {
+        now += 16666667;
+        host_telemetry_frame(serial, now, serial % 300 ? 16666667 : 80000000, &frame);
+    }
+    host_telemetry_finish();
     puts("ok");
     return 0;
 }
@@ -184,6 +232,33 @@ def test_recorder_rotation_and_slots(tmp_path):
     folder = tmp_path / "telemetry"
     folder.mkdir()
     assert subprocess.run([str(program), str(folder)], capture_output=True, text=True, check=True).stdout == "ok\n"
+
+
+def test_recorder_writes_a_session_in_self_describing_parts(tmp_path):
+    harness = tmp_path / "parts.c"
+    harness.write_text(PARTS_HARNESS)
+    program = tmp_path / "parts"
+    subprocess.run(["clang", "-std=gnu11", "-Wall", "-Werror", "-Wno-unused-function", f"-I{HOST}",
+                    f"-I{ROOT / 'port/macos/guest'}", str(harness), str(HOST / "host_telemetry.c"),
+                    str(HOST / "host_frame_log.c"), "-o", str(program)], check=True)
+    folder = tmp_path / "telemetry"
+    environment = dict(os.environ, HALO_TELEMETRY="on", HALO_TELEMETRY_DIR=str(folder), HALO_TELEMETRY_PART_KB="4")
+    assert subprocess.run([str(program)], capture_output=True, text=True, check=True, env=environment,
+                          cwd=tmp_path).stdout == "ok\n"
+    parts = sorted(folder.glob("*.jsonl"))
+    assert len(parts) >= 3
+    stem = parts[0].name[:-len(".p001.jsonl")]
+    assert [p.name for p in parts] == [f"{stem}.p{n:03d}.jsonl" for n in range(1, len(parts) + 1)]
+    for number, part in enumerate(parts, 1):
+        records = [json.loads(line) for line in part.read_text().splitlines()]
+        assert records[0]["k"] == "session" and records[0]["part"] == number
+        assert records[0]["start"] == stem.split("-")[0]
+        # (a part ends at a whole line, and stays under its size but for one second's lines)
+        assert part.read_text().endswith("\n") and part.stat().st_size < 4096 + 8192
+    records = [json.loads(line) for part in parts for line in part.read_text().splitlines()]
+    times = [r["t"] for r in records if r["k"] == "s"]
+    assert times == sorted(times) and len(times) >= 18
+    assert records[-1]["k"] == "end" and sum(r["k"] == "hitch" for r in records) == 4
 
 
 def test_recorder_never_syncs_or_writes_on_the_render_thread():

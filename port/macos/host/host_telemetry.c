@@ -9,6 +9,13 @@ The lines go into a buffer, which is handed once a second to a serial
 background queue that appends it to the session's file (no fsync) and, if
 asked, sends it over UDP. Nothing here waits on the GPU, a lock the GPU
 holds, or the file.
+
+A session is written in parts, <start>-<pid>.p001.jsonl, .p002, ...: the
+writer closes a part at PART_BYTES (HALO_TELEMETRY_PART_MB, or _KB) or
+PART_SECONDS (HALO_TELEMETRY_PART_MIN), whichever comes first, and opens the
+next, which begins with the session's line and its "part". A closed part
+no longer grows, so the Mac can copy it while the game runs (devicectl's copy
+of a growing file breaks off at 10 MB).
 */
 
 #include "host.h"
@@ -36,8 +43,12 @@ int host_telemetry_enabled;
 #define SECOND_FRAMES 512
 /* hitches kept for a second's record, at most */
 #define SECOND_HITCHES 16
-/* a session's file, at most */
-#define SESSION_LIMIT (64ull << 20)
+/* a session's parts, together, at most */
+#define SESSION_LIMIT (256ull << 20)
+/* a part, at most (well under the 10 MB that devicectl can copy of a
+growing file), and its time, at most */
+#define PART_BYTES (8ull << 20)
+#define PART_SECONDS (30 * 60)
 
 struct frame_numbers
 {
@@ -85,7 +96,9 @@ static struct
 	uint64_t start_ns, slot_ns;
 	double refresh_hz;
 	time_t start_wall;
-	char directory[1024], path[1200];
+	/* the session's files, without ".pNNN.jsonl"; its first line, without
+	the closing brace (each part's first line, with the part's number) */
+	char directory[1024], path[1200], session_line[600];
 	/* the second being counted, and the one waiting for its GPU times */
 	struct second *current, *waiting;
 	/* the lines not yet handed to the writer */
@@ -94,7 +107,9 @@ static struct
 	dispatch_queue_t queue;
 	/* the writer's (its queue's) */
 	FILE *file;
-	uint64_t written;
+	char part_path[1300];
+	int part, keep;
+	uint64_t written, part_written, part_limit, part_ns, part_started_ns, max_bytes;
 	int socket;
 	struct sockaddr_in live_address;
 	_Atomic uint64_t writer_ns, writer_bytes, dropped_bytes;
@@ -220,6 +235,14 @@ struct chunk
 	char data[];
 };
 
+/* two files' names of one session: the same up to the first '.' */
+static int same_session(const char *a, const char *b)
+{
+	size_t length = strcspn(a, ".");
+
+	return length == strcspn(b, ".") && !strncmp(a, b, length);
+}
+
 int host_telemetry_rotate(const char *directory, int keep, uint64_t max_bytes)
 {
 	struct entry
@@ -227,7 +250,7 @@ int host_telemetry_rotate(const char *directory, int keep, uint64_t max_bytes)
 		char name[256];
 		uint64_t bytes;
 	} *entries = NULL;
-	size_t count = 0, capacity = 0, index;
+	size_t count = 0, capacity = 0, index, sessions = 0;
 	uint64_t total = 0;
 	int deleted = 0;
 	DIR *folder = opendir(directory);
@@ -273,7 +296,11 @@ int host_telemetry_rotate(const char *directory, int keep, uint64_t max_bytes)
 		}
 		entries[at] = entry;
 	}
-	for (index = 0; index < count && (count - index >= (size_t)(keep > 0 ? keep : 1) || total > max_bytes); index++)
+	/* (a session's parts go together, oldest part first: they share the name
+	up to its first '.') */
+	for (index = 0; index < count; index++)
+		sessions += !index || !same_session(entries[index - 1].name, entries[index].name);
+	for (index = 0; index < count && (sessions >= (size_t)(keep > 0 ? keep : 1) || total > max_bytes); index++)
 	{
 		char path[1400];
 
@@ -281,25 +308,66 @@ int host_telemetry_rotate(const char *directory, int keep, uint64_t max_bytes)
 		if (!unlink(path))
 			deleted++;
 		total -= entries[index].bytes;
+		if (index + 1 == count || !same_session(entries[index].name, entries[index + 1].name))
+			sessions--;
 	}
 	free(entries);
 	return deleted;
 }
 
+static uint64_t setting_of(const char *name, uint64_t otherwise)
+{
+	const char *value = getenv(name);
+
+	return value && atoll(value) > 0 ? (uint64_t)atoll(value) : otherwise;
+}
+
+static void writer_put(const char *data, size_t size)
+{
+	if (fwrite(data, 1, size, telemetry.file) == size)
+	{
+		telemetry.written += size;
+		telemetry.part_written += size;
+	}
+	/* (to the system, not to the disk: no fsync) */
+	fflush(telemetry.file);
+}
+
+/* the next part: the old ones rotated (room for it), the session's line */
+static void writer_part(int keep)
+{
+	char line[700];
+	int length;
+
+	if (telemetry.file)
+		fclose(telemetry.file);
+	telemetry.file = NULL;
+	host_telemetry_rotate(telemetry.directory, keep, telemetry.max_bytes);
+	telemetry.part++;
+	snprintf(telemetry.part_path, sizeof(telemetry.part_path), "%s.p%03d.jsonl", telemetry.path, telemetry.part);
+	telemetry.part_written = 0;
+	telemetry.part_started_ns = host_frame_log_now();
+	telemetry.file = fopen(telemetry.part_path, "a");
+	if (!telemetry.file)
+	{
+		host_log("telemetry: cannot write %s (%s)", telemetry.part_path, strerror(errno));
+		return;
+	}
+	length = snprintf(line, sizeof(line), "%s,\"part\":%d}\n", telemetry.session_line, telemetry.part);
+	if (length > 0 && (size_t)length < sizeof(line))
+		writer_put(line, (size_t)length);
+}
+
 static void writer_open(void *context)
 {
-	const char *value = getenv("HALO_TELEMETRY_KEEP");
-	int keep = value && atoi(value) > 0 ? atoi(value) : 40;
-	uint64_t max_bytes;
-
 	(void)context;
-	value = getenv("HALO_TELEMETRY_MAX_MB");
-	max_bytes = (uint64_t)(value && atoi(value) > 0 ? atoi(value) : 200) << 20;
+	telemetry.keep = (int)setting_of("HALO_TELEMETRY_KEEP", 40);
+	telemetry.max_bytes = setting_of("HALO_TELEMETRY_MAX_MB", 200) << 20;
+	telemetry.part_limit = getenv("HALO_TELEMETRY_PART_KB") ? setting_of("HALO_TELEMETRY_PART_KB", 8192) << 10 :
+		setting_of("HALO_TELEMETRY_PART_MB", PART_BYTES >> 20) << 20;
+	telemetry.part_ns = setting_of("HALO_TELEMETRY_PART_MIN", PART_SECONDS / 60) * 60ull * 1000000000ull;
 	mkdir(telemetry.directory, 0755);
-	host_telemetry_rotate(telemetry.directory, keep, max_bytes);
-	telemetry.file = fopen(telemetry.path, "a");
-	if (!telemetry.file)
-		host_log("telemetry: cannot write %s (%s)", telemetry.path, strerror(errno));
+	writer_part(telemetry.keep);
 }
 
 static void writer_write(void *context)
@@ -307,12 +375,18 @@ static void writer_write(void *context)
 	struct chunk *chunk = context;
 	uint64_t started = host_frame_log_now();
 
+	/* (a chunk is whole lines: a part ends at a line's end) */
+	if (telemetry.file && telemetry.part_written > 0 &&
+		(telemetry.part_written + chunk->size > telemetry.part_limit ||
+			started - telemetry.part_started_ns >= telemetry.part_ns) &&
+		telemetry.written + chunk->size <= SESSION_LIMIT)
+	{
+		/* (this session is one of those kept now) */
+		writer_part(telemetry.keep + 1);
+	}
 	if (telemetry.file && telemetry.written + chunk->size <= SESSION_LIMIT)
 	{
-		if (fwrite(chunk->data, 1, chunk->size, telemetry.file) == chunk->size)
-			telemetry.written += chunk->size;
-		/* (to the system, not to the disk: no fsync) */
-		fflush(telemetry.file);
+		writer_put(chunk->data, chunk->size);
 		atomic_fetch_add(&telemetry.writer_bytes, chunk->size);
 	}
 	else
@@ -442,7 +516,7 @@ void host_telemetry_start(void)
 	telemetry.start_wall = time(NULL);
 	gmtime_r(&telemetry.start_wall, &utc);
 	strftime(stamp, sizeof(stamp), "%Y%m%dT%H%M%SZ", &utc);
-	snprintf(telemetry.path, sizeof(telemetry.path), "%s/%s-%d.jsonl", telemetry.directory, stamp, (int)getpid());
+	snprintf(telemetry.path, sizeof(telemetry.path), "%s/%s-%d", telemetry.directory, stamp, (int)getpid());
 	telemetry.start_ns = host_frame_log_now();
 	telemetry.current->start_ns = telemetry.start_ns;
 	telemetry.refresh_hz = host_telemetry_platform_refresh_hz();
@@ -453,16 +527,17 @@ void host_telemetry_start(void)
 	telemetry.queue = dispatch_queue_create("opence.telemetry", DISPATCH_QUEUE_SERIAL);
 	dispatch_set_target_queue(telemetry.queue, dispatch_get_global_queue(QOS_CLASS_UTILITY, 0));
 	live_start();
-	dispatch_async_f(telemetry.queue, NULL, writer_open);
-	host_telemetry_enabled = 1;
 	host_telemetry_platform_start();
 	host_telemetry_platform_describe(description, sizeof(description));
-	append("{\"k\":\"session\",\"v\":1,\"t\":0,\"start\":\"%s\",\"unix\":%lld,\"device\":\"%s\",\"refresh_hz\":%.2f,"
-		"\"pid\":%d,\"hitch_ms\":50}\n", stamp, (long long)telemetry.start_wall, description, telemetry.refresh_hz,
+	/* (each part's first line, written by the writer: before it starts) */
+	snprintf(telemetry.session_line, sizeof(telemetry.session_line),
+		"{\"k\":\"session\",\"v\":1,\"t\":0,\"start\":\"%s\",\"unix\":%lld,\"device\":\"%s\",\"refresh_hz\":%.2f,"
+		"\"pid\":%d,\"hitch_ms\":50", stamp, (long long)telemetry.start_wall, description, telemetry.refresh_hz,
 		(int)getpid());
-	host_telemetry_flush();
+	dispatch_async_f(telemetry.queue, NULL, writer_open);
+	host_telemetry_enabled = 1;
 	atexit(host_telemetry_finish);
-	host_log("telemetry: recording to %s", telemetry.path);
+	host_log("telemetry: recording to %s.p001.jsonl, ...", telemetry.path);
 }
 
 void host_telemetry_event(const char *kind, const char *detail)
@@ -830,7 +905,7 @@ void host_telemetry_finish(void)
 	host_telemetry_flush();
 	host_telemetry_enabled = 0;
 	dispatch_sync_f(telemetry.queue, NULL, writer_close);
-	host_log("telemetry: %llu seconds, %llu hitches, %.1f ms of its own on the main thread: %s",
+	host_log("telemetry: %llu seconds, %llu hitches, %.1f ms of its own on the main thread: %s (%d parts)",
 		(unsigned long long)telemetry.seconds, (unsigned long long)telemetry.hitches, ms(telemetry.self_ns),
-		telemetry.path);
+		telemetry.part_path, telemetry.part);
 }

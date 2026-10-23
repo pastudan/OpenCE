@@ -8,11 +8,16 @@ debug.telemetry in config.toml (HALO_TELEMETRY) is "auto", "on" or "off".
 
 It is built on the frame log's breakdown (host_frame_log.h, which it turns
 on without the frame log's CSV) and writes JSON lines to
-<data root>/telemetry/<session start>.jsonl (HALO_TELEMETRY_DIR), buffered
-and written from a background queue, never synced: on the TV,
-Library/Caches/OpenCE/telemetry, which tools/tv_telemetry.py pulls. The
-folder keeps the newest HALO_TELEMETRY_KEEP sessions (default 40) and at most
-HALO_TELEMETRY_MAX_MB (default 200) MB; a session stops writing at 64 MB.
+<data root>/telemetry/<session start>-<pid>.p001.jsonl (HALO_TELEMETRY_DIR),
+buffered and written from a background queue, never synced: on the TV,
+Library/Caches/OpenCE/telemetry, which tools/tv_telemetry.py pulls. A
+session is written in parts (.p001, .p002, ...) of at most 8 MB
+(HALO_TELEMETRY_PART_MB, or HALO_TELEMETRY_PART_KB) or 30 minutes
+(HALO_TELEMETRY_PART_MIN), each beginning with the session's line and its
+"part": a closed part is static, which the Mac can copy while the game runs.
+The folder keeps the newest HALO_TELEMETRY_KEEP sessions (default 40) and at
+most HALO_TELEMETRY_MAX_MB (default 200) MB of parts; a session stops writing
+at 256 MB.
 Records, one a line, each with "k" (its kind) and "t" (seconds since the
 session started):
 
@@ -99,9 +104,11 @@ uint64_t host_metal_allocated_bytes(void);
 
 /* ---------- the parts tools/test_tv_telemetry.py runs by themselves */
 
-/* sessions in a folder (*.jsonl) deleted, oldest first (by name: the
-start's time), until fewer than keep remain and their bytes are at most
-max_bytes (room for a new one); how many were deleted */
+/* sessions' files in a folder (*.jsonl) deleted, oldest first (by name: the
+start's time, then the part), until fewer than keep sessions remain (a
+session's parts, the names the same up to the first '.', count as one) and
+their bytes are at most max_bytes (room for a new one); how many files were
+deleted */
 int host_telemetry_rotate(const char *directory, int keep, uint64_t max_bytes);
 /* display slots a frame of wall_ns missed, at a refresh interval of slot_ns */
 uint32_t host_telemetry_missed_slots(uint64_t wall_ns, uint64_t slot_ns);
