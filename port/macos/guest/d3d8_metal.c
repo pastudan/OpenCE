@@ -303,6 +303,14 @@ static long draw_bounds_setting = -1;
 
 static BOOL draw_bounds_enabled(void);
 
+/* halo_draw_bounds_box: the box itself, for each draw's own scissor
+(draw_bounds_triangles) */
+static struct
+{
+	BOOL active;
+	float planes[6][4];
+} draw_bounds_box;
+
 void halo_draw_bounds(unsigned char active, short x0, short y0, short x1, short y1)
 {
 	draw_bounds.active = active && draw_bounds_enabled();
@@ -310,6 +318,14 @@ void halo_draw_bounds(unsigned char active, short x0, short y0, short x1, short 
 	draw_bounds.y0 = y0;
 	draw_bounds.x1 = x1;
 	draw_bounds.y1 = y1;
+	if (!active)
+		draw_bounds_box.active = FALSE;
+}
+
+void halo_draw_bounds_box(float const planes[6][4])
+{
+	draw_bounds_box.active = draw_bounds_enabled();
+	memcpy(draw_bounds_box.planes, planes, sizeof(draw_bounds_box.planes));
 }
 
 /* ---------- state the XDK header's inline functions read and write */
@@ -516,6 +532,9 @@ static struct
 	/* draws halo_draw_bounds clipped, and their scissors' pixels (thousands)
 	before and after */
 	unsigned long bounded_draws, bounded_kpixels_before, bounded_kpixels_after;
+	/* and halo_draw_bounds_box's: each draw's own (what is left), and those
+	it skipped */
+	unsigned long bounded_kpixels_box, bounded_draws_skipped;
 } stats;
 
 static D3DDevice *device_pointer(void)
@@ -3623,6 +3642,149 @@ void WINAPI D3DDevice_DrawVertices(D3DPRIMITIVETYPE primitive_type_value, UINT s
 	free(indices);
 }
 
+/* halo_draw_bounds_box: a draw's triangles (a list, positions as three
+floats in input 0 of stream 0) cut to the box and to the near plane and
+projected with the frustum's world to clip transform (c[-96] to c[-93],
+rasterizer_set_frustum_z: the transform the shadow's vertex shader
+applies), then to the target's pixels as the viewport maps them: the
+draw's scissor narrowed to what they cover, slack of 2 pixels. FALSE when
+none of it is left (the draw changes no pixel). A triangle's part outside
+the box changes no pixel (rasterizer_xbox_shadows.c), nor does its part
+behind the near plane (clipped), so nothing it draws is cut. */
+#define BOX_POLYGON_MAXIMUM 12
+
+static int polygon_cut(float (*in)[4], int count, const float plane[4], float (*out)[4])
+{
+	int index, result = 0;
+
+	for (index = 0; index < count; index++)
+	{
+		const float *a = in[index], *b = in[(index + 1) % count];
+		float da = a[0] * plane[0] + a[1] * plane[1] + a[2] * plane[2] + a[3] * plane[3];
+		float db = b[0] * plane[0] + b[1] * plane[1] + b[2] * plane[2] + b[3] * plane[3];
+
+		if (da >= 0.0f && result < BOX_POLYGON_MAXIMUM)
+			memcpy(out[result++], a, sizeof(out[0]));
+		if ((da >= 0.0f) != (db >= 0.0f) && result < BOX_POLYGON_MAXIMUM)
+		{
+			float t = da / (da - db);
+			int axis;
+
+			for (axis = 0; axis < 4; axis++)
+				out[result][axis] = a[axis] + t * (b[axis] - a[axis]);
+			result++;
+		}
+	}
+	return result;
+}
+
+static BOOL draw_bounds_triangles(struct metal_draw *draw, const WORD *indices, unsigned long index_count)
+{
+	const struct vertex_element *position = NULL;
+	const float (*clip)[4] = (const float (*)[4])device.constants[XGPU_VERTEX_CONSTANT_BIAS - 96];
+	const unsigned char *vertices;
+	unsigned long stride, element, triangle;
+	float left = 1e30f, top = 1e30f, right = -1e30f, bottom = -1e30f;
+	BOOL any = FALSE;
+
+	for (element = 0; element < device.vertex_shader->element_count; element++)
+	{
+		if (device.vertex_shader->elements[element].reg == 0)
+			position = &device.vertex_shader->elements[element];
+	}
+	if (!position || position->type != D3DVSDT_FLOAT3 || !device.streams[position->stream].data)
+		return TRUE;
+	stride = device.streams[position->stream].stride;
+	vertices = (const unsigned char *)PLATFORM_PHYSICAL_TO_VIRTUAL(device.streams[position->stream].data) +
+		position->offset;
+	if (!stride)
+		return TRUE;
+	for (triangle = 0; triangle + 2 < index_count; triangle += 3)
+	{
+		float polygon[2][BOX_POLYGON_MAXIMUM][4];
+		const float near_plane[4] = { 0.0f, 0.0f, 1.0f, 0.0f };
+		int count = 3, plane, corner, current = 0;
+
+		for (corner = 0; corner < 3; corner++)
+		{
+			const float *p = (const float *)(vertices +
+				(device.base_vertex_index + indices[triangle + corner]) * stride);
+
+			polygon[0][corner][0] = p[0];
+			polygon[0][corner][1] = p[1];
+			polygon[0][corner][2] = p[2];
+			polygon[0][corner][3] = 1.0f;
+		}
+		for (plane = 0; plane < 6 && count; plane++)
+		{
+			count = polygon_cut(polygon[current], count, draw_bounds_box.planes[plane], polygon[1 - current]);
+			current = 1 - current;
+		}
+		if (!count)
+			continue;
+		/* (into clip space: x, y, z, w each a dot with a column of the
+		constants, as the vertex shader's dp4s) */
+		for (corner = 0; corner < count; corner++)
+		{
+			float world[4], *out = polygon[1 - current][corner];
+			int axis;
+
+			memcpy(world, polygon[current][corner], sizeof(world));
+			for (axis = 0; axis < 4; axis++)
+				out[axis] = world[0] * clip[axis][0] + world[1] * clip[axis][1] + world[2] * clip[axis][2] +
+					clip[axis][3];
+		}
+		current = 1 - current;
+		count = polygon_cut(polygon[current], count, near_plane, polygon[1 - current]);
+		current = 1 - current;
+		for (corner = 0; corner < count; corner++)
+		{
+			const float *point = polygon[current][corner];
+			float x, y;
+
+			if (!(point[3] > 0.0f))
+				return TRUE;
+			x = draw->viewport[0] + (point[0] / point[3] + 1.0f) * 0.5f * draw->viewport[2];
+			y = draw->viewport[1] + (1.0f - point[1] / point[3]) * 0.5f * draw->viewport[3];
+			left = x < left ? x : left;
+			right = x > right ? x : right;
+			top = y < top ? y : top;
+			bottom = y > bottom ? y : bottom;
+			any = TRUE;
+		}
+	}
+	if (!any)
+		return FALSE;
+	{
+		/* (whole pixels and slack each way: the vertex program moves the
+		picture by half a game unit and the UI offset (nv2a_vsh.c's viewport
+		undoing), and 2 pixels more) */
+		long slack_x = (long)((0.5f + (float)(UI_OFFSET < 0 ? -UI_OFFSET : UI_OFFSET)) * target_scale[0] + 0.999f) + 2;
+		long slack_y = (long)(0.5f * target_scale[1] + 0.999f) + 2;
+		long x0 = (long)left - slack_x, y0 = (long)top - slack_y;
+		long x1 = (long)right + 1 + slack_x, y1 = (long)bottom + 1 + slack_y;
+		long scissor_right = (long)draw->scissor[0] + (long)draw->scissor[2];
+		long scissor_bottom = (long)draw->scissor[1] + (long)draw->scissor[3];
+
+		if (x0 < (long)draw->scissor[0])
+			x0 = (long)draw->scissor[0];
+		if (y0 < (long)draw->scissor[1])
+			y0 = (long)draw->scissor[1];
+		if (x1 > scissor_right)
+			x1 = scissor_right;
+		if (y1 > scissor_bottom)
+			y1 = scissor_bottom;
+		if (x1 <= x0 || y1 <= y0)
+			return FALSE;
+		stats.bounded_kpixels_box += (unsigned long)((x1 - x0) * (y1 - y0)) / 1000;
+		draw->scissor[0] = (metal_u32)x0;
+		draw->scissor[1] = (metal_u32)y0;
+		draw->scissor[2] = (metal_u32)(x1 - x0);
+		draw->scissor[3] = (metal_u32)(y1 - y0);
+	}
+	return TRUE;
+}
+
 void WINAPI D3DDevice_DrawIndexedVertices(D3DPRIMITIVETYPE primitive_type_value, UINT vertex_count,
 	CONST WORD *index_data)
 {
@@ -3633,6 +3795,12 @@ void WINAPI D3DDevice_DrawIndexedVertices(D3DPRIMITIVETYPE primitive_type_value,
 
 	if (!vertex_count || !index_data || !prepare_draw(FALSE, &draw))
 		return;
+	if (draw_bounds_box.active && primitive_type_value == D3DPT_TRIANGLELIST &&
+		!draw_bounds_triangles(&draw, index_data, vertex_count))
+	{
+		stats.bounded_draws_skipped++;
+		return;
+	}
 	index_extent(index_data, vertex_count, 0, FALSE, &minimum, &maximum);
 	trace_draw("indexed", primitive_type_value, vertex_count, NULL);
 	/* (the streams from the base vertex on: index i is vertex base + i,
@@ -4165,9 +4333,10 @@ void WINAPI D3DDevice_Present(CONST RECT *source_rectangle, CONST RECT *destinat
 			stats.target_changes / stats.presents, stats.skipped_no_program, stats.skipped_no_target, stats.skipped_link,
 			stats.streamed_bytes / stats.presents / 1024);
 		if (stats.bounded_draws)
-			platform_log("frame %lu: shadow bounds clipped %lu draws a frame, their scissors %lu -> %lu kpixels a frame",
-				device.frame, stats.bounded_draws / stats.presents, stats.bounded_kpixels_before / stats.presents,
-				stats.bounded_kpixels_after / stats.presents);
+			platform_log("frame %lu: shadow bounds clipped %lu draws a frame, their scissors %lu -> %lu kpixels a frame, "
+				"%lu with each draw's own, %lu draws skipped", device.frame, stats.bounded_draws / stats.presents,
+				stats.bounded_kpixels_before / stats.presents, stats.bounded_kpixels_after / stats.presents,
+				stats.bounded_kpixels_box / stats.presents, stats.bounded_draws_skipped / stats.presents);
 		memset(&stats, 0, sizeof(stats));
 	}
 	platform_pump_events();

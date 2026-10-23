@@ -317,6 +317,11 @@ void halo_draw_bounds(unsigned char active, short x0, short y0, short x1, short 
 	(void)y1;
 }
 
+void halo_draw_bounds_box(float const planes[6][4])
+{
+	(void)planes;
+}
+
 void halo_screen_ui_offset(unsigned char centered)
 {
 	ui_offset = centered ? (halo_screen_width() - 640) / 2 : 0;

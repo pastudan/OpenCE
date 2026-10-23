@@ -73,6 +73,14 @@ none: a renderer may clip them to it. An object's shadow projected onto
 the level (rasterizer_xbox_shadows.c); port/macos/guest/d3d8_metal.c clips,
 port/linux/src/d3d8_gl.c does not */
 void halo_draw_bounds(unsigned char active, short x0, short y0, short x1, short y1);
+/* the box (world space; 6 planes, n.p + d >= 0 inside) outside which the
+draws from now on change no pixel, until halo_draw_bounds(FALSE, ...). The
+Metal device cuts each indexed triangle list draw's triangles (positions
+in input 0) to it and to the near plane, projects them with the vertex
+constants c[-96] to c[-93] (rasterizer_set_frustum_z's world to clip
+transform, which the shadow's vertex shader projects with), and scissors
+the draw to what they cover, or skips it when nothing is left */
+void halo_draw_bounds_box(float const planes[6][4]);
 /* while TRUE, drawing shifts right to center 640-column layouts */
 void halo_screen_ui_offset(unsigned char centered);
 /* names a model lighting vertex program, whose draws can be lit for each
