@@ -525,6 +525,16 @@ static const struct config_setting config_settings[] =
 		_platform_all,
 		"The network test's host lists its game in the server browser, as Create\n"
 		"Game > Internet's PUBLIC does (debug.network_test \"browse\" joins it)." },
+	{ "debug.telemetry", _config_string, "\"auto\"", "HALO_TELEMETRY", _environment_value, _platform_desktop,
+		"Metal builds: record the game's performance while it is played, a line a\n"
+		"second and one for each frame over 50 ms (where it was, what the frame\n"
+		"spent its time on), in telemetry/ beside this file (the newest 40\n"
+		"sessions, at most 200 MB); tools/tv_telemetry.py fetches and reads them.\n"
+		"\"auto\" records on the Apple TV, not on a Mac; \"on\" or \"off\"." },
+	{ "debug.telemetry_live", _config_string, "\"\"", "HALO_TELEMETRY_LIVE", _environment_value, _platform_desktop,
+		"With debug.telemetry recording: \"<IPv4 address>:<port>\" also sends its\n"
+		"lines over the local network as they are written (UDP), to\n"
+		"tools/tv_telemetry.py listen on that computer; empty sends none." },
 	{ "debug.telnet_console", _config_boolean, "false", "HALO_TELNET_CONSOLE", _environment_set_is_true, _platform_all,
 		"Listen on 127.0.0.1 (port telnet_console_port) for a script console that\n"
 		"runs what it is sent as the game's console does, with no password; false\n"

@@ -145,6 +145,8 @@ symbols in this file:
 /* port: tag existing phases for opt-in host counters without enabling the
    Xbox callback profiler or waiting for the GPU. */
 void metal_device_profile_phase(int profile, int begin);
+/* port: the view begun, for the play telemetry (port/macos/host/host_telemetry.h) */
+void metal_device_telemetry_window(long window_index);
 #endif
 
 /* ---------- constants */
@@ -366,6 +368,9 @@ void rasterizer_profile_window_begin(
 {
 	rasterizer_profile_globals.window_index = global_window_parameters.window_index;
 	rasterizer_profile_globals.active_profile_index = NONE;
+#ifdef HALO_METAL
+	metal_device_telemetry_window(global_window_parameters.window_index); /* port: diagnostic only */
+#endif
 
 	return;
 }

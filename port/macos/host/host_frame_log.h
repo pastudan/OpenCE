@@ -24,8 +24,29 @@ wall time is the guest's own work (the translated game, SDL, audio, files).
 #include <stdint.h>
 #include <time.h>
 
-/* 0 off, 1 wall time only, 2 the whole breakdown */
+/* 0 off, 1 wall time only, 2 the whole breakdown. The telemetry recorder
+(host_telemetry.h) turns the breakdown on by itself, without the CSV. */
 extern int host_frame_log_level;
+
+/* the rasterizer's phases the frame log counts draws of (rasterizer.h's
+_rasterizer_profile_*, given by host_metal_profile_phase) */
+enum
+{
+	HOST_PHASE_SHADOWS = 4,
+	HOST_PHASE_FOG = 17,
+	HOST_PHASE_TRANSPARENTS = 22,
+};
+
+/* views of a frame told apart: the players' (split screen: up to four)
+and the rest (the overlay window, menus), whose index is HOST_VIEWS - 1 */
+#define HOST_VIEWS 5
+struct host_view_accumulators
+{
+	uint32_t draws, passes, shadow_draws, fog_draws, transparent_draws, windows;
+	/* from the view's start to the next's (or the present): the guest's
+	and the host's time drawing it */
+	uint64_t ns;
+};
 
 /* what the frame has spent so far (the main thread's), reset at each present */
 struct host_frame_accumulators
@@ -42,8 +63,44 @@ struct host_frame_accumulators
 	/* draws in the rasterizer's fog-plane and queued-transparent phases
 	(host_metal_profile_phase): where the opening's fog is */
 	uint32_t fog_draws, transparent_draws;
+	/* the telemetry's (host_telemetry.h): textures written (pixels into a
+	level, or made from DXT blocks converted here), dropped; the bytes the
+	frame streamed through its ring (vertices, indices, staged pixels) and
+	buffers made past it; the game's files read and written on this thread;
+	the shader manifest's records */
+	uint32_t texture_uploads, texture_conversions, texture_deletes, ring_overflows;
+	uint64_t texture_upload_bytes, texture_conversion_bytes, texture_conversion_ns, stream_bytes;
+	uint32_t file_reads, file_writes, manifest_writes;
+	uint64_t file_read_bytes, file_write_bytes, file_ns, manifest_bytes, manifest_ns;
+	uint32_t shadow_draws;
+	/* the view drawn now (host_telemetry_view), and each view's counts */
+	int32_t view;
+	uint64_t view_started_ns;
+	struct host_view_accumulators views[HOST_VIEWS];
 };
 extern struct host_frame_accumulators host_frame_acc;
+
+/* the counts of a draw and of a render pass begun, in the rasterizer's
+phase (-1: none) */
+static inline void host_frame_log_count_draw(int phase)
+{
+	struct host_view_accumulators *view = &host_frame_acc.views[host_frame_acc.view];
+
+	host_frame_acc.draws++;
+	host_frame_acc.fog_draws += phase == HOST_PHASE_FOG;
+	host_frame_acc.transparent_draws += phase == HOST_PHASE_TRANSPARENTS;
+	host_frame_acc.shadow_draws += phase == HOST_PHASE_SHADOWS;
+	view->draws++;
+	view->fog_draws += phase == HOST_PHASE_FOG;
+	view->transparent_draws += phase == HOST_PHASE_TRANSPARENTS;
+	view->shadow_draws += phase == HOST_PHASE_SHADOWS;
+}
+
+static inline void host_frame_log_count_pass(void)
+{
+	host_frame_acc.passes++;
+	host_frame_acc.views[host_frame_acc.view].passes++;
+}
 
 static inline uint64_t host_frame_log_now(void)
 {
@@ -75,6 +132,11 @@ void host_frame_log_gpu_hoisted(uint64_t serial, double start_seconds, double en
 void host_frame_log_presented(uint64_t serial, double presented_seconds);
 /* something to find the frames by ("map-open", "a10.map") */
 void host_frame_log_event(const char *kind, const char *detail);
+/* the GPU's times of frame serial so far (its command buffers', the
+hoisted ones' apart, and the span from the first's start to the last's
+end); 0 if its record is gone */
+int host_frame_log_gpu_of(uint64_t serial, uint64_t *gpu_ns, uint32_t *buffers, uint64_t *hoisted_ns,
+	uint64_t *span_ns);
 
 /* HALO_PASS_LOG=1 (with HALO_FRAME_LOG=1): a record of every render pass,
 kept in a ring (HALO_PASS_LOG_PASSES, default 150000) and written at exit

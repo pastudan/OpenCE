@@ -50,6 +50,22 @@ typedef unsigned int guest_address;
 #define METAL_VERTEX_FORMAT_UCHAR4_NORMALIZED 9
 #define METAL_VERTEX_FORMAT_UINT 36
 
+/* ---------- telemetry (port/macos/host/host_telemetry.h): the game's
+state, once a frame (source/main/main.c's main_game_render) */
+
+#define METAL_TELEMETRY_VIEWS 4
+struct metal_telemetry_game
+{
+	/* game_time_get's ticks (-1: no game), local players, player views
+	drawn (1 in a cinematic), the structure BSP's index (-1: none), a
+	cinematic playing */
+	int game_ticks, local_players, windows, bsp, cinematic, reserved;
+	/* each view's camera */
+	float positions[METAL_TELEMETRY_VIEWS][3];
+	/* the scenario's name, its last part (\"a10\") */
+	char map[32];
+};
+
 #define METAL_PRIMITIVE_POINT 0
 #define METAL_PRIMITIVE_LINE 1
 #define METAL_PRIMITIVE_LINE_STRIP 2

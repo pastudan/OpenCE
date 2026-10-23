@@ -402,6 +402,11 @@ symbols in this file:
 #include "tag_files/files.h"
 #include "custom_edition_cache.h" /* port: custom_edition_level_name */
 #include "view_fov.h" /* port: display.fov, before the projection and culling */
+#ifdef HALO_METAL
+/* port: the play telemetry (port/linux/src/metal_device.h, port/macos/host/host_telemetry.h) */
+void metal_device_telemetry_game(long game_ticks, long local_players, long windows, long bsp, long cinematic,
+	const float *positions, const char *map);
+#endif
 
 #if defined(HALO_WINDOWS) || defined(HALO_ANDROID) || defined(__linux__)
 #define HALO_NATIVE_BUILD_INFO 1
@@ -3326,6 +3331,23 @@ static void main_game_render(
 	window->local_player_index = NONE;
 	window->console_window = TRUE;
 	set_window_camera_values(window, NULL);
+
+#ifdef HALO_METAL
+	/* port: where the game is, for the play telemetry (diagnostic only) */
+	{
+		float positions[4][3] = { { 0 } };
+
+		for (window_index = 0; window_index < player_window_count && window_index < 4; window_index++)
+		{
+			positions[window_index][0] = global_screenshot_count.windows[window_index].render_camera.position.x;
+			positions[window_index][1] = global_screenshot_count.windows[window_index].render_camera.position.y;
+			positions[window_index][2] = global_screenshot_count.windows[window_index].render_camera.position.z;
+		}
+		metal_device_telemetry_game(game_time_initialized() ? game_time_get() : -1, local_player_count(),
+			player_window_count, global_structure_bsp_index, cinematic_in_progress(), &positions[0][0],
+			main_get_map_name());
+	}
+#endif
 
 	if (global_screenshot_count.count <= 0)
 	{

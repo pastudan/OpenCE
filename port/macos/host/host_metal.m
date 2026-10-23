@@ -44,6 +44,7 @@ indices keeps its latest count (host_metal_visibility_result).
 #include "host.h"
 #include "host_frame_log.h"
 #include "host_shader_manifest.h"
+#include "host_telemetry.h"
 #include "host_textures.h"
 #include "metal_protocol.h"
 
@@ -321,6 +322,7 @@ static void *ring_allocate(uint32_t bytes, uint32_t alignment, id<MTLBuffer> *bu
 
 	frame_begin();
 	frame = frame_current();
+	host_frame_acc.stream_bytes += bytes;
 	at = (frame->ring_used + alignment - 1) & ~(alignment - 1);
 	if ((uint64_t)at + bytes <= RING_BYTES)
 	{
@@ -335,6 +337,7 @@ static void *ring_allocate(uint32_t bytes, uint32_t alignment, id<MTLBuffer> *bu
 		NSUInteger length = bytes > (16u << 20) ? bytes : (16u << 20);
 
 		frame->overflow_current = [metal.device newBufferWithLength:length options:MTLResourceStorageModeShared];
+		host_frame_acc.ring_overflows++;
 		if (!frame->overflow)
 			frame->overflow = [NSMutableArray array];
 		[frame->overflow addObject:frame->overflow_current];
@@ -1072,7 +1075,7 @@ static BOOL encoder_begin(void)
 		pass_log_begin(descriptor);
 	encoder = [commands renderCommandEncoderWithDescriptor:descriptor];
 	encoder_serial = ++encoder_serials;
-	host_frame_acc.passes++;
+	host_frame_log_count_pass();
 	if (pass.color)
 		handles[pass.color].commands_written = commands_generation;
 	if (pass.depth)
@@ -1379,6 +1382,11 @@ void host_metal_screen_effect(int type, int passes, float radius, int video)
 
 /* (HALO_METAL_NO_BC=1: as a GPU without BC formats, the Apple TV's, would:
 the conversions on a Mac, to compare with its own BC) */
+uint64_t host_metal_allocated_bytes(void)
+{
+	return metal.device ? (uint64_t)metal.device.currentAllocatedSize : 0;
+}
+
 int host_metal_supports_bc(void)
 {
 	static int no_bc = -1;
@@ -1602,6 +1610,12 @@ void host_metal_texture_bc(unsigned int handle, int type, int kind, int into, un
 	conversions++;
 	conversion_source_bytes += (uint64_t)face_bytes * faces;
 	conversion_ns += host_frame_log_now() - started;
+	if (host_frame_log_detail())
+	{
+		host_frame_acc.texture_conversions++;
+		host_frame_acc.texture_conversion_bytes += (uint64_t)face_bytes * faces;
+		host_frame_acc.texture_conversion_ns += host_frame_log_now() - started;
+	}
 }
 
 unsigned int host_metal_texture_new(void)
@@ -1691,6 +1705,8 @@ void host_metal_texture_upload(unsigned int handle, unsigned int face, unsigned 
 	if (!depth)
 		depth = 1;
 	volume = texture.textureType == MTLTextureType3D;
+	host_frame_acc.texture_uploads++;
+	host_frame_acc.texture_upload_bytes += (uint64_t)bytes_per_image * depth;
 	@autoreleasepool
 	{
 		/* a texture no queued frame reads: written now */
@@ -1742,6 +1758,7 @@ void host_metal_texture_delete(unsigned int handle)
 		texture_account(handle, nil, 0);
 		handle_set(handle, nil);
 		handles[handle].type = _handle_free;
+		host_frame_acc.texture_deletes++;
 	}
 }
 
@@ -2510,7 +2527,16 @@ static void shader_cache_record_shader(uint32_t handle, const char *source, int 
 	index = shader_cache.sources[key];
 	if (!index)
 	{
+		uint64_t started = host_frame_log_detail() ? host_frame_log_now() : 0;
 		uint32_t added = shader_manifest_add_shader(&shader_cache.manifest, fragment, source, (uint32_t)length);
+
+		/* (a record appended: one write, no sync; the telemetry's) */
+		if (started)
+		{
+			host_frame_acc.manifest_writes++;
+			host_frame_acc.manifest_bytes += length;
+			host_frame_acc.manifest_ns += host_frame_log_now() - started;
+		}
 
 		if (added == ~0u)
 			return;
@@ -2547,8 +2573,18 @@ static void shader_cache_record_pipeline(const struct pipeline_key *key)
 	record = [NSData dataWithBytes:&pipeline length:sizeof(pipeline)];
 	if ([shader_cache.pipelines containsObject:record])
 		return;
-	if (shader_manifest_add_pipeline(&shader_cache.manifest, &pipeline))
-		[shader_cache.pipelines addObject:record];
+	{
+		uint64_t started = host_frame_log_detail() ? host_frame_log_now() : 0;
+
+		if (shader_manifest_add_pipeline(&shader_cache.manifest, &pipeline))
+			[shader_cache.pipelines addObject:record];
+		if (started)
+		{
+			host_frame_acc.manifest_writes++;
+			host_frame_acc.manifest_bytes += sizeof(pipeline);
+			host_frame_acc.manifest_ns += host_frame_log_now() - started;
+		}
+	}
 }
 
 static id<MTLDepthStencilState> depth_stencil_get(const struct metal_depth_stencil *state_key)
@@ -2804,11 +2840,9 @@ void host_metal_draw(const struct metal_draw *original)
 	struct metal_draw adjusted;
 	const struct metal_draw *draw = original;
 
-	host_frame_acc.draws++;
-	/* (_rasterizer_profile_environment_fog, _queued_transparents:
-	tools/test_metal_profile.py checks the numbers) */
-	host_frame_acc.fog_draws += profile_phase == 17;
-	host_frame_acc.transparent_draws += profile_phase == 22;
+	/* (_rasterizer_profile_environment_shadows, _environment_fog,
+	_queued_transparents: tools/test_metal_profile.py checks the numbers) */
+	host_frame_log_count_draw(profile_phase);
 	if (!metal.device || !draw->vertex_shader || !draw->fragment_shader || !draw->vertex_layout)
 		return;
 	/* HALO_METAL_ONLY: only the draws of these pixel shaders (handles,
@@ -3262,6 +3296,12 @@ void host_metal_present(void)
 		encoder_end();
 		frame_begin();
 		picture = texture_object(metal.present_source);
+		if (host_telemetry_enabled)
+		{
+			host_telemetry_sizes(metal.present_width, metal.present_height,
+				metal.layer ? (uint32_t)metal.layer.drawableSize.width : 0,
+				metal.layer ? (uint32_t)metal.layer.drawableSize.height : 0);
+		}
 		if (metal.layer)
 		{
 			int width = 0, height = 0;

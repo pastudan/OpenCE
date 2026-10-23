@@ -887,6 +887,7 @@ BOOL platform_video_initialize(unsigned long width, unsigned long height)
 	platform_fullscreen_kind_apply();
 #endif
 #ifdef HALO_METAL
+	metal_device_telemetry_configure(config_string("debug.telemetry"), config_string("debug.telemetry_live"));
 	if (!metal_device_attach(platform_window))
 	{
 		platform_log("cannot draw with Metal: %s", SDL_GetError());
