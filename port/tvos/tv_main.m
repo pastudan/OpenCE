@@ -33,6 +33,11 @@ int main(int argc, char **argv)
         /* Keep display.resolution_scaling in config.toml authoritative;
            the initial 720p bring-up override hid the player's saved choice. */
         setenv("HALO_NET_JOIN_FROM_CLIPBOARD", "false", 1);
+        /* The TV's default: the full-screen blurs' middle passes at half
+           resolution (the scopes' zoom stays full; 44-51 dB, and the A12's
+           cryo frames over 50 ms 28-39 -> 3-6: PERFORMANCE.md). Not
+           overwritten, so a launch's own HALO_HALF_RES_CONVOLUTION=0 wins. */
+        setenv("HALO_HALF_RES_CONVOLUTION", "true", 0);
         fprintf(stderr, "TV game entry: data at %s (purgeable cache)\n", getenv("HALO_DATA_ROOT"));
         fflush(stderr);
         return opence_guest_main(argc, argv);
