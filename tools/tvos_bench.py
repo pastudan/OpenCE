@@ -142,7 +142,7 @@ SCENES["latelag"] = {"init": SCENES["split"]["init"], "seconds": 600, "window_se
 # (the owner's 12-15% loss over 25-30 min), measured over 27 minutes from the
 # first two-view frame (scene_window: as split)
 SCENES["thermal"] = {"init": SCENES["b30split"]["init"], "seconds": 1830, "window_seconds": 1620.0,
-                     "map": "b30.map"}
+                     "map": "b30.map", "env": {"HALO_FRAME_LOG_FRAMES": "112000"}}
 SCENE_LABEL = {"opening": "a10 cutscene (partial)", "bridge": "a10 bridge (gameplay)",
                "b30": "b30 beach (gameplay)", "a10play": "a10 cryo bay (first gameplay)",
                "cryo": "a10 cryo bay (saved state)", "split": "a10 split screen (2 players)",
