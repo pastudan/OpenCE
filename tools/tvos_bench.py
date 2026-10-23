@@ -830,6 +830,8 @@ def main(argv=None):
     p.add_argument("--trace-seconds", type=int, default=20)
     p.add_argument("--trace-scene", default="opening", help="the scene (at 4K, warm) the traces record")
     p.add_argument("--trace-attach-after", type=int, help="seconds after launch (default: from the scene's window)")
+    p.add_argument("--salt", help="the shader salt of every run (default a new one per scene and resolution): an "
+                   "earlier session's, so that its warm shader caches are this one's too (A/B in separate sessions)")
     p.add_argument("--no-lock", action="store_true")
     p.add_argument("--no-push", action="store_true", help="device: the maps and saved states are already on the TV "
                    "(an earlier run of this session copied them)")
@@ -873,6 +875,8 @@ def main(argv=None):
     else:
         runs = plan(args.scenes.split(","), [int(r) for r in args.resolutions.split(",")], args.modes.split(","),
                     args.repeats)
+    if args.salt:
+        runs = [dict(run, salt=args.salt + ("p" if run["mode"] == "primed" else "")) for run in runs]
     extra = deploy.parse_env(args.env)
     commit = subprocess.run(["git", "-C", str(ROOT), "rev-parse", "--short=8", "HEAD"], capture_output=True,
                             text=True).stdout.strip()
