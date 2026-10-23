@@ -241,3 +241,8 @@ def test_texture_cache_keeps_a_budget_and_never_sweeps():
     assert "texture_residency_trim();" in begin
     config = (ROOT / "port/linux/src/port_config.c").read_text()
     assert '{ "debug.texture_budget_mb", _config_integer, "0", "HALO_TEXTURE_BUDGET_MB"' in config
+
+
+def test_tv_texture_budget_is_a_level_and_a_margin():
+    source = (ROOT / "port/linux/src/xbox_textures.c").read_text()
+    assert "megabytes = host_metal_supports_bc() ? 1024 : 256;" in source
