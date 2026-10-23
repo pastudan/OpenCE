@@ -6,6 +6,7 @@
     python3 tools/tvos_deploy.py sign                  # copy to scratch, embed the profile, codesign
     python3 tools/tvos_deploy.py install               # devicectl install of the signed copy
     python3 tools/tvos_deploy.py push-data --maps DIR  # ui.map/a10.map (+ init.txt) into the app's cache
+    python3 tools/tvos_deploy.py push-data --maps DIR --campaign  # every campaign map, those not there yet
     python3 tools/tvos_deploy.py backup-config         # the owner's config.toml, to a timestamped backup
     python3 tools/tvos_deploy.py restore-config [FILE] # it back (default: the newest backup)
     python3 tools/tvos_deploy.py launch --env K=V --seconds 60 --log run.log
@@ -401,14 +402,41 @@ def command_install(args):
         run(["xcrun", "devicectl", "device", "install", "app", "--device", args.device, app], timeout=600)
 
 
+# the campaign's maps (and the menus'), in the order of its levels
+CAMPAIGN_MAPS = ("ui.map", "a10.map", "a30.map", "a50.map", "b30.map", "b40.map", "c10.map", "c20.map", "c40.map",
+                 "d20.map", "d40.map")
+
+
+def remote_files(device, subdirectory, list_json):
+    """the files in a folder of the app's container: {name: size} ({} if none)"""
+    run(["xcrun", "devicectl", "device", "info", "files", "--device", device, "--domain-type", "appDataContainer",
+         "--domain-identifier", BUNDLE, "--subdirectory", subdirectory, "--no-recurse", "--json-output", list_json],
+        check=False, capture=True, timeout=180)
+    try:
+        entries = json.loads(Path(list_json).read_text())["result"]["files"]
+    except (OSError, ValueError, KeyError):
+        return {}
+    return {entry["name"]: entry.get("metadata", {}).get("size", 0) for entry in entries
+            if not entry.get("resources", {}).get("isDirectory")}
+
+
+def maps_to_push(names, maps, remote):
+    """the maps whose copy on the TV is missing or of another size"""
+    return [name for name in names if remote.get(name) != (Path(maps) / name).stat().st_size]
+
+
 def command_push_data(args):
     maps = Path(args.maps)
+    names = list(CAMPAIGN_MAPS) if args.campaign else list(args.map_files)
+    for name in names:
+        if not (maps / name).is_file():
+            raise DeployError(f"{maps / name} missing")
     with HeavyLock("devicectl push-data", enabled=not args.no_lock):
-        for name in args.map_files:
-            source = maps / name
-            if not source.is_file():
-                raise DeployError(f"{source} missing")
-            run(copy_args("to", args.device, source, f"Library/Caches/OpenCE/maps/{name}"), timeout=900)
+        remote = remote_files(args.device, "Library/Caches/OpenCE/maps", SCRATCH / "tv-deploy-maps.json")
+        pushing = maps_to_push(names, maps, remote) if not args.force else names
+        print(f"maps: {len(names) - len(pushing)} already on the TV at the same size, pushing {pushing}", flush=True)
+        for name in pushing:
+            run(copy_args("to", args.device, maps / name, f"Library/Caches/OpenCE/maps/{name}"), timeout=1800)
         if args.init:
             run(copy_args("to", args.device, args.init, "Library/Caches/OpenCE/init.txt"), timeout=120)
 
@@ -604,6 +632,8 @@ def main(argv=None):
     p = sub.add_parser("push-data")
     p.add_argument("--maps", required=True, help="a folder holding the maps (your own)")
     p.add_argument("--map-files", nargs="+", default=["ui.map", "a10.map"])
+    p.add_argument("--campaign", action="store_true", help=f"all of {', '.join(CAMPAIGN_MAPS)}")
+    p.add_argument("--force", action="store_true", help="push them even if the TV has them at the same size")
     p.add_argument("--init", help="an init.txt to put beside them")
     p.set_defaults(handler=command_push_data)
 
