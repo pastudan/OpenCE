@@ -1059,10 +1059,13 @@ static unsigned long texture_host_bytes(const struct xgpu_texture_description *d
 
 /* the host memory the cache keeps its textures in (debug.texture_budget_mb,
 0 for this build's own): a Mac's GPU samples DXT as it is and has memory to
-spare; the Apple TV's converts it (four times the bytes in "exact"), and its
-app has ~2 GB in all, of which the game's memory and targets take ~1 GB (a
-full level's textures came to < 200 MB in tests: the budget is rarely
-reached); Android and the web have the least */
+spare. A GPU without BC (the Apple TV's) converts DXT, four times the bytes
+in "exact", and the TV app's footprint must stay well under what tvOS lets
+it have (at ~1.3 GB it reclaimed memory under the game: freezes of seconds,
+port/tvos/PERFORMANCE.md): 256 MiB, a level's working set (a10 or b30 in
+split screen: 130 to 200 MiB of host textures in all) and a margin; past it
+textures of the areas and maps left behind go, a few a frame. Android and
+the web have the least */
 static unsigned long long texture_budget_bytes(void)
 {
 	static unsigned long long budget;
@@ -1074,7 +1077,7 @@ static unsigned long long texture_budget_bytes(void)
 		if (megabytes <= 0)
 		{
 #if defined(HALO_METAL)
-			megabytes = host_metal_supports_bc() ? 1024 : 512;
+			megabytes = host_metal_supports_bc() ? 1024 : 256;
 #elif defined(HALO_GLES)
 			megabytes = 256;
 #else

@@ -143,12 +143,20 @@ SCENES["latelag"] = {"init": SCENES["split"]["init"], "seconds": 600, "window_se
 # first two-view frame (scene_window: as split)
 SCENES["thermal"] = {"init": SCENES["b30split"]["init"], "seconds": 1830, "window_seconds": 1620.0,
                      "map": "b30.map", "env": {"HALO_FRAME_LOG_FRAMES": "112000"}}
+# b30 split screen from a fresh launch for 15 minutes (b30long), player 1 played by the
+# test bot (walking, turning, firing, grenades): the owner's co-op session
+# whose memory grew until tvOS reclaimed it; for the footprint and Metal
+# allocations over time (the play telemetry's footprint_mb, metal_mb)
+SCENES["b30long"] = {"init": ["player_spawn_count 2", "map_name levels\\b30\\b30"], "seconds": 900,
+                     "window_seconds": 780.0, "map": "b30.map",
+                     "env": {"HALO_TEST_INPUT": "bot:1", "HALO_TELEMETRY": "on"}}
 SCENE_LABEL = {"opening": "a10 cutscene (partial)", "bridge": "a10 bridge (gameplay)",
                "b30": "b30 beach (gameplay)", "a10play": "a10 cryo bay (first gameplay)",
                "cryo": "a10 cryo bay (saved state)", "split": "a10 split screen (2 players)",
                "latelag": "a10 split screen, two areas in turn (10 min)",
                "b30split": "b30 beach split screen (2 players)",
-               "thermal": "b30 beach split screen, 30 min (thermal)"}
+               "thermal": "b30 beach split screen, 30 min (thermal)",
+               "b30long": "b30 split screen, bot player (15 min)"}
 FOG_START_DRAWS = 20
 FOG_SUSTAIN_SECONDS = 5.0
 SERIES = ("wall_ms", "gpu_ms", "guest_ms", "host_ms", "compile_ms", "wait_drawable_ms", "wait_inflight_ms",
@@ -222,7 +230,7 @@ def scene_window(scene, events, rows, window_seconds=None):
         if start is None:
             return [], "the cryo bay (>= 40 fog-plane draws) was never reached"
         description = f"a10 cryo bay: {window_seconds:g} s from frame {rows[start]['serial']}"
-    elif scene in ("split", "latelag", "b30split", "thermal"):
+    elif scene in ("split", "latelag", "b30split", "thermal", "b30long"):
         # (the first frame drawn as two player views, after the cinematic)
         views = [e for e in events if e["kind"] == "views" and e["detail"] == "2"]
         split = None
