@@ -195,6 +195,150 @@ static struct rasterizer_model_begin_parameters const *local_parameters = NULL;
 static boolean shadow_setup = FALSE;
 static boolean shadow_used = FALSE;
 
+/* port: the screen rectangle outside which an object's shadow, projected
+onto the level, changes no pixel (halo_draw_bounds: the Metal device clips
+the shadow's draws to it, which on a 4K screen saves shading and blending
+the whole of each large level triangle under a small shadow).
+
+The draw (_rasterizer_environment_shadow_draw's combiners) multiplies the
+screen by 1 - a * t0 * (1 - shadow color), a = (1 - t1) * facing, and
+discards where that is nothing: a pixel is left exactly as it was wherever
+t0, the shadow map, is 0 or t1, the fade, is 1. The map is sampled at
+u = forward.(p - position) / 2r + 0.5 and v = 0.5 - left.(p - position) / 2r
+with a border of 0, so it is 0 more than a filter's reach outside u and v of
+0 to 1: forward and left within r of the position, which MARGIN widens by 4
+of the Xbox map's texels. The fade (globals' linear_corner_fade, a 16x16
+max(s, t) ramp, clamped) is sampled at s = d / 4r and t = -2d / r for
+d = up.(p - position): it is 1 for d >= 3.875r and d <= -0.484r, inside the
+volume's planes at 4r and -0.5r (render_object_shadow_end). So no pixel
+outside the box forward, left in [-r, r] * MARGIN, up in [-0.5r, 4r] about
+the position changes: what the box covers on the screen bounds the draws.
+A fragment outside its projection shades a point of the level outside the
+box, whose interpolated u, v and d are those of the point.
+
+Only the part of the box on the far side of the near plane is drawn: the
+shadow's vertex shader keeps the frustum's clip z (rasterizer_set_frustum_z's
+transform; d3d8_metal.c's viewport undoing leaves z as it was), and the GPU
+clips what has z < 0. So the box is cut there first, which matters for the
+closest and largest shadow, the player's own, whose box (4r up toward the
+light) the camera is often inside: its corners on the far side and the
+points where its 12 edges cross the plane span what is drawn. FALSE (no
+bounds) when one of those has w <= 0 (cannot happen past a near plane
+in front of the camera, but then the projection would bound nothing) or
+none is on the far side (nothing of it is drawn; left to the GPU). */
+#define SHADOW_BOUNDS_MARGIN (1.0f + 4.0f / 64.0f)
+
+static boolean rasterizer_shadow_screen_bounds(
+	short *bounds)
+{
+	struct render_frustum const *frustum = &global_window_parameters.frustum;
+	rectangle2d const *viewport = &global_window_parameters.camera.viewport_bounds;
+	real width = (real)(viewport->x1 - viewport->x0);
+	real height = (real)(viewport->y1 - viewport->y0);
+	real r = local_object_bounding_radius;
+	real x0 = 0.0f, y0 = 0.0f, x1 = 0.0f, y1 = 0.0f;
+	/* each corner's clip x, y, z, w, then the points that bound the box
+	past the near plane */
+	real clip[8][4];
+	real points[8 + 12][4];
+	short point_count = 0;
+	short corner;
+	short index;
+
+	if (r <= 0.0f || width <= 0.0f || height <= 0.0f)
+		return FALSE;
+	for (corner = 0; corner < 8; corner++)
+	{
+		real a = (corner & 1) ? r * SHADOW_BOUNDS_MARGIN : -r * SHADOW_BOUNDS_MARGIN;
+		real b = (corner & 2) ? r * SHADOW_BOUNDS_MARGIN : -r * SHADOW_BOUNDS_MARGIN;
+		real c = (corner & 4) ? r * 4.0f : r * -0.5f;
+		real point[3];
+		real view[3];
+		short axis;
+
+		for (axis = 0; axis < 3; axis++)
+		{
+			point[axis] = local_shadow_matrix.position.n[axis] +
+				a * local_shadow_matrix.forward.n[axis] +
+				b * local_shadow_matrix.left.n[axis] +
+				c * local_shadow_matrix.up.n[axis];
+		}
+		/* (the world to clip transform of rasterizer_set_frustum_z, which
+		the shadow's vertex shader projects with) */
+		for (axis = 0; axis < 3; axis++)
+		{
+			view[axis] = point[0] * frustum->world_to_view.n[0][axis] +
+				point[1] * frustum->world_to_view.n[1][axis] +
+				point[2] * frustum->world_to_view.n[2][axis] +
+				frustum->world_to_view.n[3][axis];
+		}
+		for (axis = 0; axis < 4; axis++)
+		{
+			clip[corner][axis] = view[0] * frustum->projection_matrix[0][axis] +
+				view[1] * frustum->projection_matrix[1][axis] +
+				view[2] * frustum->projection_matrix[2][axis] +
+				frustum->projection_matrix[3][axis];
+		}
+		if (clip[corner][2] >= 0.0f)
+		{
+			for (axis = 0; axis < 4; axis++)
+				points[point_count][axis] = clip[corner][axis];
+			point_count++;
+		}
+	}
+	/* (the edges join corners that differ in one bit) */
+	for (corner = 0; corner < 8; corner++)
+	{
+		short bit;
+
+		for (bit = 1; bit < 8; bit <<= 1)
+		{
+			short other = corner | bit;
+			real z0 = clip[corner][2];
+			real z1 = clip[other][2];
+			real t;
+			short axis;
+
+			if (other == corner || (z0 >= 0.0f) == (z1 >= 0.0f))
+				continue;
+			t = z0 / (z0 - z1);
+			for (axis = 0; axis < 4; axis++)
+				points[point_count][axis] = clip[corner][axis] + t * (clip[other][axis] - clip[corner][axis]);
+			point_count++;
+		}
+	}
+	if (!point_count)
+		return FALSE;
+	for (index = 0; index < point_count; index++)
+	{
+		real screen_x, screen_y;
+
+		if (!(points[index][3] > 0.0001f))
+			return FALSE;
+		screen_x = (real)viewport->x0 + (points[index][0] / points[index][3] + 1.0f) * 0.5f * width;
+		screen_y = (real)viewport->y0 + (1.0f - points[index][1] / points[index][3]) * 0.5f * height;
+		if (!index || screen_x < x0)
+			x0 = screen_x;
+		if (!index || screen_x > x1)
+			x1 = screen_x;
+		if (!index || screen_y < y0)
+			y0 = screen_y;
+		if (!index || screen_y > y1)
+			y1 = screen_y;
+	}
+	/* (two of the game's units more each way: pixel centres and rounding) */
+	x0 = PIN(x0 - 2.0f, (real)viewport->x0, (real)viewport->x1);
+	x1 = PIN(x1 + 2.0f, (real)viewport->x0, (real)viewport->x1);
+	y0 = PIN(y0 - 2.0f, (real)viewport->y0, (real)viewport->y1);
+	y1 = PIN(y1 + 2.0f, (real)viewport->y0, (real)viewport->y1);
+	bounds[0] = (short)x0;
+	bounds[1] = (short)y0;
+	bounds[2] = (short)x1 + (x1 > (real)(short)x1 ? 1 : 0);
+	bounds[3] = (short)y1 + (y1 > (real)(short)y1 ? 1 : 0);
+
+	return TRUE;
+}
+
 /* ---------- public code */
 
 void _rasterizer_environment_shadows_begin(
@@ -529,6 +673,9 @@ void _rasterizer_environment_shadow_end(
 		563,
 		global_d3d_device);
 
+	/* port: (the shadow's clip ends with it) */
+	halo_draw_bounds(FALSE, 0, 0, 0, 0);
+
 	if (global_window_parameters.rasterizer_target ==
 			_rasterizer_target_render_primary &&
 		rasterizer_debug_options.draw_environment_shadows)
@@ -813,6 +960,18 @@ void _rasterizer_environment_shadow_draw(
 				shadow_restored = TRUE;
 			}
 
+			/* port: the shadow's draws clipped to where they can change a
+			pixel (rasterizer_shadow_screen_bounds) */
+			{
+				short bounds[4];
+
+				if (!rasterizer_debug_options.shadow_debug_enabled &&
+					rasterizer_shadow_screen_bounds(bounds))
+				{
+					halo_draw_bounds(TRUE, bounds[0], bounds[1], bounds[2], bounds[3]);
+				}
+			}
+
 			shadow_setup = TRUE;
 		}
 
@@ -842,6 +1001,7 @@ void _rasterizer_environment_shadow_draw(
 void _rasterizer_environment_shadows_end(
 	void)
 {
+	halo_draw_bounds(FALSE, 0, 0, 0, 0);
 	rasterizer_profile_end(_rasterizer_profile_environment_shadows);
 
 	return;

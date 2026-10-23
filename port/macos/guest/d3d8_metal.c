@@ -284,6 +284,34 @@ void halo_screen_ui_offset(unsigned char centered)
 	ui_offset = centered ? (halo_screen_width() - 640) / 2 : 0;
 }
 
+/* halo_draw_bounds: the rectangle (the game's units) outside which the next
+draws change no pixel, which the draws' scissors are clipped to
+(apply_raster_state): an object's shadow projected onto the level, which
+otherwise shades and blends every pixel of each level triangle under it
+(rasterizer_xbox_shadows.c says why nothing outside changes). On a 4K
+screen most of those pixels are far outside the shadow. HALO_SHADOW_BOUNDS
+(diagnostic) = 0 draws without the clip, toggle:N with it in even blocks of
+N frames and without in odd, to compare the two in one run */
+static struct
+{
+	BOOL active;
+	short x0, y0, x1, y1;
+} draw_bounds;
+
+/* -1 until read; 0 off, 1 on, N > 1 the toggle's blocks */
+static long draw_bounds_setting = -1;
+
+static BOOL draw_bounds_enabled(void);
+
+void halo_draw_bounds(unsigned char active, short x0, short y0, short x1, short y1)
+{
+	draw_bounds.active = active && draw_bounds_enabled();
+	draw_bounds.x0 = x0;
+	draw_bounds.y0 = y0;
+	draw_bounds.x1 = x1;
+	draw_bounds.y1 = y1;
+}
+
 /* ---------- state the XDK header's inline functions read and write */
 
 DWORD D3D__RenderState[D3DRS_MAX];
@@ -485,6 +513,9 @@ static struct
 	unsigned long target_changes;
 	/* vertex and index bytes drawn from the mirror, and streamed */
 	unsigned long mirrored_bytes, streamed_bytes;
+	/* draws halo_draw_bounds clipped, and their scissors' pixels (thousands)
+	before and after */
+	unsigned long bounded_draws, bounded_kpixels_before, bounded_kpixels_after;
 } stats;
 
 static D3DDevice *device_pointer(void)
@@ -2703,6 +2734,26 @@ static metal_u32 blend_operation(DWORD operation)
 	}
 }
 
+/* HALO_SHADOW_BOUNDS (halo_draw_bounds): on unless 0; toggle:N alternates */
+static BOOL draw_bounds_enabled(void)
+{
+	if (draw_bounds_setting < 0)
+	{
+		const char *setting = getenv("HALO_SHADOW_BOUNDS");
+
+		draw_bounds_setting = 1;
+		if (setting && !strcmp(setting, "0"))
+			draw_bounds_setting = 0;
+		else if (setting && !strncmp(setting, "toggle:", 7) && atol(setting + 7) > 1)
+			draw_bounds_setting = atol(setting + 7);
+		if (draw_bounds_setting != 1)
+			platform_log("shadow bounds: HALO_SHADOW_BOUNDS=%s (diagnostic)", setting);
+	}
+	if (draw_bounds_setting <= 1)
+		return draw_bounds_setting == 1;
+	return (device.frame / (unsigned long)draw_bounds_setting) % 2 == 0;
+}
+
 /* the draw's fixed-function state; what a disabled test or blend would
 have read is left zero, so that the host's state objects are found again */
 static void apply_raster_state(BOOL has_depth, struct metal_draw *draw)
@@ -2729,6 +2780,29 @@ static void apply_raster_state(BOOL has_depth, struct metal_draw *draw)
 	{
 		GLint left = x0 > 0 ? x0 : 0, top = y0 > 0 ? y0 : 0;
 
+		/* (and to halo_draw_bounds', when it is set: an empty one draws
+		nothing) */
+		if (draw_bounds.active)
+		{
+			GLint bounds_left = target_pixel((float)draw_bounds.x0, 0);
+			GLint bounds_top = target_pixel((float)draw_bounds.y0, 1);
+			GLint bounds_right = target_pixel((float)draw_bounds.x1, 0);
+			GLint bounds_bottom = target_pixel((float)draw_bounds.y1, 1);
+
+			stats.bounded_draws++;
+			stats.bounded_kpixels_before += x1 > left && y1 > top ?
+				(unsigned long)(x1 - left) * (unsigned long)(y1 - top) / 1000 : 0;
+			if (bounds_left > left)
+				left = bounds_left;
+			if (bounds_top > top)
+				top = bounds_top;
+			if (bounds_right < x1)
+				x1 = bounds_right;
+			if (bounds_bottom < y1)
+				y1 = bounds_bottom;
+			stats.bounded_kpixels_after += x1 > left && y1 > top ?
+				(unsigned long)(x1 - left) * (unsigned long)(y1 - top) / 1000 : 0;
+		}
 		draw->scissor[0] = (metal_u32)left;
 		draw->scissor[1] = (metal_u32)top;
 		draw->scissor[2] = x1 > left ? (metal_u32)(x1 - left) : 0;
@@ -4090,6 +4164,10 @@ void WINAPI D3DDevice_Present(CONST RECT *source_rectangle, CONST RECT *destinat
 			device.frame, stats.draws / stats.presents, stats.immediate_draws / stats.presents, stats.clears / stats.presents,
 			stats.target_changes / stats.presents, stats.skipped_no_program, stats.skipped_no_target, stats.skipped_link,
 			stats.streamed_bytes / stats.presents / 1024);
+		if (stats.bounded_draws)
+			platform_log("frame %lu: shadow bounds clipped %lu draws a frame, their scissors %lu -> %lu kpixels a frame",
+				device.frame, stats.bounded_draws / stats.presents, stats.bounded_kpixels_before / stats.presents,
+				stats.bounded_kpixels_after / stats.presents);
 		memset(&stats, 0, sizeof(stats));
 	}
 	platform_pump_events();

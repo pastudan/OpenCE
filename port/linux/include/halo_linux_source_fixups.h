@@ -66,6 +66,13 @@ long halo_screen_commit(void);
 /* the shadow maps' pixels for each of their 128 texels each way, a power of
 two (display.shadow_resolution) */
 long halo_shadow_map_scale(void);
+/* the rectangle of the screen (the game's units, those of the window's
+viewport: x0 <= x < x1, y0 <= y < y1; empty when x1 <= x0 or y1 <= y0)
+outside which the draws from now on change no pixel, or (active FALSE)
+none: a renderer may clip them to it. An object's shadow projected onto
+the level (rasterizer_xbox_shadows.c); port/macos/guest/d3d8_metal.c clips,
+port/linux/src/d3d8_gl.c does not */
+void halo_draw_bounds(unsigned char active, short x0, short y0, short x1, short y1);
 /* while TRUE, drawing shifts right to center 640-column layouts */
 void halo_screen_ui_offset(unsigned char centered);
 /* names a model lighting vertex program, whose draws can be lit for each
