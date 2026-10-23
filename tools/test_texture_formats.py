@@ -218,3 +218,26 @@ def test_guest_hands_dxt_to_the_host_where_no_bc():
     assert "host_metal_texture_bc(" in upload
     config = (ROOT / "port/linux/src/port_config.c").read_text()
     assert '"display.texture_format", _config_string, "\\"exact\\""' in config
+
+
+def test_texture_cache_keeps_a_budget_and_never_sweeps():
+    """xbox_textures.c's residency: no periodic mass drop (the old
+    every-600-frames sweep of every texture unused for 1800), a byte budget
+    trimmed a few textures a frame, and a dropped texture forgotten only from
+    its own recent_textures slot"""
+    source = (ROOT / "port/linux/src/xbox_textures.c").read_text()
+    assert "texture_frame % 600" not in source and "TEXTURE_IDLE_FRAMES" not in source
+    assert "texture_drop_serial" not in source
+    assert "#define TEXTURE_EVICTIONS_PER_FRAME 4" in source
+    trim = source[source.index("static void texture_residency_trim(void)"):]
+    trim = trim[:trim.index("\n}\n")]
+    assert "dropped < TEXTURE_EVICTIONS_PER_FRAME" in trim and "texture_residency.bytes > budget" in trim
+    assert "TEXTURE_RESIDENT_FRAMES" in trim
+    delete = source[source.index("static void texture_entry_delete("):]
+    delete = delete[:delete.index("\n}\n")]
+    assert "recent_textures[recent].entry == entry" in delete and "memset(recent_textures" not in delete
+    assert "xgpu_gl_state_invalidate" not in delete
+    begin = source[source.index("void xgpu_texture_cache_begin_frame(void)"):]
+    assert "texture_residency_trim();" in begin
+    config = (ROOT / "port/linux/src/port_config.c").read_text()
+    assert '{ "debug.texture_budget_mb", _config_integer, "0", "HALO_TEXTURE_BUDGET_MB"' in config

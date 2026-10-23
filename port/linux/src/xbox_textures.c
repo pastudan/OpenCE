@@ -965,18 +965,22 @@ struct texture_entry
 	memory watch serial read before it was found: the same while no watched
 	page has been written since (0: never found) */
 	unsigned long watched_serial, watched_generation;
+	/* its place in the residency list (least recently used first), and the
+	host memory its texture takes, about (texture_host_bytes) */
+	struct texture_entry *older, *newer;
+	unsigned long host_bytes;
 };
 
 #define TEXTURE_BUCKET_COUNT 4096
-#define TEXTURE_IDLE_FRAMES 1800
 #define MAXIMUM_PALETTE_VARIANTS 8
 
 static struct texture_entry *texture_buckets[TEXTURE_BUCKET_COUNT];
 
 /* Draws mostly bind the textures the draws before them bound. A lookup of a
 texture that is not palettized is remembered with the memory watch serial it
-started at: while no watched page has been written since, and no texture
-has been dropped, the same lookup finds the same current texture. */
+started at: while no watched page has been written since, the same lookup
+finds the same current texture (an entry dropped is forgotten from its slot:
+texture_entry_delete). */
 #define RECENT_TEXTURE_COUNT 512
 
 static struct
@@ -984,10 +988,31 @@ static struct
 	DWORD data, format_word, size_word;
 	struct texture_entry *entry;
 	unsigned long watch_serial;
-	unsigned long drop_serial;
 } recent_textures[RECENT_TEXTURE_COUNT];
-static unsigned long texture_drop_serial = 1;
 static unsigned long texture_frame = 0;
+
+/*
+Residency. A host texture is only a copy of texels in guest memory, made
+again from them whenever it is needed; keeping it costs memory, dropping it
+costs the time to make it again (on the Apple TV a DXT conversion on the
+main thread). The textures are kept up to a budget of host memory
+(debug.texture_budget_mb; texture_budget_bytes) and, past it, the least
+recently drawn are dropped a few a frame (TEXTURE_EVICTIONS_PER_FRAME), never
+one used in the last TEXTURE_RESIDENT_FRAMES. Nothing is dropped for its age
+alone: the old rule (every 600 frames, every texture unused for 1800) dropped
+hundreds at once, and each came back as a synchronous conversion when it was
+seen again, the play's periodic stretches of lag (port/tvos/PERFORMANCE.md).
+*/
+#define TEXTURE_EVICTIONS_PER_FRAME 4
+#define TEXTURE_RESIDENT_FRAMES 300
+
+static struct
+{
+	struct texture_entry *oldest, *newest;
+	unsigned long long bytes;
+	unsigned long count;
+	unsigned long long evictions;
+} texture_residency;
 
 /* (every bit of the three mixed into the top ones: textures are aligned,
 and few sizes and formats are common) */
@@ -997,6 +1022,155 @@ static unsigned long bucket_index(DWORD data, DWORD format_word, DWORD size_word
 		(unsigned long)size_word * 3266489917UL;
 
 	return ((hash & 0xffffffffUL) >> 20) % TEXTURE_BUCKET_COUNT;
+}
+
+/* the host memory a texture of this description takes, about: its levels'
+texels at 4 bytes (everything is converted to BGRA), DXT as the guest has it
+where the GPU samples it, or as converted (ASTC: a byte a texel) */
+static unsigned long texture_host_bytes(const struct xgpu_texture_description *description)
+{
+	unsigned long long texels = 0, bytes;
+	unsigned long level;
+
+	for (level = 0; level < description->levels; level++)
+	{
+		texels += (unsigned long long)level_dimension(description->width, level) *
+			level_dimension(description->height, level) * level_dimension(description->depth, level);
+	}
+	if (description->cube_map)
+		texels *= 6;
+	bytes = texels * 4;
+	if (description->compressed)
+	{
+#ifdef HALO_METAL
+		if (host_metal_supports_bc())
+			bytes = (unsigned long long)xgpu_texture_face_size(description) * (description->cube_map ? 6 : 1);
+		else if (bc_conversion() == _metal_bc_astc && description->depth == 1)
+			bytes = texels;
+#else
+#ifdef HALO_GLES
+		if (xgpu_capabilities.s3tc)
+#endif
+			bytes = (unsigned long long)xgpu_texture_face_size(description) * (description->cube_map ? 6 : 1);
+#endif
+	}
+	return bytes > 0xffffffffUL ? 0xffffffffUL : (unsigned long)bytes;
+}
+
+/* the host memory the cache keeps its textures in (debug.texture_budget_mb,
+0 for this build's own): a Mac's GPU samples DXT as it is and has memory to
+spare; the Apple TV's converts it (four times the bytes in "exact"), and its
+app has ~2 GB in all, of which the game's memory and targets take ~1 GB (a
+full level's textures came to < 200 MB in tests: the budget is rarely
+reached); Android and the web have the least */
+static unsigned long long texture_budget_bytes(void)
+{
+	static unsigned long long budget;
+
+	if (!budget)
+	{
+		long megabytes = config_integer("debug.texture_budget_mb");
+
+		if (megabytes <= 0)
+		{
+#if defined(HALO_METAL)
+			megabytes = host_metal_supports_bc() ? 1024 : 512;
+#elif defined(HALO_GLES)
+			megabytes = 256;
+#else
+			megabytes = 512;
+#endif
+		}
+		budget = (unsigned long long)megabytes << 20;
+		platform_log("textures: kept up to %ld MiB of host textures", megabytes);
+	}
+	return budget;
+}
+
+static void residency_unlink(struct texture_entry *entry)
+{
+	if (entry->older)
+		entry->older->newer = entry->newer;
+	else if (texture_residency.oldest == entry)
+		texture_residency.oldest = entry->newer;
+	if (entry->newer)
+		entry->newer->older = entry->older;
+	else if (texture_residency.newest == entry)
+		texture_residency.newest = entry->older;
+	entry->older = entry->newer = NULL;
+}
+
+static void residency_append(struct texture_entry *entry)
+{
+	entry->older = texture_residency.newest;
+	entry->newer = NULL;
+	if (texture_residency.newest)
+		texture_residency.newest->newer = entry;
+	else
+		texture_residency.oldest = entry;
+	texture_residency.newest = entry;
+}
+
+/* an entry drawn this frame: moved to the newest end, once a frame (the
+order among one frame's entries does not matter) */
+static void texture_entry_touch(struct texture_entry *entry)
+{
+	if (entry->last_used_frame == texture_frame)
+		return;
+	entry->last_used_frame = texture_frame;
+	residency_unlink(entry);
+	residency_append(entry);
+}
+
+/* an entry's host textures let go, and the entry itself: out of its bucket
+and the residency list, and out of any recent_textures slot that holds it
+(the others stay valid) */
+static void texture_entry_delete(struct texture_entry *entry)
+{
+	struct texture_entry **link = &texture_buckets[bucket_index(entry->data, entry->format_word, entry->size_word)];
+	unsigned long recent = bucket_index(entry->data, entry->format_word, entry->size_word) % RECENT_TEXTURE_COUNT;
+
+	while (*link && *link != entry)
+		link = &(*link)->next;
+	if (*link)
+		*link = entry->next;
+	residency_unlink(entry);
+	texture_residency.bytes -= entry->host_bytes;
+	texture_residency.count--;
+	/* (a lookup's slot is its bucket's: only that one can hold it) */
+	if (recent_textures[recent].entry == entry)
+		recent_textures[recent].entry = NULL;
+#ifdef HALO_METAL
+	host_metal_texture_delete(entry->texture);
+	if (entry->hud_upscale)
+		host_metal_texture_delete(entry->hud_upscale);
+#else
+	xgpu_gl_texture_deleted(entry->texture);
+	glDeleteTextures(1, &entry->texture);
+	if (entry->hud_upscale)
+	{
+		xgpu_gl_texture_deleted(entry->hud_upscale);
+		glDeleteTextures(1, &entry->hud_upscale);
+	}
+#endif
+	free(entry);
+}
+
+/* past the budget, the least recently drawn dropped: a few a frame, and
+none drawn in the last TEXTURE_RESIDENT_FRAMES (what is in view stays,
+whatever it costs) */
+static void texture_residency_trim(void)
+{
+	unsigned long long budget = texture_budget_bytes();
+	int dropped = 0;
+
+	while (texture_residency.bytes > budget && dropped < TEXTURE_EVICTIONS_PER_FRAME && texture_residency.oldest &&
+		texture_frame - texture_residency.oldest->last_used_frame > TEXTURE_RESIDENT_FRAMES)
+	{
+		texture_entry_delete(texture_residency.oldest);
+		texture_residency.evictions++;
+		dropped++;
+	}
 }
 
 /* palettized textures are cached per palette contents: the game rewrites
@@ -1119,13 +1293,12 @@ GLuint xgpu_texture_get(const DWORD *resource, const D3DCOLOR *palette, GLenum *
 	dropped: remembered, a page written since only means checking it) */
 	entry = NULL;
 	if (!palettized && recent_textures[recent].entry && recent_textures[recent].data == data &&
-		recent_textures[recent].format_word == format_word && recent_textures[recent].size_word == size_word &&
-		recent_textures[recent].drop_serial == texture_drop_serial)
+		recent_textures[recent].format_word == format_word && recent_textures[recent].size_word == size_word)
 	{
 		entry = recent_textures[recent].entry;
 		if (recent_textures[recent].watch_serial == watch_serial)
 		{
-			entry->last_used_frame = texture_frame;
+			texture_entry_touch(entry);
 			return texture_entry_result(entry, target, description);
 		}
 	}
@@ -1186,6 +1359,11 @@ GLuint xgpu_texture_get(const DWORD *resource, const D3DCOLOR *palette, GLenum *
 #endif
 		entry->next = *bucket;
 		*bucket = entry;
+		entry->host_bytes = entry->size ? texture_host_bytes(&entry->description) : 0;
+		entry->last_used_frame = texture_frame - 1;
+		residency_append(entry);
+		texture_residency.bytes += entry->host_bytes;
+		texture_residency.count++;
 	}
 
 	if (no_cache < 0)
@@ -1253,7 +1431,7 @@ GLuint xgpu_texture_get(const DWORD *resource, const D3DCOLOR *palette, GLenum *
 				custom_edition_texels_order(entry->address));
 		}
 	}
-	entry->last_used_frame = texture_frame;
+	texture_entry_touch(entry);
 	if (!palettized && !no_cache)
 	{
 		recent_textures[recent].data = data;
@@ -1261,7 +1439,6 @@ GLuint xgpu_texture_get(const DWORD *resource, const D3DCOLOR *palette, GLenum *
 		recent_textures[recent].size_word = size_word;
 		recent_textures[recent].entry = entry;
 		recent_textures[recent].watch_serial = watch_serial;
-		recent_textures[recent].drop_serial = texture_drop_serial;
 	}
 	return texture_entry_result(entry, target, description);
 }
@@ -1290,37 +1467,12 @@ void xgpu_texture_cache_begin_frame(void)
 		xgpu_gl_state_invalidate();
 	}
 	texture_frame++;
-	if (texture_frame % 600)
-		return;
-	/* drop textures that have not been used for a while */
-	for (index = 0; index < TEXTURE_BUCKET_COUNT; index++)
+	texture_residency_trim();
+	/* (the cache's state in the log now and then, with HALO_TEXTURE_LOG) */
+	if (texture_frame % 3600 == 0 && config_boolean("debug.texture_log"))
 	{
-		struct texture_entry **link = &texture_buckets[index];
-
-		while (*link)
-		{
-			struct texture_entry *entry = *link;
-
-			if (texture_frame - entry->last_used_frame > TEXTURE_IDLE_FRAMES)
-			{
-				*link = entry->next;
-#ifdef HALO_METAL
-				host_metal_texture_delete(entry->texture);
-				if (entry->hud_upscale)
-					host_metal_texture_delete(entry->hud_upscale);
-#else
-				glDeleteTextures(1, &entry->texture);
-				if (entry->hud_upscale)
-					glDeleteTextures(1, &entry->hud_upscale);
-#endif
-				xgpu_gl_state_invalidate();
-				texture_drop_serial++;
-				free(entry);
-			}
-			else
-			{
-				link = &entry->next;
-			}
-		}
+		platform_log("textures: %lu kept, %.1f MiB of host textures (budget %.0f MiB), %llu dropped for it",
+			texture_residency.count, texture_residency.bytes / 1048576.0, texture_budget_bytes() / 1048576.0,
+			texture_residency.evictions);
 	}
 }

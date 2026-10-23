@@ -625,6 +625,10 @@ static const struct config_setting config_settings[] =
 		"Log texture uploads." },
 	{ "debug.texture_no_cache", _config_boolean, "false", "HALO_TEXTURE_NO_CACHE", _environment_set_is_true, _platform_all,
 		"Upload textures again every time they are used." },
+	{ "debug.texture_budget_mb", _config_integer, "0", "HALO_TEXTURE_BUDGET_MB", _environment_value, _platform_all,
+		"The host memory, in MiB, the texture cache keeps textures in before it\n"
+		"drops the least recently drawn, a few a frame; 0 for the build's own\n"
+		"(1024 on a Mac, 512 on the Apple TV and Linux, 256 on Android and the web)." },
 	{ "debug.sample_seconds", _config_real, "0.0", "HALO_SAMPLE", _environment_value, _platform_android,
 		"Log where every game thread is this often, in seconds (read by the\n"
 		"app, port/android/host/host_debug.c); 0 never." },
