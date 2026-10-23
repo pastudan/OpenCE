@@ -1594,6 +1594,11 @@ static void texture_account(uint32_t handle, id<MTLTexture> texture, int convert
 		textures_report();
 }
 
+long long host_metal_sampled_bytes(void)
+{
+	return (long long)textures_total;
+}
+
 /* a target's bytes (nil: none any more) */
 static void target_account(uint32_t handle, id<MTLTexture> texture)
 {

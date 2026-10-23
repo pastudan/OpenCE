@@ -173,6 +173,9 @@ void host_metal_texture_upload(unsigned int texture, unsigned int face, unsigned
 	unsigned int y, unsigned int z, unsigned int width, unsigned int height, unsigned int depth, const void *data,
 	unsigned int bytes_per_row, unsigned int bytes_per_image);
 void host_metal_texture_delete(unsigned int texture);
+/* the bytes Metal allocated for every sampled texture (the texture cache's
+budget: xbox_textures.c) */
+long long host_metal_sampled_bytes(void);
 void host_metal_texture_copy_level(unsigned int source, unsigned int destination, unsigned int level,
 	unsigned int width, unsigned int height);
 void host_metal_texture_generate_mipmaps(unsigned int texture, unsigned int first);
