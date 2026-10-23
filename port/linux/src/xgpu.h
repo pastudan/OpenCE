@@ -262,7 +262,9 @@ struct nv2a_pixel_shader_key
 /* nv2a_pixel_shader_key's shading (Metal; port/tvos/PERFORMANCE.md
 "Shading (A12)"):
 None is bit-identical to the old text (a few levels on some pixels), so
-all are display.half_precision_shading's (an opt-in), 0 by default:
+the default is 0; display.half_precision_shading (an opt-in) sets the two
+HALF flags, the others are diagnostics (HALO_METAL_SHADING) that measured
+no gain on the A12:
 - HALF_COMBINERS: the register combiners and the final combiner in half
   precision (the texture stages, fog and alpha test stay float);
 - HALF_SAMPLES: textures sampled as half and widened to float;
