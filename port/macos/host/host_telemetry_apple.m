@@ -16,6 +16,8 @@ main thread; the notifications only log an event.
 #import <AppKit/AppKit.h>
 #endif
 #include <mach/mach.h>
+#include <mach/mach_time.h>
+#include <pthread.h>
 #include <sys/sysctl.h>
 
 #include "host.h"
@@ -23,12 +25,33 @@ main thread; the notifications only log an event.
 
 static _Atomic int platform_active = 1;
 
+/* 2^16 dependent multiply-adds: ~30-60 us at an A12's or M4's full clock */
+static uint64_t speed_probe_ns(void)
+{
+	static mach_timebase_info_data_t timebase;
+	volatile uint64_t seed = 0x9e3779b97f4a7c15ull;
+	uint64_t value = seed, started, ended;
+	int index;
+
+	if (!timebase.denom)
+		mach_timebase_info(&timebase);
+	started = mach_absolute_time();
+	for (index = 0; index < 65536; index++)
+		value = value * 6364136223846793005ull + 1442695040888963407ull;
+	ended = mach_absolute_time();
+	seed = value;
+	return (ended - started) * timebase.numer / timebase.denom;
+}
+
 void host_telemetry_platform_sample(struct host_telemetry_platform *platform)
 {
 	task_vm_info_data_t information;
 	mach_msg_type_number_t count = TASK_VM_INFO_COUNT;
+	size_t cpu = 0;
 
 	memset(platform, 0, sizeof(*platform));
+	platform->probe_ns = speed_probe_ns();
+	platform->cpu = pthread_cpu_number_np(&cpu) == 0 ? (int)cpu : -1;
 	platform->thermal = (int)[NSProcessInfo processInfo].thermalState;
 	platform->active = platform_active;
 	if (task_info(mach_task_self(), TASK_VM_INFO, (task_info_t)&information, &count) == KERN_SUCCESS)

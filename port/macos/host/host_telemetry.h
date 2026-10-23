@@ -61,6 +61,13 @@ struct host_telemetry_platform
 	/* task_info's phys_footprint, os_proc_available_memory (0 where there
 	is none), MTLDevice.currentAllocatedSize */
 	uint64_t footprint, available, metal_allocated;
+	/* the main thread's speed: ns a fixed chain of 2^16 dependent integer
+	operations took just now (a lower clock or an efficiency core shows as
+	more; a slower guest at the same clock does not), and the CPU it ran
+	on (pthread_cpu_number_np: on an A12, 0-1 performance, 2-5 efficiency
+	cores is the usual numbering, not documented) */
+	uint64_t probe_ns;
+	int cpu;
 };
 
 /* whether it records (after host_telemetry_start) */

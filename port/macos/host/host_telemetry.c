@@ -829,10 +829,11 @@ static void second_write(struct second *second)
 		second->file_read_bytes / 1048576.0, second->file_writes, second->file_write_bytes / 1048576.0,
 		ms(second->file_ns), second->manifest_writes, second->manifest_bytes / 1024.0, ms(second->manifest_ns));
 	append("\"footprint_mb\":%.1f,\"available_mb\":%.1f,\"metal_mb\":%.1f,\"thermal\":%d,\"active\":%d,"
+		"\"probe_us\":%.1f,\"cpu\":%d,"
 		"\"render\":[%u,%u],\"drawable\":[%u,%u],\"scale\":%.3f,\"render_scale\":%.4f,\"render_scale_min\":%.4f,"
 		"\"self_ms\":%.3f,\"writer_ms\":%.3f,",
 		platform.footprint / 1048576.0, platform.available / 1048576.0, platform.metal_allocated / 1048576.0,
-		platform.thermal, platform.active, second->render_width, second->render_height, second->drawable_width,
+		platform.thermal, platform.active, platform.probe_ns / 1000.0, platform.cpu, second->render_width, second->render_height, second->drawable_width,
 		second->drawable_height, second->drawable_height ? (double)second->render_height / second->drawable_height : 0.0,
 		second->scale_frames ? second->scale_sum / second->scale_frames : 0.0, (double)second->scale_least,
 		ms(second->self_ns), ms(atomic_exchange(&telemetry.writer_ns, 0)));
