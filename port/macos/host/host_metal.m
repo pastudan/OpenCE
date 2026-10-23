@@ -172,12 +172,16 @@ static void *cache_find(struct cache *cache, const void *key, uint32_t size, uin
 	return NULL;
 }
 
+/* (how many objects the caches hold: host_metal_memory) */
+static uint32_t cache_objects;
+
 static void cache_add(struct cache *cache, const void *key, uint32_t size, uint64_t hash, id object)
 {
 	struct cache_entry *entry = malloc(sizeof(*entry) + size);
 
 	if (!entry)
 		return;
+	cache_objects++;
 	entry->hash = hash;
 	entry->size = size;
 	entry->object = object ? (void *)CFBridgingRetain(object) : NULL;
@@ -1403,12 +1407,18 @@ blocks converted here; the sums, and their most */
 static uint32_t texture_bytes[HANDLE_COUNT];
 static uint8_t texture_converted[HANDLE_COUNT];
 static uint64_t textures_total, textures_converted_total, textures_most;
+static uint32_t textures_count;
+/* the targets' (colour and depth, mip composites) the same way */
+static uint32_t target_bytes[HANDLE_COUNT];
+static uint64_t targets_total;
+static uint32_t targets_count;
 /* the conversions: how many, their blocks' bytes and the time */
 static uint64_t conversions, conversion_source_bytes, conversion_ns;
 /* a texture defined next is the GPU's alone (host_metal_texture_bc) */
 static int define_private;
 
 static void textures_report(void);
+static void target_account(uint32_t handle, id<MTLTexture> texture);
 
 /* a texture's bytes: what Metal allocated, or (where it says 0, as the
 simulator does) its levels' texels in its format */
@@ -1448,9 +1458,11 @@ static void texture_account(uint32_t handle, id<MTLTexture> texture, int convert
 		atexit(textures_report);
 	}
 	textures_total -= texture_bytes[handle];
+	textures_count -= texture_bytes[handle] != 0;
 	if (texture_converted[handle])
 		textures_converted_total -= texture_bytes[handle];
 	texture_bytes[handle] = texture ? texture_size(texture) : 0;
+	textures_count += texture_bytes[handle] != 0;
 	texture_converted[handle] = (uint8_t)(texture && converted);
 	textures_total += texture_bytes[handle];
 	if (texture_converted[handle])
@@ -1459,6 +1471,50 @@ static void texture_account(uint32_t handle, id<MTLTexture> texture, int convert
 		textures_most = textures_total;
 	if (host_frame_log_level && texture && converted && conversions % 256 == 255)
 		textures_report();
+}
+
+/* a target's bytes (nil: none any more) */
+static void target_account(uint32_t handle, id<MTLTexture> texture)
+{
+	targets_total -= target_bytes[handle];
+	targets_count -= target_bytes[handle] != 0;
+	target_bytes[handle] = texture ? texture_size(texture) : 0;
+	targets_total += target_bytes[handle];
+	targets_count += target_bytes[handle] != 0;
+}
+
+/* what owns Metal's allocations (host_telemetry.h), for finding what grows
+over a long session: the sampled textures, the targets, the frames' rings
+and their overflow buffers, the renderer's own textures (feedback copy,
+dummy colour attachment, the hoisting's pool of renamed targets), and how
+many state objects (pipelines and the rest) the caches hold */
+void host_metal_memory(struct host_metal_memory *memory)
+{
+	uint32_t index;
+
+	memset(memory, 0, sizeof(*memory));
+	memory->textures_bytes = textures_total;
+	memory->textures = textures_count;
+	memory->converted_bytes = textures_converted_total;
+	memory->targets_bytes = targets_total;
+	memory->targets = targets_count;
+	for (index = 0; index < FRAMES_IN_FLIGHT; index++)
+	{
+		if (frames[index].ring)
+			memory->buffers_bytes += frames[index].ring.allocatedSize;
+		for (id<MTLBuffer> buffer in frames[index].overflow)
+			memory->buffers_bytes += buffer.allocatedSize;
+	}
+	if (metal.feedback)
+		memory->own_bytes += metal.feedback.allocatedSize;
+	if (metal.dummy_color)
+		memory->own_bytes += metal.dummy_color.allocatedSize;
+	for (index = 0; index < PARK_POOL; index++)
+	{
+		if (park.pool[index])
+			memory->own_bytes += park.pool[index].allocatedSize;
+	}
+	memory->state_objects = cache_objects;
 }
 
 static void textures_report(void)
@@ -1689,6 +1745,7 @@ void host_metal_texture_define(unsigned int handle, int type, unsigned int forma
 		handles[handle].fresh = usage != _metal_usage_sampled;
 		handles[handle].used_serial = 0;
 		texture_account(handle, usage == _metal_usage_sampled ? texture : nil, 0);
+		target_account(handle, usage != _metal_usage_sampled ? texture : nil);
 	}
 }
 
@@ -1756,6 +1813,7 @@ void host_metal_texture_delete(unsigned int handle)
 			pass.color_load = pass.depth_load = pass.stencil_load = MTLLoadActionLoad;
 		}
 		texture_account(handle, nil, 0);
+		target_account(handle, nil);
 		handle_set(handle, nil);
 		handles[handle].type = _handle_free;
 		host_frame_acc.texture_deletes++;

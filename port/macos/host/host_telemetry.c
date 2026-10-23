@@ -783,11 +783,22 @@ static void second_write(struct second *second)
 		second->file_read_bytes / 1048576.0, second->file_writes, second->file_write_bytes / 1048576.0,
 		ms(second->file_ns), second->manifest_writes, second->manifest_bytes / 1024.0, ms(second->manifest_ns));
 	append("\"footprint_mb\":%.1f,\"available_mb\":%.1f,\"metal_mb\":%.1f,\"thermal\":%d,\"active\":%d,"
-		"\"render\":[%u,%u],\"drawable\":[%u,%u],\"scale\":%.3f,\"self_ms\":%.3f,\"writer_ms\":%.3f}\n",
+		"\"render\":[%u,%u],\"drawable\":[%u,%u],\"scale\":%.3f,\"self_ms\":%.3f,\"writer_ms\":%.3f,",
 		platform.footprint / 1048576.0, platform.available / 1048576.0, platform.metal_allocated / 1048576.0,
 		platform.thermal, platform.active, second->render_width, second->render_height, second->drawable_width,
 		second->drawable_height, second->drawable_height ? (double)second->render_height / second->drawable_height : 0.0,
 		ms(second->self_ns), ms(atomic_exchange(&telemetry.writer_ns, 0)));
+	/* (who owns Metal's allocations: host_metal_memory) */
+	{
+		struct host_metal_memory memory;
+
+		host_metal_memory(&memory);
+		append("\"mem\":{\"tex_mb\":%.1f,\"tex\":%u,\"conv_mb\":%.1f,\"targets_mb\":%.1f,\"targets\":%u,"
+			"\"buffers_mb\":%.1f,\"own_mb\":%.1f,\"states\":%u}}\n",
+			memory.textures_bytes / 1048576.0, memory.textures, memory.converted_bytes / 1048576.0,
+			memory.targets_bytes / 1048576.0, memory.targets, memory.buffers_bytes / 1048576.0,
+			memory.own_bytes / 1048576.0, memory.state_objects);
+	}
 	for (index = 0; index < second->hitch_count; index++)
 	{
 		const struct hitch *hitch = &second->hitches[index];

@@ -102,6 +102,17 @@ double host_telemetry_platform_refresh_hz(void);
 void host_telemetry_platform_describe(char *text, unsigned int size);
 uint64_t host_metal_allocated_bytes(void);
 
+/* host_metal.m: who owns Metal's allocations (bytes as Metal allocated
+them): sampled textures (and of them DXT converted here), render targets,
+the frames' ring and overflow buffers, the renderer's own textures, and the
+state objects cached (pipelines, depth-stencil and sampler states) */
+struct host_metal_memory
+{
+	uint64_t textures_bytes, converted_bytes, targets_bytes, buffers_bytes, own_bytes;
+	uint32_t textures, targets, state_objects;
+};
+void host_metal_memory(struct host_metal_memory *memory);
+
 /* ---------- the parts tools/test_tv_telemetry.py runs by themselves */
 
 /* sessions' files in a folder (*.jsonl) deleted, oldest first (by name: the

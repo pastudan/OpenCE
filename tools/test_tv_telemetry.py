@@ -248,6 +248,7 @@ void host_telemetry_platform_start(void) {}
 double host_telemetry_platform_refresh_hz(void) { return 60.0; }
 void host_telemetry_platform_describe(char *t, unsigned int s) { snprintf(t, s, "test"); }
 uint64_t host_metal_allocated_bytes(void) { return 0; }
+void host_metal_memory(struct host_metal_memory *m) { memset(m, 0, sizeof(*m)); m->textures_bytes = 3u << 20; m->state_objects = 7; }
 
 static void make(const char *directory, const char *name, int bytes)
 {
@@ -422,3 +423,15 @@ def test_telemetry_game_layout_matches_between_guest_and_host():
     assert "metal_device_telemetry_game(" in main
     profile = (ROOT / "source/rasterizer/xbox/rasterizer_xbox_profile.c").read_text()
     assert "metal_device_telemetry_window(global_window_parameters.window_index)" in profile
+
+
+def test_seconds_record_who_owns_metal_memory():
+    """each second's "mem": sampled textures, targets, buffers, the
+    renderer's own textures and the cached state objects (host_metal_memory),
+    so a session's growth in metal_mb can be put down to its owner"""
+    recorder = (ROOT / "port/macos/host/host_telemetry.c").read_text()
+    metal = (ROOT / "port/macos/host/host_metal.m").read_text()
+    for key in ("tex_mb", "conv_mb", "targets_mb", "buffers_mb", "own_mb", "states"):
+        assert f'\\"{key}\\"' in recorder
+    assert "void host_metal_memory(struct host_metal_memory *memory)" in metal
+    assert "target_account(handle, nil);" in metal and "cache_objects++;" in metal
