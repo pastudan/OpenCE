@@ -3312,6 +3312,10 @@ void host_metal_present(void)
 				(metal.layer.drawableSize.width != width || metal.layer.drawableSize.height != height))
 			{
 				metal.layer.drawableSize = CGSizeMake(width, height);
+				/* (the display's pixels, which the picture is scaled to: on a TV
+				in a 1080p output mode, not the picture's 2160 lines) */
+				host_log("Metal: drawable %dx%d, picture %ux%u", width, height, metal.present_width,
+					metal.present_height);
 			}
 			if (host_frame_log_detail())
 			{
