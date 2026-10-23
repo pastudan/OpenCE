@@ -132,6 +132,7 @@ Without the secrets it uploads the app signed ad hoc, as before.
 | `HALO_METAL_TEXTURE_SHARED=1` | the converted DXT textures in shared memory, written by the CPU, instead of the GPU's own (which it may compress losslessly) |
 | `HALO_TELEMETRY=on` | the play telemetry (`host_telemetry.h`; on by default only on the TV): `HALO_TELEMETRY_DIR`, `HALO_TELEMETRY_HITCH_MS` (50), `HALO_TELEMETRY_KEEP` (40 sessions), `HALO_TELEMETRY_MAX_MB` (200) |
 | `HALO_HALF_RES_CYCLE=<n>` | the half-resolution features (`display.half_res_*`) off and on in alternate blocks of n frames, whatever the settings, to compare them in one run (`tools/halfres_compare.py`) |
+| `HALO_MEMORY_WARNING_AFTER=<s>` | a memory warning as the system's, once, that many seconds after the first frame: the trim and the telemetry's "memory" event (`host_lifecycle.h`; devicectl's `sendMemoryWarning` fails on the TV) |
 | `MTL_DEBUG_LAYER=1` | Metal's validation |
 
 ## Not yet

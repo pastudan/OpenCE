@@ -26,6 +26,7 @@ which is how the events that end the stop arrive.
 #include <dispatch/dispatch.h>
 #include <pthread.h>
 #include <stdatomic.h>
+#include <stdlib.h>
 
 #include <SDL3/SDL.h>
 
@@ -276,6 +277,22 @@ static int memory_event(void)
 
 void host_lifecycle_frame(void)
 {
+	/* HALO_MEMORY_WARNING_AFTER=seconds (diagnostic): a warning as UIKit's
+	once, that long after the first frame (devicectl's sendMemoryWarning
+	fails on the TV, and the simulator's menu item needs a person) */
+	static uint64_t warn_at_ns = 1;
+
+	if (warn_at_ns == 1)
+	{
+		const char *value = getenv("HALO_MEMORY_WARNING_AFTER");
+
+		warn_at_ns = value && atof(value) > 0 ? host_frame_log_now() + (uint64_t)(atof(value) * 1e9) : 0;
+	}
+	if (warn_at_ns && host_frame_log_now() >= warn_at_ns)
+	{
+		warn_at_ns = 0;
+		memory_warned(1, "HALO_MEMORY_WARNING_AFTER");
+	}
 	if (memory_event() && trim_step < 0)
 	{
 		trim_step = 0;
