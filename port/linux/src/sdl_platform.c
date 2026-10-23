@@ -1493,6 +1493,44 @@ BOOL platform_screenshot_take_request(void)
 	return requested;
 }
 
+/* the game stopped by the host since the last frame, the app not active
+(metal_device_lifecycle_stops): the next frame's time is a frame's
+(halo_platform_resumed_frame), and a game in progress opens its pause menu
+(halo_platform_pause_requested) */
+static BOOL platform_resumed_frame, platform_pause_request;
+
+static void platform_lifecycle_check(void)
+{
+#ifdef HALO_METAL
+	static unsigned int stops;
+	unsigned int now = metal_device_lifecycle_stops();
+
+	if (now != stops)
+	{
+		stops = now;
+		platform_resumed_frame = TRUE;
+		platform_pause_request = TRUE;
+		platform_log("the app is active again: the game paused");
+	}
+#endif
+}
+
+int halo_platform_resumed_frame(void)
+{
+	BOOL resumed = platform_resumed_frame;
+
+	platform_resumed_frame = FALSE;
+	return resumed;
+}
+
+int halo_platform_pause_requested(void)
+{
+	BOOL requested = platform_pause_request;
+
+	platform_pause_request = FALSE;
+	return requested;
+}
+
 void platform_pump_events(void)
 {
 	/* debug.exit_after (seconds) ends the game that long after the window
@@ -1504,6 +1542,7 @@ void platform_pump_events(void)
 
 	if (!platform_window || SDL_GetCurrentThreadID() != platform_event_thread)
 		return;
+	platform_lifecycle_check();
 	if (exit_ticks == (Uint64)-1)
 	{
 		double seconds = config_real("debug.exit_after");

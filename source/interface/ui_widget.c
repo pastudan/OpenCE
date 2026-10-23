@@ -8207,6 +8207,10 @@ static boolean ui_check_for_pause_game(
 	boolean pause_pressed = FALSE;
 	boolean network_game = network_game_is_active();
 	short controller_index = NONE;
+	/* port: the app was away (the Apple TV's Home button, screensaver,
+	sleep): the game comes back paused, as if its first player had pressed
+	Start, unless a menu is up (port/linux/src/sdl_platform.c) */
+	boolean away_pause = halo_platform_pause_requested();
 
 	if (game_in_progress() &&
 		!cinematic_in_progress() &&
@@ -8216,11 +8220,18 @@ static boolean ui_check_for_pause_game(
 	{
 		long gamepad_index;
 
+		if (away_pause && !ui_widgets_active() && local_player_get_next(NONE) != NONE)
+		{
+			pause_pressed = TRUE;
+			controller_index = local_player_get_next(NONE);
+		}
+
 		for (gamepad_index = 0;
 			gamepad_index < MAXIMUM_NUMBER_OF_LOCAL_PLAYERS;
 			gamepad_index++)
 		{
-			if (input_has_gamepad(gamepad_index) &&
+			if (!pause_pressed &&
+				input_has_gamepad(gamepad_index) &&
 				local_player_exists(gamepad_index) &&
 				input_get_gamepad_state(gamepad_index)->
 					buttons[_gamepad_binary_button_start] == 1)

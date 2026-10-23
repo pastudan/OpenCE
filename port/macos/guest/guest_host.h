@@ -143,6 +143,9 @@ once a frame (metal_protocol.h) */
 void host_telemetry_configure(const char *setting, const char *live);
 void host_telemetry_view(int window_index);
 void host_telemetry_game(const struct metal_telemetry_game *game);
+/* the times the host has stopped the game with the app not active
+(port/macos/host/host_lifecycle.h) */
+unsigned int host_lifecycle_stops(void);
 /* the frame drawn so far, shown: the picture last given to
 host_metal_present_target, letterboxed in the window */
 void host_metal_present(void);

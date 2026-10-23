@@ -44,6 +44,7 @@ indices keeps its latest count (host_metal_visibility_result).
 #include "host.h"
 #include "host_dynres.h"
 #include "host_frame_log.h"
+#include "host_lifecycle.h"
 #include "host_shader_manifest.h"
 #include "host_telemetry.h"
 #include "host_textures.h"
@@ -273,6 +274,9 @@ static id<MTLCommandBuffer> commands;
 static uint32_t commands_generation = 1, commands_generations = 1;
 static uint64_t frame_serial = 1;
 static _Atomic uint64_t completed_serial;
+/* (host_lifecycle.h's, at the end) */
+static id<MTLCommandBuffer> uploads_last;
+static uint64_t feedback_serial;
 
 /* HALO_METAL_PROFILE: command-buffer GPU time and feedback-copy bandwidth,
    sampled without forcing CPU/GPU synchronization. Off by default. */
@@ -743,6 +747,7 @@ static void encoder_end(void)
 		committed, the frame going on in another, as a readback does) */
 		if (pass_log.timing == 2 && commands)
 		{
+			host_lifecycle_gate();
 			[commands commit];
 			commands = [metal.queue commandBuffer];
 		}
@@ -830,6 +835,7 @@ static void park_commit_hoisted(void)
 {
 	struct frame *frame = frame_current();
 
+	host_lifecycle_gate();
 	[commands commit];
 	if (!frame->hoisted)
 		frame->hoisted = [NSMutableArray array];
@@ -1399,6 +1405,7 @@ int host_metal_attach(unsigned int window)
 			shader_cache_start();
 			pass_log_initialize();
 			park_initialize();
+			host_lifecycle_start();
 		}
 		metal.view = SDL_Metal_CreateView(object);
 		if (!metal.view)
@@ -1732,7 +1739,9 @@ void host_metal_texture_bc(unsigned int handle, int type, int kind, int into, un
 			/* (a command buffer of its own, committed now: before the frame's,
 			which draws with the texture, is) */
 			[blit endEncoding];
+			host_lifecycle_gate();
 			[uploads commit];
+			uploads_last = uploads;
 		}
 	}
 	texture_account(handle, texture, 1);
@@ -2942,6 +2951,7 @@ static id<MTLTexture> feedback_copy(id<MTLTexture> target)
 		metal.feedback = [metal.device newTextureWithDescriptor:descriptor];
 	}
 	host_frame_acc.copies++;
+	feedback_serial = frame_serial;
 	if (profile_enabled)
 	{
 		profile_feedback_copies++;
@@ -3377,6 +3387,7 @@ int host_metal_texture_read(unsigned int handle, unsigned int width, unsigned in
 		[blit endEncoding];
 		/* (the frame goes on in a command buffer of its own, the same
 		frame: its ring and counters stay) */
+		host_lifecycle_gate();
 		[submitted commit];
 		commands = [metal.queue commandBuffer];
 		commands_generation = ++commands_generations;
@@ -3570,6 +3581,9 @@ void host_metal_present(void)
 	HOST_FRAME_LOG_SCOPE;
 	if (!metal.device)
 		return;
+	/* (not active: nothing is committed, and no drawable taken, until it is
+	again; host_lifecycle.h) */
+	host_lifecycle_gate();
 	@autoreleasepool
 	{
 		id<MTLTexture> picture;
@@ -3830,6 +3844,118 @@ void host_metal_present(void)
 			host_frame_log_scope_end(&host_frame_log_scope);
 			host_frame_log_scope = 0;
 			host_frame_log_present(serial);
+		}
+		host_lifecycle_frame();
+	}
+}
+
+/* ---------- the app's lifecycle (host_lifecycle.h) */
+
+/* (uploads_last: the last command buffer committed outside a frame's, the
+texture uploads; the frames' own are waited for by their slots) */
+void host_metal_drain(void)
+{
+	/* (the frame being encoded holds a slot of its own: not waited for, it
+	is not committed) */
+	int busy = FRAMES_IN_FLIGHT - (commands ? 1 : 0), index, waited = 0;
+	uint64_t started = host_frame_log_now();
+	dispatch_semaphore_t slots = frames_free;
+
+	if (!metal.device || !slots)
+		return;
+	/* (each slot taken back once its frame is done, and given back: not a
+	frame's wait, the frame log's in-flight wait does not count it) */
+	for (index = 0; index < busy; index++)
+	{
+		if (dispatch_semaphore_wait(slots, dispatch_time(DISPATCH_TIME_NOW, 2 * NSEC_PER_SEC)) != 0)
+		{
+			host_log("Metal: a frame in flight did not finish in 2 s");
+			break;
+		}
+		waited++;
+	}
+	for (index = 0; index < waited; index++)
+		dispatch_semaphore_signal(slots);
+	/* (and the frame being encoded's own committed so far: passes hoisted
+	ahead of it, a readback's part) */
+	if (commands)
+	{
+		for (id<MTLCommandBuffer> early in frame_current()->hoisted)
+		{
+			if (early.status >= MTLCommandBufferStatusCommitted && early.status < MTLCommandBufferStatusCompleted)
+				[early waitUntilCompleted];
+		}
+	}
+	if (uploads_last && uploads_last.status < MTLCommandBufferStatusCompleted)
+		[uploads_last waitUntilCompleted];
+	uploads_last = nil;
+	host_log("Metal: the GPU's work finished (%d frames waited for, %.1f ms)", waited,
+		(host_frame_log_now() - started) / 1e6);
+}
+
+static int64_t texture_bytes_of(id<MTLTexture> texture)
+{
+	return texture ? (int64_t)texture.allocatedSize : 0;
+}
+
+/* what is cheap to make again, a step at a time (the main thread's, between
+frames or with the game stopped): not the texture cache, whose budget is the
+guest's (port/linux/src/xbox_textures.c), nor the pipelines, which the draws
+hold */
+int64_t host_metal_trim(int step, int stopped)
+{
+	uint64_t done = atomic_load(&completed_serial);
+	/* (while the game goes on, only what has not been used for a second or
+	so: what it uses every frame would only be made again) */
+	uint64_t idle = stopped ? done : (done > 60 ? done - 60 : 0);
+	int64_t freed = 0;
+	int index;
+
+	if (!metal.device)
+		return -1;
+	@autoreleasepool
+	{
+		switch (step)
+		{
+		case 0:
+			/* the renamed targets the park keeps for reuse, free again */
+			for (index = 0; index < PARK_POOL; index++)
+			{
+				if (park.pool[index] && park.pool_serial[index] <= idle)
+				{
+					freed += texture_bytes_of(park.pool[index]);
+					park.pool[index] = nil;
+				}
+			}
+			return freed;
+		case 1:
+			/* the feedback copy (made again at its next use; a frame that has
+			it keeps it) */
+			if (metal.feedback && feedback_serial <= idle)
+			{
+				freed = texture_bytes_of(metal.feedback);
+				metal.feedback = nil;
+			}
+			return freed;
+		case 2:
+			if (stopped)
+			{
+				/* the rings of the frames not being encoded, all finished
+				(host_metal_drain): made again at their next frame */
+				struct frame *current = commands ? frame_current() : NULL;
+
+				for (index = 0; index < FRAMES_IN_FLIGHT; index++)
+				{
+					if (&frames[index] != current && frames[index].ring)
+					{
+						freed += (int64_t)frames[index].ring.allocatedSize;
+						frames[index].ring = nil;
+					}
+				}
+			}
+			return freed;
+		default:
+			return -1;
 		}
 	}
 }

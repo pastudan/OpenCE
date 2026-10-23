@@ -88,6 +88,11 @@ void platform_video_swap(void);
 /* frames between the 30 Hz ticks at the display's refresh rate, unless
 display.interpolation is false (port/linux/game/render_interpolation.c) */
 int halo_interpolation_enabled(void);
+/* once each after the host stopped the game, the app not active (the Apple
+TV: port/macos/host/host_lifecycle.h; never elsewhere): the first frame
+after (main.c), and the pause menu asked for (ui_widget.c) */
+int halo_platform_resumed_frame(void);
+int halo_platform_pause_requested(void);
 void platform_mouse_capture(BOOL capture);
 
 /* handles the window's and input devices' events; main thread only, a no-op

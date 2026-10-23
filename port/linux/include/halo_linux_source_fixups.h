@@ -13,6 +13,12 @@ struct observer_result;
 struct render_camera;
 struct real_matrix4x3;
 int halo_interpolation_enabled(void);
+/* the app was away (the Apple TV's Home button, screensaver, sleep) and the
+host stopped the game: once each, the first frame after (its time is not the
+time away: main.c) and a request to open the pause menu (ui_widget.c);
+port/linux/src/sdl_platform.c */
+int halo_platform_resumed_frame(void);
+int halo_platform_pause_requested(void);
 float game_time_get_tick_fraction(void);
 void render_interpolation_tick(void);
 void render_interpolation_reset(void);

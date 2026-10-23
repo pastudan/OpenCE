@@ -446,6 +446,17 @@ static void interval_line(uint64_t last)
 		(unsigned long long)over33, ms(gpu_total / count), ms(gpu_max), ms(compile_ns));
 }
 
+/* (host_lifecycle.h) the time the game was stopped, not the next frame's:
+out of its wall time, and of its host time (the renderer's call it stopped
+in counts it, HOST_FRAME_LOG_SCOPE) */
+static uint64_t skipped_ns;
+
+void host_frame_log_skip(uint64_t nanoseconds)
+{
+	last_present_ns += nanoseconds;
+	skipped_ns += nanoseconds;
+}
+
 void host_frame_log_present(uint64_t serial)
 {
 	struct frame_record *record;
@@ -454,6 +465,11 @@ void host_frame_log_present(uint64_t serial)
 	if (!host_frame_log_level || !records)
 		return;
 	now = host_frame_log_now();
+	if (skipped_ns)
+	{
+		host_frame_acc.host_ns = host_frame_acc.host_ns > skipped_ns ? host_frame_acc.host_ns - skipped_ns : 0;
+		skipped_ns = 0;
+	}
 	record = &records[serial % capacity];
 	/* (a slot reused: the GPU's fields of the frame it had are cleared
 	before it is marked as this one's) */

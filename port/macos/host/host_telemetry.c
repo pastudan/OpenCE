@@ -590,6 +590,16 @@ void host_telemetry_sizes(uint32_t render_width, uint32_t render_height, uint32_
 	telemetry.drawable_height = drawable_height;
 }
 
+/* (host_lifecycle.h) the time the game was stopped: not the second's (its
+duration, and so its rates, are of the time the game ran) */
+void host_telemetry_skip(uint64_t nanoseconds)
+{
+	if (host_telemetry_enabled && telemetry.current)
+		telemetry.current->start_ns += nanoseconds;
+	if (host_frame_acc.view_started_ns)
+		host_frame_acc.view_started_ns += nanoseconds;
+}
+
 void host_telemetry_view(int window_index)
 {
 	uint64_t now;

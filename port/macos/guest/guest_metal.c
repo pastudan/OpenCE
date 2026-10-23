@@ -38,6 +38,11 @@ void metal_device_profile_phase(int profile, int begin)
 	host_metal_profile_phase(profile, begin);
 }
 
+unsigned int metal_device_lifecycle_stops(void)
+{
+	return host_lifecycle_stops();
+}
+
 void metal_device_telemetry_configure(const char *setting, const char *live)
 {
 	host_telemetry_configure(setting, live);

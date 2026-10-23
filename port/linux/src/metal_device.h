@@ -30,5 +30,8 @@ void metal_device_telemetry_configure(const char *setting, const char *live);
 void metal_device_telemetry_window(long window_index);
 void metal_device_telemetry_game(long game_ticks, long local_players, long windows, long bsp, long cinematic,
 	const float *positions, const char *map);
+/* how many times the host has stopped the game, the app not active (the
+Apple TV's Home button, screensaver, sleep: port/macos/host/host_lifecycle.h) */
+unsigned int metal_device_lifecycle_stops(void);
 
 #endif

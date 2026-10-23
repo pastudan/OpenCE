@@ -2465,6 +2465,11 @@ static void main_update_time_unthrottled(
 			else
 				seconds_elapsed = CEILING(seconds_elapsed, 0.06666667014360428f);
 		}
+		/* port: the first frame after the app was away (the Apple TV's
+		Home button, screensaver, sleep: the host stopped the game) is a
+		frame's time, not the time away (port/linux/src/sdl_platform.c) */
+		if (halo_platform_resumed_frame())
+			seconds_elapsed = CEILING(seconds_elapsed, 0.01666666753590107f);
 	}
 
 	main_globals.frame_start_milliseconds = system_milliseconds();
@@ -2707,6 +2712,11 @@ static void main_update_time(
 			else
 				seconds_elapsed = CEILING(seconds_elapsed, 0.06666667014360428f);
 		}
+		/* port: the first frame after the app was away (the Apple TV's
+		Home button, screensaver, sleep: the host stopped the game) is a
+		frame's time, not the time away (port/linux/src/sdl_platform.c) */
+		if (halo_platform_resumed_frame())
+			seconds_elapsed = CEILING(seconds_elapsed, 0.01666666753590107f);
 	}
 
 	main_globals.frame_start_milliseconds = end_milliseconds;

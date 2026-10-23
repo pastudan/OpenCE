@@ -15,6 +15,7 @@ holds the stream's lock throughout.
 */
 
 #include "host.h"
+#include "host_lifecycle.h"
 
 #include <SDL3/SDL.h>
 #include <pthread.h>
@@ -778,6 +779,38 @@ int host_sdl_resume_audio_stream_device(unsigned int stream)
 	SDL_AudioStream *object = handle_get(stream, _handle_audio);
 
 	return object && SDL_ResumeAudioStreamDevice(object) ? 1 : 0;
+}
+
+/* (host_lifecycle.h: the app not active) every stream's device paused, and
+those this paused resumed after; the guest's own pauses are left as they are */
+void host_sdl_audio_pause_all(int pause)
+{
+	static uint8_t paused_here[HANDLE_COUNT];
+	uint32_t index;
+	int count = 0;
+
+	for (index = 1; index < HANDLE_COUNT; index++)
+	{
+		SDL_AudioStream *object = handle_get(index, _handle_audio);
+
+		if (!object)
+		{
+			paused_here[index] = 0;
+			continue;
+		}
+		if (pause && !SDL_AudioStreamDevicePaused(object) && SDL_PauseAudioStreamDevice(object))
+		{
+			paused_here[index] = 1;
+			count++;
+		}
+		else if (!pause && paused_here[index])
+		{
+			SDL_ResumeAudioStreamDevice(object);
+			paused_here[index] = 0;
+			count++;
+		}
+	}
+	host_log("lifecycle: audio %s (%d streams)", pause ? "paused" : "resumed", count);
 }
 
 int host_sdl_get_audio_stream_data(unsigned int stream, void *data, int length)
