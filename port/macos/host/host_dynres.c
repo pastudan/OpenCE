@@ -71,6 +71,8 @@ const struct host_dynres_parameters host_dynres_defaults =
 2160 lines (56% of the pixels: two views of b30 at 2160 took ~26 ms of GPU
 a frame on the A12, measured in play, PERFORMANCE.md) */
 #define SPLIT_FIRST_STEP 5
+/* a frame's GPU time past this many display intervals steps down at once */
+#define VERY_HOT 1.5
 /* a display slot is missed by a frame shown this much of an interval or
 more after the one before it */
 #define LATE_SLOTS 1.5
@@ -266,8 +268,10 @@ static void frame_counted(double gpu_ms, int late, double slot_ms, uint32_t lowe
 	}
 	else
 	{
-		down = dynres.frames_at_step >= p->down_frames &&
-			((uint32_t)__builtin_popcount(dynres.recent_hot) >= p->hot_frames || (late && hot));
+		/* (a frame of more than VERY_HOT intervals: at once, whatever came
+		before it: split screen's 4-5x spikes in combat) */
+		down = gpu_ms > VERY_HOT * slot_ms || (dynres.frames_at_step >= p->down_frames &&
+			((uint32_t)__builtin_popcount(dynres.recent_hot) >= p->hot_frames || (late && hot)));
 	}
 	if (down && dynres.step < lowest)
 	{

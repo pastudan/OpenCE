@@ -105,6 +105,11 @@ SCENES = {
     # two-player split screen in a10, from a fresh launch (scene_window)
     "split": {"init": ["player_spawn_count 2", "map_name levels\\a10\\a10"], "seconds": 290,
               "window_seconds": 50.0},
+    # two-player split screen on b30's beach, from a fresh launch (the
+    # insertion cinematic is one view; the beach's firefight, two): the
+    # owner's 30 Hz case (PERFORMANCE.md, "Dynamic resolution (A12)")
+    "b30split": {"init": ["player_spawn_count 2", "map_name levels\\b30\\b30"], "seconds": 150,
+                 "window_seconds": 60.0, "map": "b30.map"},
 }
 
 
@@ -135,7 +140,8 @@ SCENES["latelag"] = {"init": SCENES["split"]["init"], "seconds": 600, "window_se
 SCENE_LABEL = {"opening": "a10 cutscene (partial)", "bridge": "a10 bridge (gameplay)",
                "b30": "b30 beach (gameplay)", "a10play": "a10 cryo bay (first gameplay)",
                "cryo": "a10 cryo bay (saved state)", "split": "a10 split screen (2 players)",
-               "latelag": "a10 split screen, two areas in turn (10 min)"}
+               "latelag": "a10 split screen, two areas in turn (10 min)",
+               "b30split": "b30 beach split screen (2 players)"}
 FOG_START_DRAWS = 20
 FOG_SUSTAIN_SECONDS = 5.0
 SERIES = ("wall_ms", "gpu_ms", "guest_ms", "host_ms", "compile_ms", "wait_drawable_ms", "wait_inflight_ms",
@@ -209,7 +215,7 @@ def scene_window(scene, events, rows, window_seconds=None):
         if start is None:
             return [], "the cryo bay (>= 40 fog-plane draws) was never reached"
         description = f"a10 cryo bay: {window_seconds:g} s from frame {rows[start]['serial']}"
-    elif scene in ("split", "latelag"):
+    elif scene in ("split", "latelag", "b30split"):
         # (the first frame drawn as two player views, after the cinematic)
         views = [e for e in events if e["kind"] == "views" and e["detail"] == "2"]
         split = None
@@ -224,7 +230,8 @@ def scene_window(scene, events, rows, window_seconds=None):
         if split is None:
             return [], "two player views were never drawn (player_spawn_count 2 did not take)"
         start = split
-        description = f"a10 split screen{' (latelag)' if scene == 'latelag' else ''}: {window_seconds:g} s from frame {rows[start]['serial']}"
+        description = (f"{'b30' if scene == 'b30split' else 'a10'} split screen{' (latelag)' if scene == 'latelag' else ''}: "
+                       f"{window_seconds:g} s from frame {rows[start]['serial']}")
     elif scene in ("bridge", "b30", "cryo"):
         core = SCENES[scene].get("core", CORE_NAME)
         loaded = [e for e in events if e["kind"] == "core-open" and e["detail"] == core]
