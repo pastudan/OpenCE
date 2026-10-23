@@ -1587,3 +1587,50 @@ GPU was done with what came before it, summed (commit after this
 section). Everything else (the very-hot rule, the probe and its back-off,
 the ceiling and floors) worked as designed: 2 steps down, 1 step up, 0
 failed tries in each run.
+
+## Device: session 2, the GPU-time fix (A12, 2026-10-23, bedroom TV, 1080p output)
+
+Build `4ee34304` (rebased on tv/integrate `78125c36`: 24 MiB rings, texture
+budget, half-res convolution opt-in), ABBA order (A off at 2160, B on),
+B runs with `HALO_DYNAMIC_RESOLUTION_CEILING=render` (2160-line ceiling:
+the 4K output's load) for b30split-B2, split-B1 and every single-view B (b30split-B1: the display's ceiling, 1080); 20 runs, config.toml/init.txt
+restored and verified identical after each (40/40 files). Raw:
+`<scratch>/tvbench-out/device-dynres2`.
+
+| run | scene | frames | fps | wall p95 | p99 | >16.7 | >33.3 | >50 | missed | GPU p50 | GPU p95 | lines mean | lines min | valid |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| b30split-A1 | b30split | 3472 | 57.9 | 16.913 | 33.529 | 1248 | 121 | 0 | 124 | 22.697 | 31.138 | 2160 | 2160 | yes |
+| b30split-B1 | b30split | 3597 | 60.0 | 16.822 | 16.914 | 1299 | 0 | 0 | 0 | 14.725 | 15.579 | 1080 | 1080 | yes |
+| b30split-B2 | b30split | 3597 | 60.0 | 16.849 | 16.951 | 1277 | 0 | 0 | 0 | 14.717 | 15.631 | 1080 | 1080 | yes |
+| b30split-A2 | b30split | 3301 | 55.0 | 33.446 | 33.569 | 1244 | 281 | 0 | 295 | 25.636 | 33.473 | 2160 | 2160 | yes |
+| split-B1 | split | 2998 | 60.0 | 16.849 | 16.933 | 1165 | 0 | 0 | 0 | 15.094 | 15.662 | 1620 | 1620 | yes |
+| bridge-A1 | bridge | 1921 | 54.9 | 33.507 | 33.663 | 793 | 171 | 0 | 177 | 19.455 | 36.368 | 2160 | 2160 | yes |
+| bridge-B1 | bridge | 2096 | 59.9 | 16.938 | 17.125 | 860 | 1 | 0 | 0 | 15.059 | 16.09 | 1441 | 1440 | yes |
+| bridge-B2 | bridge | 2096 | 59.9 | 16.919 | 17.104 | 888 | 1 | 0 | 1 | 15.021 | 16.23 | 1441 | 1440 | yes |
+| bridge-A2 | bridge | 1920 | 54.9 | 33.479 | 33.719 | 876 | 164 | 0 | 176 | 20.067 | 36.848 | 2160 | 2160 | yes |
+| b30-A1 | b30 | 3144 | 52.4 | 33.52 | 33.609 | 1390 | 375 | 1 | 452 | 27.429 | 36.002 | 2160 | 2160 | yes |
+| b30-B1 | b30 | 3595 | 59.9 | 16.86 | 16.968 | 1419 | 3 | 1 | 1 | 14.853 | 15.638 | 1440 | 1440 | yes |
+| b30-B2 | b30 | 3596 | 59.9 | 16.848 | 16.95 | 1411 | 3 | 1 | 0 | 14.833 | 15.742 | 1440 | 1440 | yes |
+| b30-A2 | b30 | 3169 | 52.8 | 33.504 | 33.604 | 1400 | 373 | 1 | 427 | 27.141 | 35.797 | 2160 | 2160 | yes |
+| cryo-A1 | cryo | 2828 | 56.6 | 17.193 | 50.036 | 1227 | 113 | 32 | 174 | 15.1 | 38.487 | 2160 | 2160 | yes |
+| cryo-B1 | cryo | 2877 | 57.6 | 17.056 | 33.598 | 1193 | 104 | 1 | 123 | 14.718 | 37.138 | 1478 | 1440 | yes |
+| cryo-B2 | cryo | 2884 | 57.7 | 17.031 | 33.603 | 1216 | 98 | 1 | 117 | 14.707 | 37.39 | 1478 | 1440 | yes |
+| cryo-A2 | cryo | 2832 | 56.6 | 17.186 | 50.002 | 1263 | 109 | 29 | 168 | 15.088 | 35.734 | 2160 | 2160 | yes |
+
+- **Every scene's missed slots fall to (nearly) none, b30 split to 0:**
+  b30 split 124/295 → 0/0; bridge 177/176 → 0/1; b30 452/427 → 1/0. The
+  cryo bay 174/168 → 123/117: all of them in its first 10 s (the
+  tutorial's 6-pass screen convolution, which runs after the upscale at
+  the screen's full resolution, so dynamic resolution cannot cut it; the
+  half-resolution convolution, opt-in on tv/integrate, is the tool for
+  it); its other 60 s have 0 late frames either way.
+- **But it settled at its floors** (b30 split 1080, single view 1440,
+  where 1440-1620 split / 1620-1872 single would hold) and a10 split
+  bounced 1440-2160. Cause: the A12's clock regulation leaves 3-7% of
+  frames past 97% of the interval at steps it holds with no late frame
+  (b30 split 1080: 3.3% hot, 0 late; a10 split 1440: 6.5%, 0.4% late;
+  bridge 1080: 7.3%), and "3 hot of the last 8" fired on that noise. At
+  steps it cannot hold frames are 17-100% hot and 2-13% late. Fixed in
+  `43a9726d` (down on a GPU-late frame, a frame past 1.1 intervals, 16 hot
+  of 64, or any past 1.5 intervals; up after a run with none late or over
+  and at most 10% hot); session 3 measures it.
