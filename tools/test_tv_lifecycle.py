@@ -51,9 +51,17 @@ def test_no_blocking_gpu_wait_on_the_frame_path():
     resigning active)"""
     text = read("port/macos/host/host_metal.m")
     bodies = function_bodies(text)
+    # (prepare_map and prepare_rest wait for compile slots on the shader
+    # pack's own queue, prepared.queue, never on the game's thread)
     allowed = {"waitUntilCompleted": {"host_metal_texture_read", "host_metal_present", "host_metal_drain"},
                "waitUntilScheduled": set(),
-               "dispatch_semaphore_wait": {"frame_begin", "host_metal_drain"}}
+               "dispatch_semaphore_wait": {"frame_begin", "host_metal_drain", "prepare_map", "prepare_rest"}}
+    # every call of prepare_map is in a block sent to prepared.queue, and
+    # prepare_rest only by prepare_rest_schedule (on prepared.next_queue)
+    for at in [m.start() for m in re.finditer(r"(?<!void )prepare_map\(", text)]:
+        assert "dispatch_async(prepared.queue" in text[max(0, at - 1200):at], "prepare_map called off prepared.queue"
+    assert {name for name, body in bodies.items() if re.search(r"\bprepare_rest\(", body)} <= \
+        {"prepare_rest_schedule"}
     for call, functions in allowed.items():
         found = {name for name, body in bodies.items() if call in body}
         assert found <= functions, f"{call} in {found - functions}"
