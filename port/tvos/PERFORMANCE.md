@@ -1207,3 +1207,70 @@ line now records it, and each second records render and drawable sizes.
    end the 4K screen pass (same targets: `host_metal_set_targets` returns
    at once; the viewport clear is a quad), and small offscreen passes are
    still parked and hoisted. Recorded per view.
+
+# Half resolution (tv/halfres)
+
+Two opt-in settings, both default off and with an env override for A/B
+on one binary: `display.half_res_convolution` /
+`HALO_HALF_RES_CONVOLUTION` (this section's first part) and, later,
+`display.half_res_transparents`. Diagnostic: `HALO_HALF_RES_CYCLE=N`
+alternates off and on every N frames in one run (frozen-frame fidelity),
+and `tools/halfres_compare.py` gives PSNR, max, mean and p99.9 per region
+(all / touched / untouched against a frame without the effect / edges /
+interior / centre / border). Everything "half" is half the scene's own
+resolution (`halfres_scene_scale` in d3d8_metal.c, the one adapter for
+dynamic resolution), not 1920x1080.
+
+## Screen convolution at half resolution
+
+The blur and the scopes' warp (`_rasterizer_screen_effect`) draw their
+passes between the first and the last into a pair of half-scale targets
+in the screen's game units (so the game's quads and texture coordinates
+are unchanged); pass 0 reads the screen at full resolution, the last pass
+draws into it, sampling bilinearly. Pass count and radii are unchanged.
+Split screen never convolves (the game asserts one window).
+
+Fidelity (Mac M4, 3840x2160, cryo state frozen with `game_speed 0`,
+scripted `cinematic_screen_effect_set_convolution`, last off vs last on
+frame of a 30-frame cycle; "touched" = pixels the effect changes against a
+frozen frame without it):
+
+| effect (extra passes, type, radius) | passes | all PSNR | max | p99.9 | edges PSNR | centre PSNR | untouched max |
+|---|---|---|---|---|---|---|---|
+| warp 1 x r1 | 6 | 45.3 | 42 | 11 | 37.2 | 47.6 | 18 |
+| warp 1 x r3 (as the tutorial: 6 passes) | 6 | 49.2 | 31 | 8 | 45.4 | 50.9 | 21 |
+| warp 1 x r9.7 | 6 | 47.1 | 33 | 19 | 46.0 | 53.6 | 23 |
+| warp 0 x r2 (a scope: 4 passes) | 4 | 48.8 | 30 | 8 | 41.9 | 49.8 | 12 |
+| blur 0 x r0.5 | 4 | 50.6 | 32 | 5 | 46.1 | 52.9 | 11 |
+| blur 0 x r1 | 4 | 49.7 | 40 | 7 | 47.5 | 53.1 | 27 |
+| blur 1 x r3 | 6 | 44.0 | 57 | 25 | 42.4 | 55.4 | 45 |
+
+The effect is full-screen, so "untouched" pixels (unchanged by the full
+resolution blur, flat areas) can still differ by a few levels: the
+half-resolution chain rounds to 8 bits at a quarter of the pixels. No
+radius threshold: the smallest radii are as close as the largest.
+
+Byte-identical with the feature off: the base build (8bc487e3) and this
+build, setting off, the same frozen frame: **identical** (one launch each;
+two launches of one build differ by up to 1-17 levels from animation not
+stopped by `game_speed`, so only one same-numbered pair was comparable).
+
+GPU (Mac, pass log in the same run, the frozen 6-pass warp): the screen
+effect's passes 3.67 -> 1.47 ms of fragment time a frame (5 of the 6
+passes at 1920x1080), frame fragment total 8.89 -> 6.77 ms; 15 passes a
+frame either way (the screen pass still ends for the first pass, as it
+did).
+
+A12 (bedroom TV, cryo, 3840x2160 picture; ABBA, consecutive, warm, one
+binary `5fde174e`; window = the scene's 50 s; the tutorial blur is its
+first ~12 s):
+
+| run | window fps | >33.3 | >50 | first 12 s fps |
+|---|---|---|---|---|
+| off (1st) | 56.2 | 115 | 28 | 44.5 |
+| on (2nd) | 57.7 | 88 | 3 | 50.5 |
+| on (3rd) | 57.2 | 103 | 6 | 48.5 |
+| off (4th) | 56.5 | 110 | 39 | 45.7 |
+
+Frames over 50 ms 28/39 -> 3/6; the blur's seconds 44.5/45.7 -> 50.5/48.5
+fps. The rest of the frame (fog room) is unchanged.
