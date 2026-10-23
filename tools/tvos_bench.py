@@ -489,8 +489,9 @@ def finish_run(run, target, log_path, csv_path, findings):
     return result
 
 
-def run_mac(runs, maps, out, extra_env, core=None):
-    app = ROOT / "build/macos/OpenCE.app/Contents/MacOS/OpenCE"
+def run_mac(runs, maps, out, extra_env, core=None, app=None):
+    # (--app: another build of the Mac app, for an A/B of build variants)
+    app = Path(app) / "Contents/MacOS/OpenCE" if app else ROOT / "build/macos/OpenCE.app/Contents/MacOS/OpenCE"
     results = []
     for index, run in enumerate(runs):
         root = scene_data_root(run["scene"], maps, core)
@@ -855,7 +856,7 @@ def main(argv=None):
     p.add_argument("--repeats", type=int, default=2)
     p.add_argument("--maps", help="folder holding ui.map and a10.map (mac/simulator)")
     p.add_argument("--core", help=f"the bridge state (default {SCRATCH / 'tvbench' / CORE_NAME})")
-    p.add_argument("--app", help="the simulator app")
+    p.add_argument("--app", help="the simulator app, or (--target mac) another OpenCE.app to run")
     p.add_argument("--out", required=True)
     p.add_argument("--env", action="append", default=[], help="extra KEY=VALUE for every run")
     p.add_argument("--device", default=deploy.DEVICE)
@@ -927,7 +928,7 @@ def main(argv=None):
     task = f"tvos_bench {args.target}: {len(runs)} runs"
     with deploy.HeavyLock(task, enabled=not args.no_lock and args.target != "mac"):
         if args.target == "mac":
-            results = run_mac(runs, args.maps, out, extra, args.core)
+            results = run_mac(runs, args.maps, out, extra, args.core, args.app)
         elif args.target == "simulator":
             results = run_simulator(runs, args.maps, out, extra, args.app, args.core)
         else:
