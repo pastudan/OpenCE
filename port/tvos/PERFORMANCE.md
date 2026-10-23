@@ -2706,7 +2706,8 @@ black screen), and the project was wrapped up after it. The Mac's
 
 # Bundled shader manifest (A12)
 
-Branch `tv/shaderpack` (from tv/integrate 85a49369). Goal: no shader-compile
+Branch `tv/shaderpack`, rebased onto tv/integrate a4d2862d (translator hash
+unchanged since 6c0bd2b9, so the same pack). Goal: no shader-compile
 stall even on the very first launch after an install, and none in a level
 the player has never visited.
 
@@ -2746,8 +2747,14 @@ the player has never visited.
    - 11 runs take about 15 min on the M4 and are cached per translator hash
      under `build/shader_pack/<hash>/`. It is a separate step, not part of
      the build.
-   - The result: 263 distinct shaders, 1074 pipeline records, **119 KiB**
+   - The result: 265 distinct shaders, 1081 pipeline records, **119 KiB**
      zlib (7.6 MiB of MSL source expanded). That is the bundle size added.
+   - Regenerated on tv/integrate 6c0bd2b9 (translators 2209760db6f0fe62);
+     still current on a4d2862d.
+   - Not in the pack: the opt-in half-resolution transparents' MRT variants
+     (`halfres_fragment`). The host derives them from the pack's text with
+     its own compile, so they are not guest shader text. They compile on
+     first use when `display.half_res_transparents` is on (default off).
 4. **Keyed to the build.**
    - The pack's header names a hash of the sources that write shader text
      (`nv2a_psh.c`, `nv2a_vsh.c`, `xgpu.h`, `xgpu_text.c`, `d3d8_metal.c`,
@@ -2771,7 +2778,8 @@ were compared byte for byte with the Mac-generated pack:
 - the tvbench record (bridge + b30 runs): **60 / 60 shaders** and **43 / 43
   pipelines** (formats and blend) are in the pack;
 - the TV's long-play record (several sessions, a10 + b30 and more): **132 /
-  147 shaders (90%)**, 124 / 152 pipelines.
+  147 shaders (90%)**, 124 / 152 pipelines; 131 / 147 (89%) with the pack
+  regenerated on the newer base.
 
 So the MSL text does not depend on Mac vs TV or on BC handling. The 15
 missing shaders are pixel-shader variants: other combiner inputs, an
@@ -2815,18 +2823,65 @@ b40 stalled 219 ms at 11 s and 113 ms at 31 s in play.
 (These are Mac numbers, not TV numbers. The M4 compiles about 3x faster than
 the A12.)
 
-## A12 device
+## A12 device: not measured
 
-Pending. The bedroom TV was booked by other chats' sessions (#113, #106,
-#110) until at least ~21:45 UTC on 2026-10-23. The device comparison is
-`tvos_bench.py run --target device --scenes bridge,b30,cryo,b40,a30 --modes
-nopack,cold --repeats 2`, with nopack and cold interleaved by the plan. It
-has not been run yet; see "What remains".
+The planned session (about 60 min) was ABBA at 4K, nopack vs the bundled
+pack, on b40 and a30 (new levels) and b30. It got the bedroom TV through the
+FIFO lock on 2026-10-23 at about 22:04 and 22:28 UTC, after the owner had
+switched its output to 4K Dolby Vision (3840x2160 drawable). Every launch
+came up **`lifecycle: launched inactive (not yet on the screen)`** and never
+became active:
+- 0 frames drawn;
+- the GPU idle;
+- the launch ended by devicectl's timeout.
+
+That is the same as #112's launches in the same hour. A screensaver,
+sleeping display or mode prompt on the TV is the likely cause, not the
+build. On the coordinator's instruction the session was stopped rather than
+retried, so **there are no A12 numbers for the pack**.
+
+Two things to note from those attempts:
+- The first attempt's "results" were not real. Each copied frame log was a
+  stale one, from an earlier b30 run of another chat: both b30 modes showed
+  identical numbers. tvos_bench now marks a device run invalid when its own
+  log has no frame-log summary (fc037c2b on this branch).
+- The build used was 3d59cce9, the branch on tv/integrate c544b57a, signed
+  at `<scratch>/tv-deploy-shaderpack/OpenCETV.app`, pack bundled (119 KiB).
+  It was installed on the TV in the first attempt and is still installed.
+  The coordinator should reinstall the newest tv/integrate build when the
+  TV is reachable.
+
+To run it once the TV launches active (it takes the FIFO lock itself):
+
+    python3 tools/tvos_bench.py run --target device --maps <scratch>/halo_data/maps --out OUT \
+      --scenes b40,a30,b30 --resolutions 2160 --modes nopack,cold --repeats 2 --install --signed <signed app>
+
+`nopack` is a cold launch with the bundled pack off; `cold` is with it. The
+per-map log line "of the N new shader texts its draws compiled, P were
+prepared" gives the coverage on the device directly.
+
+### Expected on the A12 (from the Mac and the earlier A12 primed runs; not measured)
+
+- The A12 compiles about 3x slower than the M4. Primed runs earlier
+  ("Shader compile stalls (A12)") prepared 76–82 shaders in about 1.6 s and
+  56–62 pipelines in about 0.45 s, on 2 threads.
+- A map's own set (97–146 shaders) at 4 at a time should take about 1.5–2.5 s
+  plus about 0.5 s of pipelines, during the load. A new level's first frame
+  waits for the part not done yet: up to about 1.5 s more load time on b40
+  in the worst case. That is the cost of having the compiles out of play.
+- In play, a new level (b40 on the Mac) went from 6 frames >50 ms and
+  1305 ms of compile in the window to only the first frame's wait. Every
+  other in-play compile frame was under 13 ms. The A12 should show the same
+  shape, scaled.
 
 ## What remains
 
 - The A12 runs above (first launch with and without the pack, the new-level
-  load, and the load-frame cost of the preparation).
+  load, and the load-frame cost of the preparation): blocked by the TV
+  launching inactive at 4K Dolby Vision.
+- A new level's first frame waits for its own set (about 0.5 s on the M4,
+  likely more on the A12). Starting a level's preparation from the menu's
+  level choice, or earlier in the load, would hide it.
 - Whether reinstalling clears the system shader cache on tvOS. Not verified;
   the bench uses the salt, which is the conservative case.
 - The 10% of the TV's long-play shaders the tour misses: pixel-shader
