@@ -2374,9 +2374,29 @@ bounds; anything else: the default action, a crash report).
 |---|---|---|---|
 | Mac, 8 GiB guard | trapped: out of bounds | trapped: out of bounds | read 0 (in bounds) |
 | Mac, 4 GiB + 64 MiB guard | trapped: out of bounds | trapped: out of bounds | read 0 |
+| **A12, 4 GiB + 64 MiB guard** | **trapped: out of bounds** | **trapped: out of bounds** | **read 0** |
 
-The default stays `--memcheck bounds` until the A12 has run the guard
-build (device results below, when measured).
+### What tvOS allows (A12, tvOS 27.0, `HALO_VM_PROBE=1` in the TV app)
+
+| reservation | A12 |
+|---|---|
+| mmap 8 GiB (wasm2c's guard layout), also with MAP_NORESERVE; vm_allocate 8 GiB | **refused** (ENOMEM / KERN_NO_SPACE) |
+| mmap 6, 5, 4.25, 4.0625, 4, 3, 2.5 GiB | ok |
+| vm_allocate ANYWHERE 4 GiB + 64 MiB | ok |
+| largest single reservation | **6.00 GiB**; all at once 7.50 GiB |
+| the guard layout (4 GiB + 64 MiB, 2.5 GiB made accessible, an Xbox-window page written) | ok, at 0x7000000000 |
+| with it held: further reservations | largest 1.94 GiB, 3.25 GiB in all (Metal and the rest have room) |
+| reads past the accessible end, at 4 GiB - 1 and at the reservation's last 16 bytes | SIGBUS caught at the faulting address each time |
+
+So the process's address-space budget is ~7.5 GiB with no single block
+above 6 GiB: wasm2c's 8 GiB can never fit, but the 4.06 GiB guard layout
+does, leaving 3.25 GiB. Reservation is not commitment: the footprint is
+what is touched, the same in both modes.
+
+**Decision: the default stays `--memcheck bounds`.** The guard layout
+works on the A12 and traps correctly, but the A12 gain was small (below)
+and the owner asked for no risky memory-layout change at the project's
+end. `--memcheck guard` (or `OPENCE_TV_MEMCHECK=guard`) builds it.
 
 ## Where the guest's time goes (Mac profile)
 
@@ -2442,6 +2462,41 @@ Looked at and left:
   would drop the Apple TV HD, so not made default. PGO: the profiles in
   `pgo/` are for the Linux/Windows native builds and clang 22, not for
   the wasm2c C.
+
+## A12 results (bedroom TV, split + b30, 2160 render)
+
+One session, warm (one shader salt), in order: warm-up (bounds), A =
+before (`tv/cpu` with the two texture-lookup fixes reverted, bounds
+checks), B = fixes + bounds checks (the default build), C = fixes +
+guard pages, C, B, A. The TV's output was **1080p** for passes 0-5
+(drawable 1920x1080, `screen: 852x480 drawn at 3840x2160`). **Pass 6
+(A) is excluded**: its frame pacing changed (wall p10 12.7 ms against
+16.5 in every other pass, GPU p50 39-55 ms against 15-30), which
+matches the TV's output being switched to 4K Dolby Vision during the
+session; it is not comparable. So "before" is one pass. Steady window,
+ms per frame:
+
+| scene | build | passes | guest p50 | guest p95 | guest mean | host mean | wall p95 | >33 ms | >50 ms |
+|---|---|---|---|---|---|---|---|---|---|
+| split | A before | 1 | 4.47 | 5.42 | 4.45 | 3.14 | 16.87 | 0 | 0 |
+| split | B fixes, bounds | 2 | 4.22 | 5.14 | 4.30 | 3.28 | 16.89 | 0 | 0 |
+| split | C fixes, guard | 2 | 4.21 | 5.04 | 4.09 | 3.48 | 16.89 | 0 | 0 |
+| b30 | A before | 1 | 6.99 | 9.43 | 6.79 | 2.24 | 33.60 | 731 | 0 |
+| b30 | B fixes, bounds | 2 | 6.89 | 9.21 | 6.54 | 2.43 | 33.63 | 729 | 0 |
+| b30 | C fixes, guard | 2 | 6.49 | 9.10 | 6.27 | 2.66 | 33.62 | 698 | 0 |
+
+- The texture-lookup fixes: guest mean -0.15 ms in split (-3%), -0.25
+  ms in b30 (-4%); p50 -0.25/-0.1 ms. One "before" pass, so within
+  ~0.1-0.2 ms of noise; the direction matches the Mac's.
+- Guard pages over bounds checks: guest mean -0.21 ms (split) and
+  -0.27 ms (b30), ~5%, much less than the Mac's 12-34%; but host ms
+  rose ~0.2 ms in both scenes in both guard passes, so the frame's CPU
+  total is about unchanged. Not worth a memory-layout change now.
+- Neither scene is CPU-bound on the A12: split holds 60 fps (wall p95
+  16.9) and b30 at 2160 is GPU-bound (GPU p50 30 ms, ~700 frames over
+  33 ms in all builds alike).
+- None of these passes had a slow stretch (guest > 15 and host > 6 ms
+  for more than one frame: none in any pass).
 
 ## #110's 30 fps stretches in b30long: the main thread got slower, not the game
 
