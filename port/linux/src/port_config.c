@@ -623,6 +623,11 @@ static const struct config_setting config_settings[] =
 	{ "debug.update_answer", _config_string, "\"\"", "HALO_UPDATE_ANSWER", _environment_value, _platform_desktop,
 		"The answer to the new version question, for automated tests: \"yes\",\n"
 		"\"no\" or \"never\" (do not ask again, confirmed); empty asks." },
+	{ "debug.shader_tour", _config_string, "\"\"", "HALO_SHADER_TOUR", _environment_value, _platform_all,
+		"\"on\": once the map plays, the camera visits every cluster of every\n"
+		"structure BSP and every object and effect of the map is made in front\n"
+		"of it, then the game quits (the bundled shader pack's generator,\n"
+		"tools/shader_pack.py); empty for none." },
 	{ "debug.exit_after", _config_real, "0.0", "HALO_EXIT_AFTER", _environment_value, _platform_all,
 		"Quit this many seconds after the window opens; 0 never." },
 	{ "debug.hidden_window", _config_boolean, "false", "HALO_HIDDEN_WINDOW", _environment_set_is_true, _platform_desktop,
