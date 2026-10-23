@@ -3719,13 +3719,27 @@ void host_metal_present(void)
 
 			/* (the passes hoisted ahead of the frame's: done before its
 			buffers are used again, and their GPU time the frame's) */
-			double first_start = buffer.GPUStartTime;
+			static _Atomic uint64_t previous_end;
+			uint64_t before = atomic_load(&previous_end), busy = 0;
 
 			for (id<MTLCommandBuffer> early in hoisted)
 			{
 				[early waitUntilCompleted];
-				if (early.GPUStartTime > 0.0 && early.GPUStartTime < first_start)
-					first_start = early.GPUStartTime;
+				/* (the dynamic resolution's GPU time: each buffer's own, from
+				when the GPU was done with what came before it; not the span
+				from the first to the last, which holds the GPU's idle wait
+				for the frame's own buffer, committed at the present: with
+				the display's pacing that span is always about an interval) */
+				if (early.GPUEndTime > early.GPUStartTime)
+				{
+					uint64_t start = (uint64_t)(early.GPUStartTime * 1e9), end = (uint64_t)(early.GPUEndTime * 1e9);
+
+					if (before > start)
+						start = before < end ? before : end;
+					busy += end - start;
+					if (end > before)
+						before = end;
+				}
 				if (host_frame_log_level)
 					host_frame_log_gpu_hoisted(serial, early.GPUStartTime, early.GPUEndTime);
 				if (early.status == MTLCommandBufferStatusError)
@@ -3749,15 +3763,18 @@ void host_metal_present(void)
 					buffer.status == MTLCommandBufferStatusError);
 			}
 			/* (the dynamic resolution's: the frame's own time on the GPU, its
-			hoisted passes' first to its end, from when the frame before it
-			was done: not its wait behind it) */
-			if (host_dynres_enabled() && buffer.GPUEndTime > buffer.GPUStartTime)
+			hoisted buffers' and its own, each from when the GPU was done
+			with what came before it: not their waits) */
+			if (buffer.GPUEndTime > buffer.GPUStartTime)
 			{
-				static _Atomic uint64_t previous_end;
-				uint64_t start = (uint64_t)(first_start * 1e9), end = (uint64_t)(buffer.GPUEndTime * 1e9);
-				uint64_t before = atomic_exchange(&previous_end, end);
+				uint64_t start = (uint64_t)(buffer.GPUStartTime * 1e9), end = (uint64_t)(buffer.GPUEndTime * 1e9);
 
-				host_dynres_gpu(serial, end - (before > start && before < end ? before : start));
+				if (before > start)
+					start = before < end ? before : end;
+				busy += end - start;
+				atomic_store(&previous_end, end);
+				if (host_dynres_enabled())
+					host_dynres_gpu(serial, busy);
 			}
 			if (sample_profile && buffer.status == MTLCommandBufferStatusCompleted)
 			{

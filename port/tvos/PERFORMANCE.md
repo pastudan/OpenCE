@@ -1530,3 +1530,60 @@ b30, `HALO_DYNAMIC_RESOLUTION_CEILING=render`: off 57.5 fps, 869 frames
 over 17.5 ms in the window, GPU p50 41.6 ms; on 92.5 fps (the Mac's
 120 Hz), 58 over 17.5 ms, scale 0.622 (2688 of 4320 lines). The controller
 works end to end on Metal.
+
+## Device: split screen A/B (A12, 2026-10-23, bedroom TV)
+
+**Output mode during this session: 1080p** (the session's line:
+`screen 1920x1080 points, native 1920x1080 at 1.0x, mode 1920x1080`;
+drawable 1920x1080). The TV's own config renders 2160 lines and scales
+them down. With the default ceiling (`"display"`) "on" therefore draws the
+3D view at 1080 lines (the display's), the HUD at 2160. The 4K output's
+case is emulated by `HALO_DYNAMIC_RESOLUTION_CEILING=render` (ceiling 2160
+lines). Build `2425727f` from `<scratch>/tv-deploy-dynres`, installed once;
+off/on are `HALO_DYNRES` switches on that binary; warm (one shader salt
+for the session, after one warm-up run of each scene); telemetry off;
+config.toml/init.txt restored and verified identical after every run
+(10/10). Raw: `<scratch>/tvbench-out/device-dynres`. Window: from the
+first frame of sustained two views; a10 `split` 50 s (the cryo bay,
+player 2 standing), `b30split` 60 s (the beach firefight, both players
+standing at the insertion). "missed" = the display's own count (presented
+handler: refresh slots with no new frame), "lines" = the 3D view's lines.
+
+| run | scene | frames | fps | wall p95 | p99 | >16.7 | >33.3 | >50 | missed | GPU p50 | GPU p95 | lines mean | lines min |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| off | a10 split | 2998 | 60.0 | 16.8 | 16.9 | 1155 | 0 | 0 | 0 | 15.2 | 15.7 | 2160 | 2160 |
+| on | a10 split | 2998 | 60.0 | 16.8 | 16.9 | 1124 | 0 | 0 | 0 | 15.1 | 17.1 | 1080 | 1080 |
+| on, ceiling render | a10 split | 2998 | 60.0 | 16.8 | 16.9 | 1118 | 0 | 0 | 0 | 15.1 | 16.7 | 1080 | 1080 |
+| off | b30 split | 3318 | 55.3 | 33.4 | 33.6 | 1258 | 256 | 0 | **279** | 26.0 | 33.2 | 2160 | 2160 |
+| on | b30 split | 3597 | 60.0 | 16.8 | 16.9 | 1301 | 0 | 0 | **0** | 14.7 | 15.6 | 1080 | 1080 |
+| on (repeat) | b30 split | 3597 | 60.0 | 16.9 | 16.9 | 1251 | 0 | 0 | **0** | 14.7 | 15.6 | 1080 | 1080 |
+| off (repeat) | b30 split | 3110 | 51.9 | 33.6 | 33.6 | 1240 | 459 | 0 | **486** | 27.9 | 36.4 | 2160 | 2160 |
+| on, ceiling render | b30 split | 3597 | 60.0 | 16.9 | 17.0 | 1278 | 0 | 0 | **0** | 14.7 | 15.6 | 1080 | 1080 |
+
+(">16.7" counts frames of 16.70-16.9 ms, the display's interval measured
+by the host's clock: not misses. "missed" is the measure.)
+
+- **b30 split screen: 279 and 486 missed slots in 60 s at 2160 → 0 and 0
+  with dynamic resolution**, 60.0 fps, p95 16.8 ms, worst frame 21-22 ms.
+  This is the owner's 30 Hz case (Capital OFFICE: gpu_p50 26-29 ms at
+  2160, the same as here: 26.0 and 27.9).
+- **a10 split screen holds 60 at 2160 already** (GPU p50 15.2 ms), no miss
+  either way; "on" still dropped to 1080, which costs sharpness for
+  nothing there. That is the controller's measuring error (below), fixed
+  in the next commit and to be measured again.
+- **Thermal:** nominal throughout (the session's ~35 min of runs).
+
+**What the runs showed about the controller.** With the ceiling at 2160
+lines the b30 split run spent 8628 frames at 1080 lines, 2123 at 1440, 3 at
+1620 and 10 at 2160: it reached the split floor and stayed there,
+the same as on the a10 scene that does not need it. The log's "GPU 16.7 ms"
+at 1080 lines shows why: the controller's per-frame GPU time was the span
+from the frame's first hoisted buffer to its own buffer's end, and the
+hoisted buffers are committed early in the frame while the frame's own
+buffer is committed at the present, paced by the display. The span holds
+the GPU's idle wait between them, so it is about one interval whatever
+the load, and it reads "hot". Fixed: each buffer's own time from when the
+GPU was done with what came before it, summed (commit after this
+section). Everything else (the very-hot rule, the probe and its back-off,
+the ceiling and floors) worked as designed: 2 steps down, 1 step up, 0
+failed tries in each run.
