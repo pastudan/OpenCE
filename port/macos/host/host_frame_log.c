@@ -39,6 +39,9 @@ struct frame_record
 	span, which includes waiting behind the frame before, apart */
 	_Atomic uint64_t hoisted_ns;
 	_Atomic uint32_t hoisted_buffers;
+	/* the fraction of the screen's resolution its 3D scenes were drawn at
+	(display.dynamic_resolution; 1 without it, 0 for none drawn) */
+	float render_scale;
 };
 
 #define EVENTS 64
@@ -55,6 +58,8 @@ static struct
 } events[EVENTS];
 static uint32_t event_count;
 static uint64_t current_serial;
+/* the frame being presented's render scale (host_frame_log_render_scale) */
+static float render_scale = 1.0f;
 
 static struct frame_record *record_of(uint64_t serial)
 {
@@ -121,7 +126,7 @@ static void write_csv(void)
 	}
 	fprintf(file, "serial,t_ms,wall_ms,host_ms,compile_ms,wait_inflight_ms,wait_drawable_ms,wait_readback_ms,"
 		"sleep_ms,guest_ms,gpu_ms,gpu_buffers,gpu_failed,gpu_start_ms,gpu_end_ms,presented_ms,draws,passes,copies,"
-		"compiles,fog_draws,transparent_draws,hoisted_ms,hoisted_buffers\n");
+		"compiles,fog_draws,transparent_draws,hoisted_ms,hoisted_buffers,render_scale\n");
 	/* (the records are in the order they were presented: serials are the
 	frames', from 1) */
 	for (serial = first; serial <= current_serial; serial++)
@@ -140,7 +145,7 @@ static void write_csv(void)
 		gpu_start = atomic_load(&record->gpu_start_ns);
 		gpu_end = atomic_load(&record->gpu_end_ns);
 		presented = atomic_load(&record->presented_ns);
-		fprintf(file, "%llu,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%u,%u,%.3f,%.3f,%.3f,%u,%u,%u,%u,%u,%u,%.3f,%u\n",
+		fprintf(file, "%llu,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%u,%u,%.3f,%.3f,%.3f,%u,%u,%u,%u,%u,%u,%.3f,%u,%.4f\n",
 			(unsigned long long)serial, ms(record->present_ns - start_ns), ms(record->wall_ns),
 			host_frame_log_level >= 2 && host > 0 ? host / 1000000.0 : 0.0,
 			ms(record->compile_ns), ms(record->wait_inflight_ns), ms(record->wait_drawable_ns),
@@ -151,7 +156,7 @@ static void write_csv(void)
 			gpu_start > start_ns ? ms(gpu_start - start_ns) : 0.0, gpu_end > start_ns ? ms(gpu_end - start_ns) : 0.0,
 			presented > start_ns ? ms(presented - start_ns) : 0.0, record->draws, record->passes, record->copies,
 			record->compiles, record->fog_draws, record->transparent_draws, ms(atomic_load(&record->hoisted_ns)),
-			atomic_load(&record->hoisted_buffers));
+			atomic_load(&record->hoisted_buffers), record->render_scale);
 	}
 	fclose(file);
 	host_log("frame log: %s", path);
@@ -475,6 +480,7 @@ void host_frame_log_present(uint64_t serial)
 	record->compiles = host_frame_acc.compiles;
 	record->fog_draws = host_frame_acc.fog_draws;
 	record->transparent_draws = host_frame_acc.transparent_draws;
+	record->render_scale = render_scale;
 	atomic_store(&record->serial, serial);
 	if (host_telemetry_enabled)
 	{
@@ -492,11 +498,25 @@ void host_frame_log_present(uint64_t serial)
 		interval_line(serial);
 }
 
+void host_frame_log_render_scale(float fraction)
+{
+	render_scale = fraction < 0.0f ? 0.0f : fraction;
+	if (host_telemetry_enabled)
+		host_telemetry_render_scale(render_scale);
+}
+
 uint64_t host_frame_log_presented_of(uint64_t serial)
 {
 	struct frame_record *record = record_of(serial);
 
 	return record ? atomic_load(&record->presented_ns) : 0;
+}
+
+float host_frame_log_render_scale_of(uint64_t serial)
+{
+	struct frame_record *record = record_of(serial);
+
+	return record ? record->render_scale : 1.0f;
 }
 
 static uint64_t ns_of_seconds(double seconds)

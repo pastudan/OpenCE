@@ -130,6 +130,12 @@ includes waiting behind the frame before: not added to the GPU time) */
 void host_frame_log_gpu_hoisted(uint64_t serial, double start_seconds, double end_seconds);
 /* frame serial reached the display (0: it never did) */
 void host_frame_log_presented(uint64_t serial, double presented_seconds);
+/* the fraction of the screen's resolution the frame being presented drew
+its 3D scenes at (display.dynamic_resolution, host_dynres.h; 1 without it,
+negative for none drawn: a menu), before host_frame_log_present: the CSV's
+render_scale column and the telemetry's; and a frame's, from the ring */
+void host_frame_log_render_scale(float fraction);
+float host_frame_log_render_scale_of(uint64_t serial);
 /* when the display showed frame serial (CLOCK_UPTIME_RAW ns; 0: not, or
 not known yet, or the frame is out of the ring) */
 uint64_t host_frame_log_presented_of(uint64_t serial);

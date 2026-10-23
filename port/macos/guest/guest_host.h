@@ -19,6 +19,7 @@ stream objects are small integer handles.
 struct metal_vertex_layout;
 struct metal_clear;
 struct metal_draw;
+struct metal_upscale;
 struct metal_telemetry_game;
 
 /* ---------- process */
@@ -146,6 +147,17 @@ void host_telemetry_game(const struct metal_telemetry_game *game);
 host_metal_present_target, letterboxed in the window */
 void host_metal_present(void);
 void host_metal_present_target(unsigned int texture, unsigned int width, unsigned int height);
+/* dynamic resolution (port/macos/host/host_dynres.h): its settings
+(display.dynamic_resolution: 1 on, 0 off, -1 the build's default; its
+floors in lines; its filter; whether the render target's lines are its
+ceiling rather than the display's), the fraction of the screen's resolution this frame's
+player views draw their scenes at (views: how many; lines: the back
+buffer's height; the same answer all frame), the frame's fraction told to the controller at its present (-1:
+no scene drawn), and a view's scene scaled up into the back buffer */
+void host_dynres_settings(int enabled, int floor_lines, int split_floor_lines, int sharpen, int ceiling_render);
+float host_dynres_fraction(int views, int lines);
+void host_dynres_frame(float fraction);
+void host_metal_scene_upscale(const struct metal_upscale *upscale);
 
 /* textures (port/macos/guest/metal_protocol.h's formats, types and usage):
 a handle, its storage (made again each time: a frame on the GPU keeps the

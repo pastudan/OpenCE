@@ -309,6 +309,23 @@ struct metal_clear
 	metal_u32 stencil_value;
 };
 
+/* dynamic resolution (host_dynres.h): a player view's 3D scene, drawn
+into the top left of a target of the back buffer's size at a fraction of
+its resolution, scaled up into the view's rectangle of the back buffer
+(pixels, from the top left; source's in the scene target, destination's
+in the back buffer), in a pass of the back buffer and its depth buffer (the
+HUD's next: one pass); filter is METAL_UPSCALE_* */
+#define METAL_UPSCALE_BILINEAR 0
+#define METAL_UPSCALE_SHARP 1
+struct metal_upscale
+{
+	metal_u32 scene, back_buffer, depth;
+	metal_u32 source[4];
+	metal_u32 destination[4];
+	metal_u32 filter;
+	float sharpness;
+};
+
 /* visibility tests: a frame's tests (host_metal_visibility_begin), and the
 game's indices for them (D3DDevice_EndVisibilityTest's, modulo this) */
 #define METAL_VISIBILITY_SLOTS 4096

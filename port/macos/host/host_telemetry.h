@@ -81,6 +81,10 @@ void host_telemetry_frame(uint64_t serial, uint64_t now_ns, uint64_t wall_ns,
 /* the picture's size and the drawable's (host_metal_present) */
 void host_telemetry_sizes(uint32_t render_width, uint32_t render_height, uint32_t drawable_width,
 	uint32_t drawable_height);
+/* the fraction of the render size the frame's 3D scenes were drawn at
+(dynamic resolution, host_dynres.h; 0 for none drawn): from
+host_frame_log_render_scale */
+void host_telemetry_render_scale(float fraction);
 /* the view the rasterizer begins: a player's window index, or -1 */
 void host_telemetry_view(int window_index);
 /* the game's state, once a frame (port/macos/guest/guest_metal.c) */

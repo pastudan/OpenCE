@@ -5652,6 +5652,17 @@ void WINAPI D3DDevice_Clear(DWORD count, CONST D3DRECT *rectangles, DWORD flags,
 
 /* ---------- the anti-aliasing passes */
 
+/* display.dynamic_resolution is the Metal device's (d3d8_metal.c): here
+the 3D view is drawn at the screen's resolution */
+void halo_screen_scene_begin(short x0, short y0, short x1, short y1, short views)
+{
+	(void)x0;
+	(void)y0;
+	(void)x1;
+	(void)y1;
+	(void)views;
+}
+
 /* display.anti_aliasing's pass over a window's 3D view, before the HUD and
 menus are drawn over it (source/render/render.c); the window's bounds in the
 game's units of the screen */

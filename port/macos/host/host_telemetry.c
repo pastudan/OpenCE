@@ -86,6 +86,11 @@ struct second
 	/* the game's state at the second's last frame */
 	struct metal_telemetry_game game;
 	uint32_t render_width, render_height, drawable_width, drawable_height;
+	/* the scenes' render scale: its least, and its sum over the frames that
+	drew one (for the mean) */
+	float scale_least;
+	double scale_sum;
+	uint32_t scale_frames;
 	uint64_t self_ns;
 };
 
@@ -116,6 +121,9 @@ static struct
 	/* the game's state, as the guest last gave it */
 	struct metal_telemetry_game game;
 	uint32_t render_width, render_height, drawable_width, drawable_height;
+	/* the fraction of render_* the 3D scenes were drawn at (dynamic
+	resolution; 0: none drawn) */
+	float render_scale;
 	/* the display's time of the last frame it showed (second_write) */
 	uint64_t last_shown_ns;
 	/* events since the last frame (for a hitch), from any thread */
@@ -568,6 +576,11 @@ void host_telemetry_event(const char *kind, const char *detail)
 
 /* ---------- frames, views and the game */
 
+void host_telemetry_render_scale(float fraction)
+{
+	telemetry.render_scale = fraction;
+}
+
 void host_telemetry_sizes(uint32_t render_width, uint32_t render_height, uint32_t drawable_width,
 	uint32_t drawable_height)
 {
@@ -806,10 +819,12 @@ static void second_write(struct second *second)
 		second->file_read_bytes / 1048576.0, second->file_writes, second->file_write_bytes / 1048576.0,
 		ms(second->file_ns), second->manifest_writes, second->manifest_bytes / 1024.0, ms(second->manifest_ns));
 	append("\"footprint_mb\":%.1f,\"available_mb\":%.1f,\"metal_mb\":%.1f,\"thermal\":%d,\"active\":%d,"
-		"\"render\":[%u,%u],\"drawable\":[%u,%u],\"scale\":%.3f,\"self_ms\":%.3f,\"writer_ms\":%.3f,",
+		"\"render\":[%u,%u],\"drawable\":[%u,%u],\"scale\":%.3f,\"render_scale\":%.4f,\"render_scale_min\":%.4f,"
+		"\"self_ms\":%.3f,\"writer_ms\":%.3f,",
 		platform.footprint / 1048576.0, platform.available / 1048576.0, platform.metal_allocated / 1048576.0,
 		platform.thermal, platform.active, second->render_width, second->render_height, second->drawable_width,
 		second->drawable_height, second->drawable_height ? (double)second->render_height / second->drawable_height : 0.0,
+		second->scale_frames ? second->scale_sum / second->scale_frames : 0.0, (double)second->scale_least,
 		ms(second->self_ns), ms(atomic_exchange(&telemetry.writer_ns, 0)));
 	/* (who owns Metal's allocations: host_metal_memory) */
 	{
@@ -896,6 +911,13 @@ void host_telemetry_frame(uint64_t serial, uint64_t now_ns, uint64_t wall_ns,
 	second->game = telemetry.game;
 	second->render_width = telemetry.render_width;
 	second->render_height = telemetry.render_height;
+	if (serial > 1 && telemetry.render_scale > 0.0f)
+	{
+		if (!second->scale_frames || telemetry.render_scale < second->scale_least)
+			second->scale_least = telemetry.render_scale;
+		second->scale_sum += telemetry.render_scale;
+		second->scale_frames++;
+	}
 	second->drawable_width = telemetry.drawable_width;
 	second->drawable_height = telemetry.drawable_height;
 	if (now_ns - second->start_ns >= 1000000000ull)

@@ -331,6 +331,18 @@ static void render_window(
 
 	structure_visibility_compute();
 	player_effect_get_screen_flash(local_player_index, &parameters.screen_flash);
+	/* port: the 3D view drawn at the resolution display.dynamic_resolution
+	picks, up to halo_screen_anti_alias below (which scales it up to the
+	screen's before the HUD and menus are drawn over it) */
+	if (rasterizer_target == _render_target_primary && !bink_playback_in_progress())
+	{
+		halo_screen_scene_begin(
+			rasterizer_camera->viewport_bounds.x0,
+			rasterizer_camera->viewport_bounds.y0,
+			rasterizer_camera->viewport_bounds.x1,
+			rasterizer_camera->viewport_bounds.y1,
+			(short)main_get_window_count());
+	}
 	rasterizer_window_begin(&parameters);
 
 	if (!bink_playback_in_progress())

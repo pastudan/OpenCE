@@ -114,6 +114,29 @@ static const struct config_setting config_settings[] =
 	{ "display.screen_width", _config_integer, "0", "HALO_SCREEN_WIDTH", _environment_value, _platform_android,
 		"Columns of the 480-line picture: 0 for the display's shape, 640 for the\n"
 		"Xbox's 4:3." },
+	{ "display.dynamic_resolution", _config_string, "\"auto\"", "HALO_DYNAMIC_RESOLUTION", _environment_value,
+		_platform_desktop,
+		"Metal builds: draw the 3D view at less than display.resolution_scaling's\n"
+		"lines when the GPU cannot hold the display's rate at it, and back up when\n"
+		"it can (the HUD, menus and text stay sharp): \"on\", \"off\", or \"auto\"\n"
+		"(on on the Apple TV, off on a Mac)." },
+	{ "display.dynamic_resolution_floor", _config_integer, "1440", "HALO_DYNAMIC_RESOLUTION_FLOOR", _environment_value,
+		_platform_desktop,
+		"With display.dynamic_resolution: the fewest lines of 2160 the 3D view is\n"
+		"drawn at with one player (of display.resolution_scaling's height: 1440\n"
+		"of 2160 is two thirds of it)." },
+	{ "display.dynamic_resolution_split_floor", _config_integer, "1080", "HALO_DYNAMIC_RESOLUTION_SPLIT_FLOOR",
+		_environment_value, _platform_desktop,
+		"The same, in split screen (two to four players)." },
+	{ "display.dynamic_resolution_ceiling", _config_string, "\"display\"", "HALO_DYNAMIC_RESOLUTION_CEILING",
+		_environment_value, _platform_desktop,
+		"The most lines dynamic resolution draws the 3D view at: \"display\", the\n"
+		"display's (a 1080p TV mode: 1080, whatever display.resolution_scaling\n"
+		"says), or \"render\", display.resolution_scaling's (drawn and scaled down)." },
+	{ "display.dynamic_resolution_filter", _config_string, "\"bilinear\"", "HALO_DYNAMIC_RESOLUTION_FILTER",
+		_environment_value, _platform_desktop,
+		"How a 3D view drawn at fewer lines is scaled up: \"bilinear\", or\n"
+		"\"sharp\" (bilinear and a contrast-adaptive sharpening)." },
 	{ "display.vsync", _config_boolean, "true", "HALO_NO_VSYNC", _environment_set_is_false, _platform_all,
 		"Wait for the display between frames; false draws as fast as possible." },
 	{ "display.max_fps", _config_integer, "0", "HALO_MAX_FPS", _environment_value, _platform_desktop,

@@ -42,6 +42,7 @@ indices keeps its latest count (host_metal_visibility_result).
 #include <string.h>
 
 #include "host.h"
+#include "host_dynres.h"
 #include "host_frame_log.h"
 #include "host_shader_manifest.h"
 #include "host_telemetry.h"
@@ -229,7 +230,17 @@ static struct
 	/* the picture to show at the next present */
 	uint32_t present_source;
 	uint32_t present_width, present_height;
-} metal;
+
+	/* dynamic resolution (host_dynres.h): the upscales' pipelines (bilinear,
+	sharp; made when first used), the fraction this frame's scenes drew at
+	(-1: none), the display's refresh interval, and the frame's GPU span so
+	far (its hoisted buffers', to add to its own) */
+	id<MTLRenderPipelineState> upscale_pipelines[2];
+	id<MTLFunction> upscale_vertex, upscale_fragments[2];
+	float dynres_fraction;
+	uint64_t slot_ns;
+	int thermal, ceiling_render;
+} metal = { .dynres_fraction = -1.0f };
 
 /* ---------- frames */
 
@@ -1204,6 +1215,53 @@ static NSString *const renderer_shaders =
 	"\tsampler s [[sampler(0)]])\n"
 	"{\n"
 	"\treturn float4(picture.sample(s, in.uv).rgb, 1.0);\n"
+	"}\n"
+	/* dynamic resolution (host_metal_scene_upscale): a view's scene, the
+	source rectangle of the scene target, scaled up over the destination
+	rectangle (the viewport). The coordinates are clamped to the source's
+	pixels' centres, so that no filter reads past its edge into what the
+	scene target holds outside it (another view's, or an older frame's) */
+	"struct upscale_values { float4 source; float2 size; float sharpness; float padding; };\n"
+	"vertex plain_out upscale_vertex(uint id [[vertex_id]], constant upscale_values &v [[buffer(0)]])\n"
+	"{\n"
+	"\tfloat2 p = float2((id << 1) & 2, id & 2);\n"
+	"\tplain_out o;\n"
+	"\to.position = float4(p.x * 2.0 - 1.0, 1.0 - p.y * 2.0, 0.0, 1.0);\n"
+	"\to.uv = v.source.xy + p * v.source.zw;\n"
+	"\treturn o;\n"
+	"}\n"
+	"static float2 upscale_clamp(float2 at, constant upscale_values &v)\n"
+	"{\n"
+	"\treturn clamp(at, v.source.xy + 0.5, v.source.xy + v.source.zw - 0.5);\n"
+	"}\n"
+	/* bilinear: one sample */
+	"fragment float4 upscale_bilinear(plain_out in [[stage_in]], texture2d<float> scene [[texture(0)]],\n"
+	"\tsampler s [[sampler(0)]], constant upscale_values &v [[buffer(0)]])\n"
+	"{\n"
+	"\treturn scene.sample(s, upscale_clamp(in.uv, v) / v.size);\n"
+	"}\n"
+	/* (alpha too: the game keeps scratch in the destination's alpha, which
+	what is drawn after the scene may blend with) */
+	/* sharp: the bilinear sample, then a contrast-adaptive sharpening of it
+	from its four neighbours a source pixel away (AMD's CAS, simplified:
+	the weight shrinks where the neighbourhood already has contrast, so
+	edges do not ring) */
+	"fragment float4 upscale_sharp(plain_out in [[stage_in]], texture2d<float> scene [[texture(0)]],\n"
+	"\tsampler s [[sampler(0)]], constant upscale_values &v [[buffer(0)]])\n"
+	"{\n"
+	"\tfloat2 at = upscale_clamp(in.uv, v);\n"
+	"\tfloat4 center = scene.sample(s, at / v.size);\n"
+	"\tfloat3 c = center.rgb;\n"
+	"\tfloat3 n = scene.sample(s, upscale_clamp(at - float2(0.0, 1.0), v) / v.size).rgb;\n"
+	"\tfloat3 w = scene.sample(s, upscale_clamp(at - float2(1.0, 0.0), v) / v.size).rgb;\n"
+	"\tfloat3 e = scene.sample(s, upscale_clamp(at + float2(1.0, 0.0), v) / v.size).rgb;\n"
+	"\tfloat3 so = scene.sample(s, upscale_clamp(at + float2(0.0, 1.0), v) / v.size).rgb;\n"
+	"\tfloat3 lo = min(c, min(min(n, w), min(e, so)));\n"
+	"\tfloat3 hi = max(c, max(max(n, w), max(e, so)));\n"
+	"\tfloat3 amount = sqrt(saturate(min(lo, 1.0 - hi) / max(hi, 1.0 / 256.0)));\n"
+	"\tfloat3 weight = -amount * mix(0.125, 0.2, v.sharpness);\n"
+	"\tfloat3 sharp = (c + (n + w + e + so) * weight) / (1.0 + 4.0 * weight);\n"
+	"\treturn float4(saturate(sharp), center.a);\n"
 	"}\n";
 
 static id<MTLTexture> dummy_make(MTLTextureType type)
@@ -1286,6 +1344,9 @@ static BOOL renderer_initialize(void)
 	metal.clear_vertex = [library newFunctionWithName:@"clear_vertex"];
 	metal.clear_fragment = [library newFunctionWithName:@"clear_fragment"];
 	metal.white_fragment = [library newFunctionWithName:@"white_fragment"];
+	metal.upscale_vertex = [library newFunctionWithName:@"upscale_vertex"];
+	metal.upscale_fragments[METAL_UPSCALE_BILINEAR] = [library newFunctionWithName:@"upscale_bilinear"];
+	metal.upscale_fragments[METAL_UPSCALE_SHARP] = [library newFunctionWithName:@"upscale_sharp"];
 	metal.debug = getenv("HALO_METAL_DEBUG") ? atoi(getenv("HALO_METAL_DEBUG")) : 0;
 	descriptor = [MTLRenderPipelineDescriptor new];
 	descriptor.vertexFunction = [library newFunctionWithName:@"present_vertex"];
@@ -1347,6 +1408,9 @@ int host_metal_attach(unsigned int window)
 		metal.layer.pixelFormat = MTLPixelFormatBGRA8Unorm;
 		metal.layer.framebufferOnly = YES;
 		metal.layer.maximumDrawableCount = 3;
+		/* (the display's refresh interval: the dynamic resolution's budget) */
+		metal.slot_ns = (uint64_t)(1e9 / host_telemetry_platform_refresh_hz());
+		metal.thermal = (int)[NSProcessInfo processInfo].thermalState;
 #ifndef HALO_TVOS
 		metal.layer.displaySyncEnabled = metal.vsync ? YES : NO;
 #endif
@@ -3337,6 +3401,152 @@ int host_metal_texture_read(unsigned int handle, unsigned int width, unsigned in
 	}
 }
 
+/* ---------- dynamic resolution (host_dynres.h) */
+
+/* HALO_DYNRES (on/off), HALO_DYNRES_FIXED=<fraction>[,toggle:<n>,<other>]
+(diagnostic: a fixed fraction, or two alternating every n frames, for the
+frame-by-frame comparisons in PERFORMANCE.md) override the settings */
+void host_dynres_settings(int enabled, int floor_lines, int split_floor_lines, int sharpen, int ceiling_render)
+{
+	char screen[256];
+
+	const char *value = getenv("HALO_DYNRES");
+	double floor = floor_lines > 0 ? floor_lines : 1440.0;
+	double split_floor = split_floor_lines > 0 ? split_floor_lines : 1080.0;
+
+	/* ("auto": on on the Apple TV, whose GPU cannot hold 60 frames a second
+	at 2160 lines in every scene; off on a Mac) */
+	if (enabled < 0)
+	{
+#ifdef HALO_TVOS
+		enabled = 1;
+#else
+		enabled = 0;
+#endif
+	}
+	if (value && *value)
+		enabled = strcmp(value, "0") && strcmp(value, "off") && strcmp(value, "false");
+	host_dynres_configure(enabled, floor, split_floor);
+	value = getenv("HALO_DYNRES_FIXED");
+	if (value && *value && atof(value) > 0.0)
+	{
+		const char *toggle = strstr(value, "toggle:");
+		const char *other = toggle ? strchr(toggle, ',') : NULL;
+
+		host_dynres_configure(1, floor, split_floor);
+		host_dynres_fixed(atof(value), toggle ? (uint32_t)atoi(toggle + 7) : 0, other ? atof(other + 1) : 1.0);
+	}
+	metal.ceiling_render = ceiling_render;
+	host_telemetry_platform_describe(screen, sizeof(screen));
+	host_log("dynamic resolution: %s, floor %.0f lines (split screen %.0f), ceiling the %s's, %s upscale%s; %s",
+		host_dynres_enabled() ? "on" : "off", floor, split_floor, ceiling_render ? "render target" : "display",
+		sharpen ? "sharp" : "bilinear", value && *value ? " (HALO_DYNRES_FIXED)" : "", screen);
+}
+
+float host_dynres_fraction(int views, int lines)
+{
+	/* (the ceiling: the drawable's lines, which the display shows; the
+	picture is letterboxed to the back buffer's shape in it. With
+	display.dynamic_resolution_ceiling "render", the back buffer's) */
+	double ceiling = 0.0;
+
+	if (metal.layer && metal.present_width && metal.present_height && !metal.ceiling_render)
+	{
+		double width = metal.layer.drawableSize.width, height = metal.layer.drawableSize.height;
+
+		ceiling = width * metal.present_height < height * metal.present_width ?
+			width * metal.present_height / metal.present_width : height;
+	}
+	return (float)host_dynres_frame_fraction(frame_serial, views, metal.thermal, metal.slot_ns,
+		host_frame_log_now(), (double)lines, ceiling);
+}
+
+void host_dynres_frame(float fraction)
+{
+	metal.dynres_fraction = fraction;
+}
+
+static id<MTLRenderPipelineState> upscale_pipeline(uint32_t filter, MTLPixelFormat color, MTLPixelFormat depth)
+{
+	NSString *key;
+
+	if (filter > METAL_UPSCALE_SHARP)
+		filter = METAL_UPSCALE_BILINEAR;
+	key = [NSString stringWithFormat:@"%lu/%lu", (unsigned long)color, (unsigned long)depth];
+	if (!metal.upscale_pipelines[filter] || ![metal.upscale_pipelines[filter].label isEqualToString:key])
+	{
+		MTLRenderPipelineDescriptor *descriptor = [MTLRenderPipelineDescriptor new];
+		NSError *error = nil;
+
+		descriptor.vertexFunction = metal.upscale_vertex;
+		descriptor.fragmentFunction = metal.upscale_fragments[filter];
+		descriptor.colorAttachments[0].pixelFormat = color;
+		descriptor.depthAttachmentPixelFormat = depth;
+		descriptor.stencilAttachmentPixelFormat = depth;
+		descriptor.label = key;
+		metal.upscale_pipelines[filter] = [metal.device newRenderPipelineStateWithDescriptor:descriptor error:&error];
+		if (!metal.upscale_pipelines[filter])
+			host_log("Metal: no upscale pipeline: %s", error.localizedDescription.UTF8String);
+	}
+	return metal.upscale_pipelines[filter];
+}
+
+/* a view's scene scaled up into the back buffer: the view's rectangle of
+it drawn over with the scene target's, in a pass of the back buffer and its
+depth buffer (depth and stencil neither tested nor written), which the
+HUD's draws then go on in */
+void host_metal_scene_upscale(const struct metal_upscale *upscale)
+{
+	HOST_FRAME_LOG_SCOPE;
+	id<MTLTexture> scene = texture_object(upscale->scene), back = texture_object(upscale->back_buffer);
+	id<MTLRenderPipelineState> pipeline;
+	struct { float source[4]; float size[2]; float sharpness; float padding; } values;
+	MTLScissorRect scissor;
+	MTLViewport viewport;
+
+	if (!metal.device || !scene || !back)
+		return;
+	@autoreleasepool
+	{
+		host_metal_set_targets(upscale->back_buffer, upscale->depth);
+		if (!encoder_begin())
+			return;
+		pipeline = upscale_pipeline(upscale->filter, pass.color_format, pass.depth_format);
+		if (!pipeline)
+			return;
+		if (!scissor_inside(upscale->destination, &scissor))
+			return;
+		viewport = (MTLViewport){ upscale->destination[0], upscale->destination[1], upscale->destination[2],
+			upscale->destination[3], 0.0, 1.0 };
+		values.source[0] = (float)upscale->source[0];
+		values.source[1] = (float)upscale->source[1];
+		values.source[2] = (float)upscale->source[2];
+		values.source[3] = (float)upscale->source[3];
+		values.size[0] = (float)scene.width;
+		values.size[1] = (float)scene.height;
+		values.sharpness = upscale->sharpness;
+		values.padding = 0.0f;
+		[encoder setRenderPipelineState:pipeline];
+		[encoder setDepthStencilState:depth_stencil_get(&(struct metal_depth_stencil){ 0 })];
+		[encoder setCullMode:MTLCullModeNone];
+		[encoder setTriangleFillMode:MTLTriangleFillModeFill];
+		[encoder setViewport:viewport];
+		[encoder setScissorRect:scissor];
+		[encoder setVertexBytes:&values length:sizeof(values) atIndex:0];
+		[encoder setFragmentBytes:&values length:sizeof(values) atIndex:0];
+		[encoder setFragmentTexture:scene atIndex:0];
+		[encoder setFragmentSamplerState:metal.present_sampler atIndex:0];
+		if (bound.counter != ~0u)
+			[encoder setVisibilityResultMode:MTLVisibilityResultModeDisabled offset:0];
+		[encoder drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
+		if (pass_log.record)
+			pass_log.record->draws++;
+		handles[upscale->scene].commands_read = commands_generation;
+		handles[upscale->scene].used_serial = frame_serial;
+		bound_forget();
+	}
+}
+
 /* ---------- presentation */
 
 void host_metal_present_target(unsigned int texture, unsigned int width, unsigned int height)
@@ -3396,14 +3606,19 @@ void host_metal_present(void)
 				drawable = [metal.layer nextDrawable];
 			}
 			/* when the display showed it (0: it was not, another drawable
-			replaced it first): the frame log's presented_ms and the
-			telemetry's fps and missed slots. (tvOS has the handler too, from
-			tvOS 10.3: an earlier comment here said it had not) */
-			if (drawable && host_frame_log_level)
+			replaced it first): the frame log's presented_ms, the
+			telemetry's fps and missed slots, and the dynamic resolution's
+			late frames. (tvOS has the handler too, from tvOS 10.3: an
+			earlier comment here said it had not) */
+			if (drawable && (host_frame_log_level || host_dynres_enabled()))
 			{
 				[drawable addPresentedHandler:^(id<MTLDrawable> shown)
 				{
-					host_frame_log_presented(serial, shown.presentedTime);
+					uint64_t shown_ns = shown.presentedTime > 0.0 ? (uint64_t)(shown.presentedTime * 1e9) : 0;
+
+					if (host_frame_log_level)
+						host_frame_log_presented(serial, shown.presentedTime);
+					host_dynres_shown(serial, shown_ns);
 				}];
 			}
 			if (drawable)
@@ -3474,6 +3689,26 @@ void host_metal_present(void)
 		memset(profile_phase_copies, 0, sizeof(profile_phase_copies));
 		profile_shader_ns = profile_pipeline_ns = 0;
 		profile_feedback_copies = profile_feedback_bytes = 0;
+		/* (the dynamic resolution's: the fraction this frame's scenes drew
+		at, -1 for none; the thermal state, a second at a time) */
+		host_dynres_frame_done(serial, metal.dynres_fraction);
+		/* (the controller's state in the log, every ten seconds) */
+		if (host_dynres_enabled() && serial % 600 == 0)
+		{
+			struct host_dynres_status status;
+
+			host_dynres_status(&status);
+			host_log("dynamic resolution frame %llu: %.0f%% of %u lines, GPU %.2f ms; %llu frames counted, %llu late "
+				"(%llu the GPU's); %llu steps down, %llu up, %llu tries failed; thermal %d",
+				(unsigned long long)serial, status.fraction * 100.0, metal.present_height, status.gpu_ms,
+				(unsigned long long)status.frames, (unsigned long long)status.late, (unsigned long long)status.late_gpu,
+				(unsigned long long)status.steps_down, (unsigned long long)status.steps_up,
+				(unsigned long long)status.probes_failed, metal.thermal);
+		}
+		host_frame_log_render_scale(metal.dynres_fraction);
+		metal.dynres_fraction = -1.0f;
+		if (host_dynres_enabled() && serial % 60 == 0)
+			metal.thermal = (int)[NSProcessInfo processInfo].thermalState;
 		frame = frame_current();
 		pass_log_clock();
 		NSArray *hoisted = frame->hoisted;
@@ -3484,9 +3719,13 @@ void host_metal_present(void)
 
 			/* (the passes hoisted ahead of the frame's: done before its
 			buffers are used again, and their GPU time the frame's) */
+			double first_start = buffer.GPUStartTime;
+
 			for (id<MTLCommandBuffer> early in hoisted)
 			{
 				[early waitUntilCompleted];
+				if (early.GPUStartTime > 0.0 && early.GPUStartTime < first_start)
+					first_start = early.GPUStartTime;
 				if (host_frame_log_level)
 					host_frame_log_gpu_hoisted(serial, early.GPUStartTime, early.GPUEndTime);
 				if (early.status == MTLCommandBufferStatusError)
@@ -3508,6 +3747,17 @@ void host_metal_present(void)
 			{
 				host_frame_log_gpu(serial, buffer.GPUStartTime, buffer.GPUEndTime,
 					buffer.status == MTLCommandBufferStatusError);
+			}
+			/* (the dynamic resolution's: the frame's own time on the GPU, its
+			hoisted passes' first to its end, from when the frame before it
+			was done: not its wait behind it) */
+			if (host_dynres_enabled() && buffer.GPUEndTime > buffer.GPUStartTime)
+			{
+				static _Atomic uint64_t previous_end;
+				uint64_t start = (uint64_t)(first_start * 1e9), end = (uint64_t)(buffer.GPUEndTime * 1e9);
+				uint64_t before = atomic_exchange(&previous_end, end);
+
+				host_dynres_gpu(serial, end - (before > start && before < end ? before : start));
 			}
 			if (sample_profile && buffer.status == MTLCommandBufferStatusCompleted)
 			{

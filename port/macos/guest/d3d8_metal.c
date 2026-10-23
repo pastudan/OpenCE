@@ -794,6 +794,10 @@ adapter for a renderer whose scene is drawn at another size than the
 screen's targets (dynamic resolution) */
 static void halfres_scene_scale(float scale[2])
 {
+	/* (dynamic resolution's scenes are scaled up into the back buffer at
+	their end, before the HUD's screen effect, whose convolution this is:
+	it reads and writes the screen at the screen's scale, whatever the
+	scene's fraction was) */
 	scale[0] = screen_scale[0];
 	scale[1] = screen_scale[1];
 }
@@ -882,6 +886,53 @@ void halo_half_res_target(int index, D3DSurface **surface, D3DBaseTexture **text
 	*texture = &half_res_targets[index].texture;
 }
 
+/* ---------- dynamic resolution (display.dynamic_resolution)
+
+Each player view's 3D scene (render.c: halo_screen_scene_begin to
+halo_screen_anti_alias) can be drawn at a fraction of the screen's
+resolution, which the host's controller picks once a frame
+(port/macos/host/host_dynres.h). While the scene is drawn at less than the
+whole, the back buffer's colour target is the scene target instead: a
+target of the back buffer's size, drawn into in its top left at the
+fraction's scale (target_scale: viewports, scissors and clears scaled, as
+resolution_scaling scales them), so nothing is allocated again when the
+fraction changes. Everything that reads the back buffer as a texture in
+the scene (active camouflage's and the sun glow's copies) reads the scene
+target, its texture coordinates in the game's units scaled to the scene's
+part of it (bind_textures). The depth buffer is the back buffer's own, at
+the screen's size: the scene uses its top left part, and it is cleared by
+the game at each view's start (rasterizer_window_begin), its depth and
+stencil read by nothing after the scene (the HUD's draws test neither).
+At the scene's end the host scales the view's rectangle of the scene
+target up into the back buffer (host_metal_scene_upscale); the HUD, menus
+and text are then drawn over it at the screen's resolution. At a fraction
+of 1 nothing of this happens: the frames are drawn as before. */
+
+static struct
+{
+	/* the fraction the frame's scenes are drawn at (1: the whole), asked
+	of the host at the frame's first scene; -1 until it is asked */
+	float frame_fraction;
+	/* a scene being drawn at less than the whole, and its view's
+	rectangle in the game's units */
+	BOOL active;
+	float fraction;
+	short view[4];
+	/* the scene target (a texture of the back buffer's size, made again
+	only when that changes) and its size */
+	GLuint texture;
+	unsigned long width, height;
+	/* display.dynamic_resolution's sharpening */
+	int sharpen;
+	BOOL configured;
+	/* the scene's first clear is still to come (D3DDevice_Clear) */
+	BOOL first_clear;
+} scene;
+
+/* the scene target's entry: the back buffer's own, with the scene's
+texture and scale (render_target_get gives it while a scene is active) */
+static struct render_target_entry scene_entry;
+
 /* the targets render_target_get found last, by what it found them from:
 each draw asks again for the same two (bind_targets) */
 #define RECENT_RENDER_TARGET_COUNT 4
@@ -921,6 +972,11 @@ static struct render_target_entry *render_target_get(const D3DSurface *surface)
 		return NULL;
 	float scale[2] = { 1.0f, 1.0f };
 	enum render_target_kind kind = _render_target_plain;
+
+	/* (a scene drawn at less than the whole: the back buffer's colour is
+	the scene target) */
+	if (scene.active && surface->Data == device.back_buffer.Data)
+		return &scene_entry;
 
 	/* (an entry lives until its scale no longer fits: render_targets_evict) */
 	screen = halo_screen_width();
@@ -1006,6 +1062,11 @@ make:
 struct xgpu_render_target *xgpu_render_target_find(unsigned long data)
 {
 	struct render_target_entry *entry, *best = NULL;
+
+	/* (the back buffer read in a scene drawn at less than the whole: the
+	scene target, what the scene has drawn so far) */
+	if (scene.active && data == device.back_buffer.Data)
+		return &scene_entry.target;
 
 	for (entry = *render_target_bucket(data); entry; entry = entry->next_in_bucket)
 	{
@@ -2263,6 +2324,12 @@ static void bind_textures(struct nv2a_pixel_shader_key *key, float texture_scale
 				{
 					texture_scale[stage][0] = 1.0f / (float)target->width;
 					texture_scale[stage][1] = 1.0f / (float)target->height;
+					/* (the scene target: the scene is in its top left part) */
+					if (target == &scene_entry.target)
+					{
+						texture_scale[stage][0] *= scene.fraction;
+						texture_scale[stage][1] *= scene.fraction;
+					}
 				}
 				if (!description.linear && !description.cube_map && description.levels > 1 &&
 					target->width == description.width && target->height == description.height)
@@ -3364,6 +3431,19 @@ void WINAPI D3DDevice_Clear(DWORD count, CONST D3DRECT *rectangles, DWORD flags,
 		clear_rectangle(&clear, target_pixel((float)device.viewport.X, 0), target_pixel((float)device.viewport.Y, 1),
 			target_pixel((float)(device.viewport.X + device.viewport.Width), 0),
 			target_pixel((float)(device.viewport.Y + device.viewport.Height), 1));
+		/* (a scene's first clear, of its view, in the scene target: the whole
+		of it, which the host makes the pass's load action rather than a
+		quad over its part and a load of the rest. Nothing outside the view's
+		part is read: each view is scaled up at its scene's end, before the
+		next view's scene begins) */
+		if (scene.active && scene.first_clear && device.render_target &&
+			device.render_target->Data == device.back_buffer.Data)
+		{
+			scene.first_clear = FALSE;
+			clear.rectangle[0] = clear.rectangle[1] = 0;
+			clear.rectangle[2] = (metal_u32)scene.width;
+			clear.rectangle[3] = (metal_u32)scene.height;
+		}
 		host_metal_clear(&clear);
 		return;
 	}
@@ -3386,14 +3466,140 @@ void WINAPI D3DDevice_Clear(DWORD count, CONST D3DRECT *rectangles, DWORD flags,
 
 /* ---------- the anti-aliasing passes */
 
-/* display.anti_aliasing's pass over a window's 3D view (source/render/render.c):
-not drawn with Metal yet (anti_aliasing_prepare says so) */
+/* display.dynamic_resolution's settings, read once (the host's controller
+keeps them: a change applies at the next launch) */
+static void scene_configure(void)
+{
+	const char *mode;
+	long floor, split_floor;
+
+	if (scene.configured)
+		return;
+	scene.configured = TRUE;
+	mode = config_string("display.dynamic_resolution");
+	floor = config_integer("display.dynamic_resolution_floor");
+	split_floor = config_integer("display.dynamic_resolution_split_floor");
+	scene.sharpen = !strcmp(config_string("display.dynamic_resolution_filter"), "sharp");
+	/* ("auto": the host's call, on on the Apple TV: -1) */
+	host_dynres_settings(!strcmp(mode, "on") || !strcmp(mode, "true") ? 1 : !strcmp(mode, "auto") ? -1 : 0, (int)floor,
+		(int)split_floor, scene.sharpen, !strcmp(config_string("display.dynamic_resolution_ceiling"), "render"));
+	scene.frame_fraction = -1.0f;
+}
+
+/* the start of a player view's 3D scene (source/render/render.c): drawn at
+the frame's fraction of the screen's resolution, in the scene target, when
+it is less than the whole */
+void halo_screen_scene_begin(short x0, short y0, short x1, short y1, short views)
+{
+	struct render_target_entry *back;
+
+	if (!device.ready)
+		return;
+	scene_configure();
+	scene.active = FALSE;
+	back = render_target_get(&device.back_buffer);
+	if (!back || back->target.depth)
+		return;
+	if (scene.frame_fraction < 0.0f)
+		scene.frame_fraction = host_dynres_fraction(views, (int)back->target.gl_height);
+	/* (more than 1: the whole, drawn through the scene target all the same,
+	which only HALO_DYNRES_FIXED asks for: the check that the scene target's
+	path draws the same pixels, PERFORMANCE.md) */
+	if (scene.frame_fraction == 1.0f || scene.frame_fraction <= 0.0f)
+		return;
+	/* the scene target: the back buffer's size (made again only when it is
+	another size: resolution_scaling or the window changed) */
+	if (!scene.texture || scene.width != back->target.gl_width || scene.height != back->target.gl_height)
+	{
+		if (!scene.texture)
+			scene.texture = host_metal_texture_new();
+		scene.width = back->target.gl_width;
+		scene.height = back->target.gl_height;
+		host_metal_texture_define(scene.texture, _metal_texture_2d, METAL_FORMAT_BGRA8, (unsigned int)scene.width,
+			(unsigned int)scene.height, 1, 1, _metal_usage_color_target, METAL_SWIZZLE_IDENTITY);
+	}
+	scene_entry = *back;
+	scene_entry.next = scene_entry.next_in_bucket = NULL;
+	scene_entry.target.texture = scene.texture;
+	scene.fraction = scene.frame_fraction > 1.0f ? 1.0f : scene.frame_fraction;
+	scene_entry.target.scale[0] = back->target.scale[0] * scene.fraction;
+	scene_entry.target.scale[1] = back->target.scale[1] * scene.fraction;
+	scene_entry.target.written = ++render_target_write_serial;
+	scene.view[0] = x0;
+	scene.view[1] = y0;
+	scene.view[2] = x1;
+	scene.view[3] = y1;
+	scene.active = TRUE;
+	scene.first_clear = TRUE;
+	/* (what the recent lookups found was the back buffer's) */
+	memset(recent_render_targets, 0, sizeof(recent_render_targets));
+}
+
+/* the end of a player view's scene, before the HUD and menus are drawn
+over it (source/render/render.c): a scene drawn at less than the whole is
+scaled up into the back buffer. (display.anti_aliasing's passes are not
+drawn with Metal yet: anti_aliasing_prepare says so.) */
 void halo_screen_anti_alias(short x0, short y0, short x1, short y1)
 {
+	struct render_target_entry *back;
+	struct metal_upscale upscale;
+	float scale_x, scale_y;
+
 	(void)x0;
 	(void)y0;
 	(void)x1;
 	(void)y1;
+	if (!scene.active)
+		return;
+	scene.active = FALSE;
+	memset(recent_render_targets, 0, sizeof(recent_render_targets));
+	back = render_target_get(&device.back_buffer);
+	if (!back || back->target.depth)
+		return;
+	back->last_rendered = device.frame + 1;
+	back->target.written = ++render_target_write_serial;
+	memset(&upscale, 0, sizeof(upscale));
+	upscale.scene = scene.texture;
+	upscale.back_buffer = back->target.texture;
+	{
+		struct render_target_entry *depth = render_target_get(&device.depth_buffer);
+
+		upscale.depth = depth && depth->target.depth ? depth->target.texture : 0;
+	}
+	/* the view's rectangle: in the back buffer at its scale, in the scene
+	target at the scene's (scaled_pixel, as the viewports were) */
+	scale_x = back->target.scale[0];
+	scale_y = back->target.scale[1];
+	{
+		GLint dx0 = scaled_pixel((float)scene.view[0], scale_x), dy0 = scaled_pixel((float)scene.view[1], scale_y);
+		GLint dx1 = scaled_pixel((float)scene.view[2], scale_x), dy1 = scaled_pixel((float)scene.view[3], scale_y);
+		GLint sx0 = scaled_pixel((float)scene.view[0], scene_entry.target.scale[0]);
+		GLint sy0 = scaled_pixel((float)scene.view[1], scene_entry.target.scale[1]);
+		GLint sx1 = scaled_pixel((float)scene.view[2], scene_entry.target.scale[0]);
+		GLint sy1 = scaled_pixel((float)scene.view[3], scene_entry.target.scale[1]);
+
+		if (dx0 < 0)
+			dx0 = 0;
+		if (dy0 < 0)
+			dy0 = 0;
+		if (sx0 < 0)
+			sx0 = 0;
+		if (sy0 < 0)
+			sy0 = 0;
+		if (dx1 <= dx0 || dy1 <= dy0 || sx1 <= sx0 || sy1 <= sy0)
+			return;
+		upscale.source[0] = (metal_u32)sx0;
+		upscale.source[1] = (metal_u32)sy0;
+		upscale.source[2] = (metal_u32)(sx1 - sx0);
+		upscale.source[3] = (metal_u32)(sy1 - sy0);
+		upscale.destination[0] = (metal_u32)dx0;
+		upscale.destination[1] = (metal_u32)dy0;
+		upscale.destination[2] = (metal_u32)(dx1 - dx0);
+		upscale.destination[3] = (metal_u32)(dy1 - dy0);
+	}
+	upscale.filter = scene.sharpen ? METAL_UPSCALE_SHARP : METAL_UPSCALE_BILINEAR;
+	upscale.sharpness = 0.5f;
+	host_metal_scene_upscale(&upscale);
 }
 
 /* ---------- presentation */
@@ -3455,8 +3661,19 @@ void WINAPI D3DDevice_Present(CONST RECT *source_rectangle, CONST RECT *destinat
 
 	if (device.ready)
 	{
-		struct render_target_entry *back_buffer = render_target_get(&device.back_buffer);
+		struct render_target_entry *back_buffer;
 
+		/* (the fraction this frame's scenes were drawn at, -1 for none: the
+		controller's; the next frame asks again. A scene never ended, which
+		the game does not do, is scaled up first) */
+		if (scene.configured)
+		{
+			if (scene.active)
+				halo_screen_anti_alias(0, 0, 0, 0);
+			host_dynres_frame(scene.frame_fraction > 1.0f ? 1.0f : scene.frame_fraction);
+			scene.frame_fraction = -1.0f;
+		}
+		back_buffer = render_target_get(&device.back_buffer);
 		if (trace_frame())
 			platform_log("present back buffer %08lx texture %u", (unsigned long)device.back_buffer.Data,
 				back_buffer ? back_buffer->target.texture : 0);
