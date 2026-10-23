@@ -2506,16 +2506,19 @@ shading, XGPU_SHADING_*; port/tvos/PERFORMANCE.md "Shading (A12)")
 
 The default is the text as it always was (mask 0): none of the changes
 gave byte-identical frames (frozen frames, the old text and the new in one
-run: PERFORMANCE.md). display.half_precision_shading turns them all on
-(faster on the A12, a few levels on some pixels: an opt-in). Diagnostics:
+run: PERFORMANCE.md). display.half_precision_shading turns on the half
+precision combiners and samples (a little faster on the A12, up to 2-3
+levels of 255 on some pixels: an opt-in). The other two are diagnostics
+only: the alpha test as a color of 0 made the A12 slower (its discard
+skips the blend of the additive passes' unlit pixels), and the LOD bias of
+0 left out changed nothing measurable. Diagnostics:
 HALO_METAL_SHADING=<mask> sets the mask outright (1 half combiners, 2 half
 samples, 4 alpha test as a color of 0, 8 no LOD bias of 0), and
 HALO_METAL_SHADING_CYCLE=N alternates it with 0 (the old text) in blocks
 of N frames: even blocks 0, odd the mask, for frozen-frame comparisons in
 one run. */
 
-#define SHADING_FAST (XGPU_SHADING_HALF_COMBINERS | XGPU_SHADING_HALF_SAMPLES | XGPU_SHADING_ZERO_ALPHA_TEST | \
-	XGPU_SHADING_ZERO_BIAS)
+#define SHADING_FAST (XGPU_SHADING_HALF_COMBINERS | XGPU_SHADING_HALF_SAMPLES)
 
 static unsigned char shading_mask(void)
 {
