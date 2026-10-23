@@ -2315,3 +2315,127 @@ the only thing that kept growing: 111 -> 428 MB by Metal's count.
     stayed "nominal" throughout.
   - It is excluded from the missed-slot column above, and left for the
     thermal and CPU work.
+
+# CPU (A12)
+
+Branch `tv/cpu` (from `tv/integrate` 20d1333f). The wasm2c guest's CPU
+cost, above all for two-player split screen. What was measured, what
+changed and what tvOS allows. Mac numbers: M4, 1080 render, warm,
+`tools/tvos_bench.py --target mac` (now `--app` picks another build of
+the Mac app), steady window, guest ms = wall - host renderer calls -
+main-thread sleeps, ABBA order. `<scratch>/cpu/` has the runs.
+
+## Bounds checks: what they cost (Mac)
+
+The TV build compiles the translated game with explicit bounds checks
+(`WASM_RT_MEMCHECK_BOUNDS_CHECK`: a compare and branch on every guest
+load and store, ~152,000 call sites) because tvOS refused wasm2c's 8 GiB
+guard-page reservation. The Mac build uses guard pages. The same C, the
+same objects but the 37 compiled with wasm2c's flags (the translated
+code, its runtime, the host files that include it), built both ways:
+
+| scene | guard pages (2 runs) | bounds checks (2 runs) | cost, mean | guest p95 |
+|---|---|---|---|---|
+| a10 bridge | 0.76, 0.78 | 0.82, 0.93 | +0.10 ms (+14%) | 1.15 -> 1.36 |
+| b30 beach | 1.50, 1.56 | 1.81, 1.77 | +0.26 ms (+17%) | 2.40 -> 2.75 |
+| a10 cryo | 0.80, 1.04 | 1.21, 1.25 | +0.31 ms (+34%) | 1.11 -> 1.58 |
+| split (2 views) | 1.38, 1.40 | 1.53, 1.57 | +0.16 ms (+12%) | 1.83 -> 1.91 |
+
+So explicit checks are 12-34% of the guest's main-thread time (the
+upper bound guard pages could give back). The A12 is ~3-4x slower per
+frame than the M4 here (guest 4.6-7 ms there), so on the TV the same
+share is roughly 0.5-1.5 ms a frame. Host ms and draws were the same
+in both builds.
+
+## Guard pages in 4 GiB + 64 MiB (opt-in: `tvos_build.py --memcheck guard`)
+
+Guard pages do not need 8 GiB. A guest address is a 32-bit index plus a
+static offset that the load or store adds (wasm2c: `(u64)index + offset`,
+no wrap). The largest static offset in this guest is **0x2ece338
+(~47 MiB)**, so a 4 GiB + 64 MiB reservation covers every access that
+can be made, the 2.5 GiB memory at its start and the rest PROT_NONE.
+`host_main.c` makes that reservation itself when `HALO_GUEST_RESERVE_BYTES`
+is defined (the TV's CMake does it for `guard`), and `tools/tvos_build.py`
+scans the translated code's offsets before building and refuses if one
+could reach past the end (`tools/test_tvos_build.py`).
+
+Correctness: wasm2c's own signal handler calls only `SEGV_ACCERR` out of
+bounds and anything else "call stack exhausted"; on Apple platforms a
+PROT_NONE page faults as SIGBUS, so an out-of-bounds read reported the
+wrong trap (on the Mac's 8 GiB build too). A handler in `host_main.c`
+now decides by the fault address (inside the reservation: out of
+bounds; anything else: the default action, a crash report).
+`HALO_OOB_TEST=<hex>` (guest_main.c) reads that guest address at start:
+
+| build | 0xa0000000 (just past) | 0xffffffff | 0x9ffffffc (last word) |
+|---|---|---|---|
+| Mac, 8 GiB guard | trapped: out of bounds | trapped: out of bounds | read 0 (in bounds) |
+| Mac, 4 GiB + 64 MiB guard | trapped: out of bounds | trapped: out of bounds | read 0 |
+
+The default stays `--memcheck bounds` until the A12 has run the guard
+build (device results below, when measured).
+
+## Where the guest's time goes (Mac profile)
+
+`sample` (1 ms) on a build with function names (the driver's wasm-opt
+re-run with `-g`), 30 s of the split scene with 2 views and 30 s of
+b30; main thread, % of all its samples (~63% is the wait for the
+drawable, `__semwait_signal`):
+
+| | split | b30 |
+|---|---|---|
+| render_window (all rendering, guest + host) | 31.8% | 30.1% |
+| D3DDevice_DrawIndexedVertices (inclusive) | 16.8% | 15.0% |
+| host_metal_draw (host encoding, inclusive) | 15.5% | 13.3% |
+| prepare_draw (the D3D8 layer's draw setup) | 6.5% | 7.4% |
+| xgpu_texture_get (texture lookup per bound texture) | 3.3% | 4.6% |
+| **of which texture_entry_result: config_boolean("display.high_res_hud")** | **2.1%** | **1.8%** |
+| **of which menu_art_texture (linear scan)** | - | **1.9%** |
+| memmove in host_metal_draw (vertex streams into the ring) | 3.8% | 1.4% |
+| clock_gettime in host_metal_draw/set_targets (frame log timing) | 1.9% | 1.6% |
+| game_tick (AI, objects, physics, collision) | 0.7% | 3.2% |
+
+(In the split scene player 2 stands still and the cryo bay is quiet: the
+simulation share there is a floor, not what late-level co-op with both
+players moving costs. b30's firefight shows it rising to ~3%.)
+
+The game's simulation is small; the cost is the draw path: per draw the
+D3D8 layer's setup, the texture lookups and the host's encoding. Split
+screen doubles draws (~950/frame). Two cheap guest-side wins stood out,
+both lookups done for every texture of every draw:
+
+1. **`display.high_res_hud` read per bound texture** (`xbox_textures.c`
+   `texture_entry_result`): `config_boolean` takes a mutex and finds the
+   setting by `strcmp` over ~150 names. Now kept, re-read when
+   `config_changes()` moves.
+2. **Menu art found by a linear scan** (`menu_files.c`
+   `menu_art_texture`, up to 1024 entries, almost always a miss in play).
+   Now an open-addressed table by data address.
+
+Mac A/B, ABBA (guest ms mean, steady window):
+
+| scene | before (1st, 4th) | after (2nd, 3rd) | change |
+|---|---|---|---|
+| split | 1.39, 1.38 | 1.30, 1.23 | -0.12 ms (-9%) |
+| b30 | 1.72, 1.52 | 1.41, 1.44 | -0.20 ms (-12%) |
+
+Looked at and left:
+- **Vertex streaming copies** (memmove into the Metal ring, 1.4-3.8%):
+  writing straight into the ring needs the guest to know ring addresses
+  (a protocol change in `host_metal.m`/`d3d8_metal.c`, where #98, #105,
+  #106 and #110 also work); not done here.
+- **prepare_draw's memcmp** of uniforms (0.8%): it is the redundant-state
+  filter itself (it saves uploads); left.
+- **Frame-log clocks** (`clock_gettime` per host call, 1.6-1.9%): the
+  TV's telemetry needs them; a cheaper clock (`mach_absolute_time`
+  directly, or timing scopes rather than calls) is a follow-up.
+- **Compile flags**: the TV build already compiles the translated code
+  with `-O3` (CMake's Release `-O3 -DNDEBUG` comes before the target's
+  `-O2`; the translated files get `-O3` last). No LTO: one 99 MB file
+  (`halo_0.c`) dominates and LTO across 24 files would cost minutes per
+  build for cross-file inlining between guest functions that wasm2c
+  already keeps in one module. `-mcpu=apple-a12` (the SDK default for
+  tvOS 17.4 is apple-a7): compiles, gives LSE atomics, not measured; it
+  would drop the Apple TV HD, so not made default. PGO: the profiles in
+  `pgo/` are for the Linux/Windows native builds and clang 22, not for
+  the wasm2c C.
