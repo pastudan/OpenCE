@@ -29,6 +29,15 @@ Scenes (no controller input: the most repeatable):
   whole opening cinematic, then the cryo bay's first playable (tutorial)
   section. Measured: 50 s from the first 5 s stretch of >= 40 fog-plane draws
   a frame (only the cryo bay has that many; the cinematic has <= 32).
+- split ("a10 split screen (2 players)"): a fresh launch into a10 with two
+  local players (init.txt "player_spawn_count 2" before "map_name
+  levels\a10\a10": the console sets the players the next map is made for, as
+  the co-op menu does; no controller needed, the second player stands
+  still). The opening cinematic is one view; the measured window is the
+  50 s from the first frame drawn as two views (the frame log's "views 2"
+  event, from the play telemetry's game state, host_telemetry.h), the cryo
+  bay's tutorial with both players. A saved state cannot start it: one
+  saved with one player does not load into two.
 - b30 ("b30 beach"): a launch that loads a saved state on The Silent
   Cartographer's beach at the mission's start (made 55 s into a fresh b30
   launch: the insertion cinematic over, the marines' firefight on). Measured:
@@ -93,10 +102,13 @@ SCENES = {
     # to start): ~60 s a run instead of ~285 s
     "cryo": {"init": ["map_name a10", "core_load_name_at_startup tvbench_cryo.bin"], "seconds": 70,
              "window_seconds": 50.0, "core": "tvbench_cryo.bin"},
+    # two-player split screen in a10, from a fresh launch (scene_window)
+    "split": {"init": ["player_spawn_count 2", "map_name levels\\a10\\a10"], "seconds": 290,
+              "window_seconds": 50.0},
 }
 SCENE_LABEL = {"opening": "a10 cutscene (partial)", "bridge": "a10 bridge (gameplay)",
                "b30": "b30 beach (gameplay)", "a10play": "a10 cryo bay (first gameplay)",
-               "cryo": "a10 cryo bay (saved state)"}
+               "cryo": "a10 cryo bay (saved state)", "split": "a10 split screen (2 players)"}
 FOG_START_DRAWS = 20
 FOG_SUSTAIN_SECONDS = 5.0
 SERIES = ("wall_ms", "gpu_ms", "guest_ms", "host_ms", "compile_ms", "wait_drawable_ms", "wait_inflight_ms",
@@ -170,6 +182,22 @@ def scene_window(scene, events, rows, window_seconds=None):
         if start is None:
             return [], "the cryo bay (>= 40 fog-plane draws) was never reached"
         description = f"a10 cryo bay: {window_seconds:g} s from frame {rows[start]['serial']}"
+    elif scene == "split":
+        # (the first frame drawn as two player views, after the cinematic)
+        views = [e for e in events if e["kind"] == "views" and e["detail"] == "2"]
+        split = None
+        for event in views:
+            start = next((index for index, row in enumerate(rows) if row["serial"] >= event["serial"] + 2), None)
+            # (a moment of two views between the cinematic's shots is not the
+            # game: the views must hold for FOG_SUSTAIN_SECONDS)
+            later = [e for e in events if e["kind"] == "views" and e["serial"] > event["serial"]]
+            if start is not None and (not later or later[0]["t_ms"] - event["t_ms"] >= FOG_SUSTAIN_SECONDS * 1000.0):
+                split = start
+                break
+        if split is None:
+            return [], "two player views were never drawn (player_spawn_count 2 did not take)"
+        start = split
+        description = f"a10 split screen: {window_seconds:g} s from frame {rows[start]['serial']}"
     elif scene in ("bridge", "b30", "cryo"):
         core = SCENES[scene].get("core", CORE_NAME)
         loaded = [e for e in events if e["kind"] == "core-open" and e["detail"] == core]
@@ -326,7 +354,10 @@ def run_environment(run, frame_log="1", extra=None):
                    "HALO_RESOLUTION_SCALING": str(run["resolution"]), "HALO_METAL_SHADER_SALT": run["salt"],
                    "HALO_METAL_SHADER_CACHE": SHADER_CACHE,
                    "HALO_METAL_SHADER_CACHE_RESET": "1" if run["mode"] == "cold" else "0",
-                   "HALO_HIGH_RES_HUD": "true", "HALO_HIGH_RES_TEXT": "true"}
+                   "HALO_HIGH_RES_HUD": "true", "HALO_HIGH_RES_TEXT": "true",
+                   # (the play telemetry, on by default on the TV, off in a
+                   # benchmark's runs unless --env asks: host_telemetry.h)
+                   "HALO_TELEMETRY": "off"}
     environment.update(SCENES.get(run["scene"], {}).get("env", {}))
     environment.update(extra or {})
     return environment
