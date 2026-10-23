@@ -1378,3 +1378,146 @@ two views), which leaves out the shader compiles of the first visit.
      compile stalls of 100 to 450 ms). Those are the first visits'
      compiles, cached afterwards, and are another task's (the bundled
      shader manifest).
+
+# Dynamic resolution (A12)
+
+Branch `tv/dynres` (on tv/integrate `85a49369`). Setting
+`display.dynamic_resolution` = `"auto"` (on on the Apple TV, off on a
+Mac), `"on"`, `"off"`; `display.dynamic_resolution_floor` (1440 lines, one
+player), `_split_floor` (1080 lines, split screen), `_ceiling` (`"display"`:
+the drawable's lines; `"render"`: resolution_scaling's), `_filter`
+(`"bilinear"`, `"sharp"`). Environment: `HALO_DYNRES=on|off`,
+`HALO_DYNRES_FIXED=<fraction>[,toggle:<n>,<other>]` (diagnostic).
+
+## How it works
+
+- **Where.** Each player view's 3D scene (render.c: a new
+  `halo_screen_scene_begin` hook before `rasterizer_window_begin`, up to the
+  existing `halo_screen_anti_alias` hook, before the HUD) is drawn into a
+  *scene target* the size of the back buffer, in its top left part, at the
+  frame's fraction: the targets' scale (viewports, scissors, clears,
+  visibility counts) is multiplied by it, exactly as resolution_scaling
+  scales them. Nothing is allocated when the fraction changes (one texture
+  of the back buffer's size, made once). The depth buffer is the screen's
+  own (top left part used; cleared by every view's `rasterizer_window_begin`;
+  nothing after the scene tests depth or stencil but the debug draws).
+- **Reads of the screen inside the scene** (active camouflage's copy, the
+  sun glow's) find the scene target (`xgpu_render_target_find`) with their
+  linear texture coordinates scaled to its part (`bind_textures`). The
+  screen effect (convolution, scope masks) runs after the scene, on the
+  upscaled back buffer, at full resolution, so it needs nothing.
+- **Upscale.** At the scene's end the view's rectangle of the scene target
+  is drawn over the view's rectangle of the back buffer in the HUD's pass
+  (`host_metal_scene_upscale`: one full-screen triangle, the back buffer's
+  pass with its depth attached, depth and stencil neither tested nor
+  written), sampling clamped to the source's pixel centres so no filter
+  reads outside the scene's part; alpha kept (the game keeps scratch in
+  destination alpha). `"bilinear"` is one sample; `"sharp"` adds a
+  contrast-adaptive sharpening from 4 neighbours (AMD CAS, simplified).
+  HUD, menus and text are then drawn at the screen's resolution.
+  MetalFX: `MTLFXSpatialScaler` is in the tvOS 27 SDK (`supportsDevice:`
+  decides at run time). It is not used: support on the A12 (Apple5) is
+  not verified here (not called on the TV), and public reports have even
+  an A15 answering no; MetalFX's spatial scaler is also an FSR1-class
+  filter, which the "sharp" filter approximates at a fraction of the cost.
+  If wanted, a one-line `supportsDevice:` log on the TV settles it.
+- **Split screen.** Each view is scaled up at its own scene's end, before
+  the next view's scene begins, so the scene target is reused per view;
+  the views keep their rectangles (the clamp keeps one view's filter out
+  of the other's pixels).
+- **At fraction 1 nothing of this runs** (the frame is drawn as before).
+
+## The controller (port/macos/host/host_dynres.c)
+
+- **Inputs, never waiting on the GPU:** each frame's GPU time from the
+  frame's completed handler (its hoisted passes' first start to its end,
+  from when the frame before ended: not its wait in the queue), and when
+  the display showed it, from the drawable's presented handler (available
+  on tvOS; the old comment saying otherwise was wrong).
+- **Why not "aim at 14 ms":** the A12 lowers its GPU clock to fill the
+  interval whenever there is room: every scene that holds 60 fps shows
+  14-15 ms of GPU time at 1080 and at 2160 alike (Baseline tables above:
+  bridge 1080 13.8 ms, b30 1080 14.9 ms). GPU time therefore cannot say how
+  much room is left, only when there is none: a frame past 97% of the
+  interval was drawn at the fastest clock and is the real cost.
+- **Down:** 3 hot frames of the last 8, or a frame shown late whose GPU
+  time was hot, or any frame past 1.5 intervals (split screen's 4-5x combat
+  spikes): at once, as far as a model says (25% fixed, the rest in
+  proportion to the pixels, aimed at 85% of the interval), at least a step.
+  Late frames whose GPU time was short (loads, compiles) do not count.
+- **Up:** one step after 180 frames in a row clear (p90 ≤ 94% of the
+  interval) and the wait since the last step down; a step up is a *try*:
+  its first hot frame within 120 frames sends it back and doubles that
+  step's wait (8, 16, 32 ... 256 s); a step that held 60 s resets it.
+- **Steps** (lines of the target): 2160, 2016, 1872, 1800, 1728, 1620, 1512,
+  1440, 1344, 1260, 1152, 1080, 960, 864, 720. **Ceiling:** the drawable's
+  lines (a 1080p TV mode draws 1080: more is scaled away), two steps lower
+  at thermalState serious, four at critical. **Floors:** 1440 one view,
+  1080 split screen; one view and split screen keep their own steps, split
+  screen starting at 1620 (b30 two views at 2160 measured ~26 ms of GPU in
+  play on Capital OFFICE).
+- **Logged:** frame log column `render_scale`; telemetry `render_scale`,
+  `render_scale_min` per second; a log line every 600 frames (fraction,
+  GPU ms, frames late and the GPU's share, steps, failed tries, thermal).
+
+Model test (`tools/test_dynres.py`, a C harness against an A12 model with
+the clock behaviour above; not a device number): a 13.5 ms scene stays at
+2160 with 0 late; a 19.9 ms b30-like scene settles at 1620-1872 (mean 1863)
+with 9 late frames in 5 min; with 15% heating over 25 min, 22 late frames of
+90000 (0.024%); a 2-view b30 (26 ms at 2160) mean 1507, 9 late in 5 min;
+combat bursts (2x for 3 s every 20 s) at most 4 late frames in a row.
+
+## Telemetry fix: fps and missed slots from the display (commit d76751e4)
+
+Capital OFFICE reported 114.7 fps and 142 missed slots a minute in a 30 s
+menu/load session; an A12 frame log here has 44 s of 120 host presents a
+second (a10play warm, the cinematic's start). CAMetalLayer lets a present
+replace a drawable that was never shown, so host present-to-present
+intervals neither count frames shown nor see the display's stutter. The
+telemetry's `fps` and `missed` now come from the presented handler's times
+(`missed_from: "display"`), the host's kept as `presents`/`missed_host`.
+
+## The telemetry's "other" view bucket (1 draw, 10-42 ms)
+
+It is not a costly draw. The per-view time is main-thread wall time from
+a view's start to the next view's start, the last one running to the
+present (`host_telemetry_view`, `host_frame_log_present`), so "other" (the
+overlay window drawn after the player views: one draw) includes the
+present's `wait_drawable` and `wait_inflight`, which is where the main
+thread waits for a GPU that is behind. In the bedroom TV's telemetry (2558
+seconds) "other" averages 9.80 ms against 9.65 ms of those waits; it grows
+with gpu_p50 because the waits do. It is back-pressure, not work, and it
+is not the upscale (which did not exist in those builds; it sits before
+the HUD, in the view's own time).
+
+## Correctness (Mac M4, numerical; images not viewed)
+
+Method: `tools/dynres_frames.py`: a saved state, the game's time frozen
+(`game_speed 0` over telnet), the back buffer written every 30 frames,
+`HALO_DYNRES_FIXED` alternating two fractions every 30 frames in one run
+(cross-launch frames differ by animation game_speed does not stop).
+
+- **Scale 1.0 is byte-identical.** The scene-target path forced at 1:1
+  (`HALO_DYNRES_FIXED=1.0001`: redirect, upscale of a 1:1 rectangle)
+  against the direct path, alternating in one run, 3840x2160: bridge 32/32,
+  b30 31/31, cryo 30/30 frame pairs byte-identical. (And with dynamic
+  resolution off or at fraction 1, the code path is the old one.)
+- **Reduced (0.75 = 1620 lines) vs whole, same frozen moment:** bridge
+  PSNR 55.6 dB (mean abs 0.07; its 3D view is letterboxed rows 270-1889 by
+  the cinematic bars, which stay black), b30 32.0 dB (mean 2.8: foliage
+  and the firefight's particles), cryo 38.9 dB (mean 1.0). **Edges:** the
+  error in the outermost 8 rows/columns of the view equals the error 40
+  pixels in (b30 left 6.0 vs 5.5, right 1.8 vs 1.9, top 0.3 vs 0.4, bottom
+  1.0-1.5 vs 1.0-1.8; cryo 1.1 vs 1.1; bridge 0.12 vs 0.16), and the
+  near-black share of the edge rows matches the whole frame's (b30 0.002
+  vs 0.002; cryo 0.307 vs 0.347 at the top: the room's dark ceiling): no
+  black or garbage edge from sampling outside the scene's part.
+- Split screen: not yet checked frame-by-frame (the b30split scene runs on
+  the Mac with two views from 36 s); pending.
+
+## Mac sanity (M4 at 7680x4320, GPU-bound there; not a TV number)
+
+b30, `HALO_DYNAMIC_RESOLUTION_CEILING=render`: off 57.5 fps, 869 frames
+over 17.5 ms in the window, GPU p50 41.6 ms; on 92.5 fps (the Mac's
+120 Hz), 58 over 17.5 ms, scale 0.622 (2688 of 4320 lines). The controller
+works end to end on Metal.

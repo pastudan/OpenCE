@@ -60,6 +60,15 @@ def capture(scene, out, fixed, extra, freeze_at=14.0, seconds=26, every=30):
                     time.sleep(0.25)
             if connection:
                 connection.sendall(b"(game_speed 0)\r\n")
+            # (only the frames after the freeze are compared: those before
+            # are deleted as they come, keeping a capture to ~10 frames,
+            # ~0.3 GB at 3840x2160, not 3 GB)
+            frozen = time.monotonic()
+            while process.poll() is None:
+                if time.monotonic() - frozen < 4.0:
+                    for shot in frames(out):
+                        shot.unlink(missing_ok=True)
+                time.sleep(0.5)
             process.wait(timeout=seconds + 120)
         finally:
             if process.poll() is None:
@@ -137,7 +146,6 @@ def fraction_of(serial, first, toggle, other):
 def compare(out, edge_band=3):
     first, toggle, other, _ = toggle_parts(out)
     shots = frames(out)
-    shots = shots[len(shots) * 2 // 3:]
     reduced = [s for s in shots if fraction_of(number(s), first, toggle, other) < 1.0]
     whole = [s for s in shots if fraction_of(number(s), first, toggle, other) >= 1.0]
     print(f"{out}: {len(reduced)} reduced ({first if first < 1 else other}), {len(whole)} whole frames")
@@ -168,7 +176,6 @@ def compare(out, edge_band=3):
 
 def identical(a, b):
     names = sorted(set(p.name for p in frames(a)) & set(p.name for p in frames(b)))
-    names = names[len(names) * 2 // 3:]
     same = 0
     for name in names:
         _, _, pa = load(Path(a) / "shots" / name)
