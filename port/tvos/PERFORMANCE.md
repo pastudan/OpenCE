@@ -1948,3 +1948,222 @@ in-flight and readback waits 0.
   `willResignActive` and `didEnterBackground` as the TVSettings launch, so
   the same gate covers them, but neither was seen.
 - A memory warning from the system itself.
+
+# Shading (A12)
+
+Branch `tv/shading` (on tv/integrate `78125c36`). Question: can the
+generated pixel shaders (port/linux/src/nv2a_psh.c, the NV2A combiners as
+MSL) shade the environment's passes (lightmap, diffuse lights, specular,
+reflection masks, reflections, fog) for less, with the same pixels?
+**Short answer: no change that keeps byte-identical pixels was found. The
+one that helps a little (half precision) is an opt-in,
+`display.half_precision_shading` / `HALO_HALF_PRECISION_SHADING`, off by
+default; it is within the A12's run-to-run noise in fps.** Default
+behaviour and the shaders' text are unchanged (checked: the 80 pixel
+shaders of the bridge dumped by the old and new builds are identical
+byte for byte, so the shader manifests and #108's bundled packs still
+match).
+
+## What the generated shaders look like
+
+Dumped with `HALO_GPU_DUMP_SHADERS` from the bridge, b30 and cryo states
+(80 / 136 / 67 pixel shaders). The environment's, by phase:
+
+| phase | texture stages | combiners | alpha test | blend |
+|---|---|---|---|---|
+| lightmaps | project2d bump, project2d lightmap, cube normalization | 2 (6 with self-illumination) | per shader | none, depth write |
+| diffuse lights | project2d bump, cube gel, 3D attenuation, cube normalization | 4 | alpha > 0, discard | one + one |
+| textures | 4 x project2d (base + 3 details) | 3 | none | dest color x src |
+| specular lights | project2d bump, project3d attenuation, 2 cubes | 6 (8 extra shiny) | alpha > 0, discard | dest alpha x src + dest |
+| reflection masks | project2d lightmap | 2 | none | alpha only |
+| reflections | bump, dot product, dot-reflect-diffuse, dot-reflect-specular (dependent cube read) | 5 | none | dest alpha x src + dest |
+| fog | 2 x project2d | 2 | alpha > 0, discard | one + inv src alpha |
+
+Every combiner is written for all four registers and both portions whether
+or not its inputs are zero (`max(vec4(0.0).b, 0.0)` and the like), each
+input mapping clamps, and every output is clamped to [-1, 1]. All of that
+is constant-folded by Metal's compiler: unused portions, zero inputs and
+dead writes do not survive into the GPU code, so rewriting the text to
+skip them would not change the work done (not pursued). There is no
+branching besides the alpha test, and the only dependent reads are the
+NV2A's own (the reflections' dot-reflect cube lookup, bump env maps). The
+alpha test of the three additive phases is `if (!(floor(clamp(a) * 255 +
+0.5) > alpha_reference)) discard_fragment()`. No shader discards with an
+ALWAYS test (`comparison_operator` returns "" and nothing is emitted), and
+none has a discard the state does not ask for.
+
+## What was tried (all behind `HALO_METAL_SHADING=<mask>`, a diagnostic)
+
+`HALO_METAL_SHADING_CYCLE=N` alternates the mask with 0 (the old text) in
+blocks of N frames in one run, the frozen-frame method of "GPU bandwidth"
+(Mac M4, 3840x2160, `game_speed 0` over telnet, the back buffer every 30
+frames, N = 60; each pair of consecutive shots compared: "other" pairs
+straddle a switch, "same" pairs do not, and every "same" pair was
+identical or within 1 level, so the run was frozen).
+
+| mask | change | bridge (other pairs) | b30 | cryo |
+|---|---|---|---|---|
+| 1 | combiners in half (texture stages, fog, alpha test float) | max 2, 4.24% px changed, none > 2 | max 3, 11.4%, none > 2 | max 3, 12.9%, none > 2 |
+| 2 | samples as `texture<half>` | max 2, 2.23% | max 2, 8.1% | max 2, 7.0% |
+| 3 | 1 + 2 (**the opt-in**) | max 2, 4.40%, mean 0.015 | max 2, 11.4%, mean 0.042 | max 3, 13.9%, mean 0.051 |
+| 4 | failed alpha test returns 0 instead of discarding, where the blend leaves the target unchanged by a 0 | identical | max 7, 0.037%, 0.003% > 2 | max 1, 1 px |
+| 8 | no `bias()` argument where the stage's LOD bias is 0 | (not run) | identical | identical |
+| 15 | all | max 2, 4.36% | max 6, 11.4%, 0.002% > 2 | max 3, 13.9% |
+
+- **Half precision is not bit-exact.** The NV2A combiners are ~9-bit, but
+  the port's float combiners carry more than that, and the 8-bit output's
+  rounding moves by a level where a value sits near a half step: about 4%
+  of the bridge's pixels and 11-14% of the b30/cryo pixels move by 1-3
+  levels (none by more than 3, except mask 4's few pixels below). Opt-in.
+- **Alpha test as a color of 0 (mask 4)** is exact on the bridge but not
+  on b30 or cryo. Bisected on b30 with `HALO_METAL_SKIP_PHASES`: the
+  difference is in phases 3-15 (environment), not in transparents, water,
+  sky or the screen effects. By the blend arithmetic a source of 0 should
+  leave each of those draws' target exactly as it was; the cause of the
+  b30 difference was not found (not bisected further, since the change is
+  slower on the A12 anyway, below). Not offered.
+- **No `bias()` of 0 (mask 8)**: exact, but no measurable gain (below).
+  Kept as a diagnostic only, so that the default text stays the shader
+  packs' text.
+
+## A12 results (bedroom TV, 3840x2160, one binary `18e5592e`)
+
+Installed once from `<scratch>/tv-deploy-shading`; one shader salt for
+every run, a cold launch of each variant first (not counted), then warm
+runs in ABBA order: off, on, on, off (on = `HALO_HALF_PRECISION_SHADING=true`,
+which in the binary measured meant mask 15, all four changes; see
+"Correction" below). Steady window as tvos_bench. Raw:
+`<scratch>/tvbench-out/device-shading/`.
+
+| run | scene | fps | >33.3 | >50 | GPU ms mean | GPU p50 |
+|---|---|---|---|---|---|---|
+| A1 off | bridge | 54.2 | 156 | 0 | 22.3 | 17.2 |
+| B1 on | bridge | 51.7 | 228 | 0 | 24.8 | 22.1 |
+| B2 on | bridge | 51.6 | 231 | 0 | 24.7 | 21.3 |
+| A2 off | bridge | 52.2 | 226 | 0 | 24.1 | 21.7 |
+| A1 off | b30 | 51.2 | 429 | 0 | 28.3 | 28.3 |
+| B1 on | b30 | 52.3 | 344 | 0 | 27.8 | 27.7 |
+| B2 on | b30 | 52.8 | 358 | 0 | 27.3 | 27.1 |
+| A2 off | b30 | 49.0 | 538 | 0 | 30.2 | 30.0 |
+| A1 off | cryo | 58.2 | 48 | 17 | 16.2 | 15.1 |
+| B1 on | cryo | 57.8 | 52 | 29 | 16.4 | 15.1 |
+| B2 on | cryo | 58.1 | 55 | 15 | 16.3 | 15.1 |
+| A2 off | cryo | 57.8 | 65 | 22 | 16.5 | 15.1 |
+| A1 off | split | 59.9 | 0 | 0 | 15.06 | 15.10 |
+| B1 on | split | 59.9 | 0 | 0 | 15.09 | 15.10 |
+| B2 on | split | 59.9 | 0 | 0 | 15.08 | 15.11 |
+| A2 off | split | 59.9 | 0 | 0 | 15.08 | 15.13 |
+
+Per-phase fragment ms a frame (`HALO_METAL_PASS_SPLIT=phase`, hoisting
+off, one run each, consecutive; a phase pass carries ~0.4-0.6 ms of
+load/store the real frame does not):
+
+| mask | bridge sum | diffuse lights | reflections | textures | specular | fog planes | refl. masks | lightmaps | shadows | cryo sum | cryo reflections | cryo textures | cryo fog |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| 0 (default) | 26.20 | 3.82 | 3.42 | 2.87 | 2.05 | 1.94 | 1.93 | 1.91 | 1.84 | 20.19 | 4.00 | 3.21 | 2.35 |
+| 3 (half) | 25.97 | 4.06 | 3.46 | 2.71 | 1.94 | 1.95 | 1.94 | 1.83 | 1.69 | 19.40 | 3.93 | 3.02 | 2.32 |
+| 4 (alpha test as 0) | 29.85 | 4.29 | 3.67 | 3.08 | 2.68 | 2.82 | 1.98 | 2.06 | 2.13 | 21.73 | 4.12 | 3.31 | 3.06 |
+| 8 (no bias of 0) | 27.00 | 3.98 | 3.51 | 2.93 | 2.25 | 1.96 | 1.98 | 1.94 | 1.89 | 20.23 | 3.98 | 3.19 | 2.35 |
+| 15 (all) | 27.55 | 4.34 | 3.45 | 2.71 | 2.45 | 2.48 | 1.93 | 1.83 | 1.84 | 19.92 | 3.92 | 2.96 | 2.70 |
+
+Reading it:
+
+- **Half precision (mask 3)**: textures -0.16 / -0.19 ms, lightmaps -0.08
+  / -0.12, shadows -0.15 / -0.31, specular -0.11; diffuse lights +0.24 on
+  the bridge (one run each: within noise). Bridge -0.2 ms (-1%), cryo
+  -0.8 ms (-4%) of fragment time. The A12's fragment cost on these passes
+  is texture fetch and blending, not combiner ALU: half math saves
+  little. Not worth the levels it moves for a default.
+- **Alpha test as 0 (mask 4) is slower**: fog planes +0.9 / +0.7 ms,
+  specular +0.6, diffuse lights +0.5; bridge +3.7 ms, cryo +1.5 ms. On
+  the A12 the discard of the three additive passes is cheaper than
+  blending a 0: discarding skips the blend (a read-modify-write of the
+  tile) for the many pixels these passes do not light (alpha 0 = outside
+  the light's radius / fog's extent). Early-Z/HSR are not lost by the
+  discard here anyway: these passes test depth EQUAL and write nothing, so
+  there is nothing for HSR to remove behind them. Rejected.
+- **No bias of 0 (mask 8)**: +0.8 / +0.04 ms, noise. Rejected.
+- **ABBA, the shipped opt-in**: the device runs used the setting as first
+  committed (mask 15, all four: see "Correction"). Bridge got worse when
+  on (54.2 / 52.2 off vs 51.7 / 51.6 on; >33 ms frames 156 / 226 vs 228 /
+  231), b30 a little better (51.2 / 49.0 vs 52.3 / 52.8; 429 / 538 vs 344
+  / 358), cryo and split unchanged (split holds 59.9 fps at 15.1 ms either
+  way). That matches the phase table: mask 4's slower fog and lights cost
+  the bridge more than half precision saves; b30's transparent-heavy frame
+  gains a little. The A12 drift across a session (GPU busy for an hour,
+  "GPU bandwidth" above) is as large as these differences: A1 -> A2 for
+  the same setting moved the bridge 54.2 -> 52.2 and b30 51.2 -> 49.0.
+
+**Correction / what is committed:** after the session, the setting was
+narrowed to the half precision flags only (mask 3); masks 4 and 8 stay as
+`HALO_METAL_SHADING` diagnostics. Mask 3's own A12 effect is the
+phase table's (-1% bridge, -4% cryo fragment time), not measured as an
+ABBA fps run (the TV's queue; it would be inside the noise above). Leave
+the setting off.
+
+## Early depth / HSR (idea 2)
+
+Checked in the generated text and the draw state: the environment's
+EQUAL passes write no depth, no shader writes depth, and no shader
+discards without the game's alpha test (none for ALWAYS). The only
+discards are the additive passes' alpha > 0 test, which is cheaper than
+the alternative (mask 4, above). Nothing to fix.
+
+## Texture sampling (idea 4)
+
+`configure_sampler` (d3d8_metal.c) maps D3D's filters one to one: min /
+mag / mip POINT or LINEAR, anisotropy only for `D3DTEXF_ANISOTROPIC` with
+`MAXANISOTROPY` > 1 (the game sets neither: no `MAXANISOTROPY` anywhere in
+source/rasterizer), `MAXMIPLEVEL` as `lodMinClamp`. The environment's
+lightmaps, attenuation and normalization maps are already POINT where the
+game asks. The samplers sample no more than the Xbox did; nothing to cut
+without changing pixels.
+
+## Pass merging (idea 3): design, not built
+
+The environment draws the same triangles (one dynamic index buffer built by
+`structure_render_preprocess`, the same `first_triangle_index` / count per
+material chunk) in each phase, all but the lightmap with depth EQUAL and
+no depth write, into the same 4K target. Folding consecutive passes into
+one fragment shader with framebuffer fetch (`[[color(0)]]` is valid on the
+A12) would save each extra pass's rasterization and its tile read-modify-
+write. Why it was not built, and what it would take:
+
+1. **Order and state between the passes.** The phases are not adjacent per
+   surface: the frame goes lightmaps (all surfaces), object shadows,
+   diffuse lights (per light, each light's own cluster subset and
+   surface list), decals, textures, decals, specular (per light), specular
+   lightmaps, reflection masks, mirrors, reflections, transparents, fog.
+   Decals and shadows between them read and write the same pixels, so a
+   merge is only legal for runs with nothing between them: in practice
+   **reflection masks -> reflections** (consecutive unless a mirror is
+   drawn) and **lightmap -> (nothing)**. The per-light passes cover other
+   surface sets than the textures pass.
+2. **The prototype pair.** reflection masks write alpha only (`dest
+   alpha x lightmap term`), reflections then add `dest alpha x
+   reflection` to RGB. Merged: one draw per chunk, fragment reads
+   `[[color(0)]]`, computes the mask's new alpha, then the reflection with
+   that alpha, writes both. Needs: the guest to recognise the pair (same
+   vertex buffers, index range, chunk order, no draw between), a combined
+   pixel shader key (two combiner programs and their constants: two
+   uniform sets), blending off and the blend done in the shader with the
+   same 8-bit rounding (the blend unit rounds the stored alpha to 8 bits
+   before the reflection reads it: the shader must round it the same way,
+   `floor(a * 255 + 0.5) / 255`), and the draw's raster state the
+   reflection's. A12 cost of the pair: 1.93-2.15 ms (masks) + 3.4-4.0 ms
+   (reflections) a frame; the masks' share of that is mostly a 4K tile
+   pass that one draw instead of two would save, upper bound ~1.5-2 ms.
+3. **Risk.** The game's draw stream is not built in pairs: the guest would
+   have to buffer a phase's draws until the next phase starts (it already
+   knows the phase: `host_metal_profile_phase`) and match them chunk by
+   chunk, falling back on any mismatch. Correctness checked as above
+   (frozen frames, merged vs unmerged in one run). Estimated a few days;
+   left for later.
+
+## What remains
+
+The shaders are not where the A12's environment time goes: the passes
+cost what their texture fetches and tile blends cost. The levers left are
+the ones that remove pixels or passes: dynamic resolution (#105), half
+resolution effects (#106), the reflection-mask merge above, and the b30
+transparents.
