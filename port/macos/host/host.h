@@ -33,6 +33,10 @@ void host_guest_free(uint32_t offset);
 /* a copy of a host string in guest memory, or 0 */
 uint32_t host_guest_strdup(const char *text);
 
+/* HALO_VM_PROBE=1: report the address-space reservations allowed, then exit
+(host_vm_probe.c) */
+void host_vm_probe(void);
+
 /* logging (stderr, and the log file the game also writes beside its data) */
 void host_log(const char *format, ...) __attribute__((format(printf, 1, 2)));
 void host_fatal(const char *format, ...) __attribute__((format(printf, 1, 2), noreturn));

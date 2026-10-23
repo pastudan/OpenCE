@@ -360,6 +360,11 @@ int main(int argc, char **argv)
 		setrlimit(RLIMIT_NOFILE, &limit);
 	}
 	host_wasi_set_arguments(argc, argv);
+	if (getenv("HALO_VM_PROBE") && !strcmp(getenv("HALO_VM_PROBE"), "1"))
+	{
+		host_vm_probe();
+		exit(0);
+	}
 #ifndef HALO_TVOS
 	data_root_choose();
 #endif
