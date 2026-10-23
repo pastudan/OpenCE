@@ -576,6 +576,9 @@ static const struct config_setting config_settings[] =
 		"\"bot:<seed>\" plays controller 1 with a scripted pattern (automated\n"
 		"network tests); \"look:<seed>\" stands still, only turning and looking\n"
 		"up and down; empty for none." },
+	{ "debug.test_commands", _config_string, "\"\"", "HALO_TEST_COMMANDS", _environment_value, _platform_all,
+		"\"<seconds> <command>;...\": console commands run once the game's time\n"
+		"passes each one's seconds (benchmarks' scripted play); empty for none." },
 	{ "debug.update_answer", _config_string, "\"\"", "HALO_UPDATE_ANSWER", _environment_value, _platform_desktop,
 		"The answer to the new version question, for automated tests: \"yes\",\n"
 		"\"no\" or \"never\" (do not ask again, confirmed); empty asks." },

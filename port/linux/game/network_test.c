@@ -65,7 +65,11 @@ Called from the main loop every frame (main.c).
 #include <math.h>
 #include <stdarg.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
+
+/* hs.c's: a console command */
+boolean hs_compile_and_evaluate(char const *expression);
 
 /* the platform layer's (port/linux/src/port_config.c) */
 const char *config_string(char const *name);
@@ -740,10 +744,52 @@ static void network_test_pickup(
 	}
 }
 
+/* debug.test_commands "<seconds> <command>;<seconds> <command>;...": each
+console command run once the game's time (ticks since the map started, not
+the wall clock: a slower load or game_speed shifts nothing) passes its
+seconds, as if typed (the benchmarks' scripted play, on the Apple TV too,
+which has no telnet console: tools/tvos_bench.py) */
+static void test_commands_update(
+	boolean main_menu_loaded)
+{
+	static boolean checked;
+	static char const *next;
+	char const *end;
+	char command[1024];
+	double at;
+
+	if (!checked)
+	{
+		checked = TRUE;
+		next = config_string("debug.test_commands");
+		if (*next)
+			platform_log("test commands: %s", next);
+	}
+	while (next && *next && game_in_progress() && !main_menu_loaded)
+	{
+		at = atof(next);
+		if (game_time_get() < (long)(at * TICKS_PER_SECOND))
+			return;
+		end = strchr(next, ';');
+		next = strchr(next, ' ');
+		if (!next || (end && next > end))
+		{
+			next = end ? end + 1 : NULL;
+			continue;
+		}
+		next++;
+		snprintf(command, sizeof(command), "%.*s", (int)(end ? end - next : (long)strlen(next)), next);
+		platform_log("test commands: at %.1f s: %s", game_time_get() / (double)TICKS_PER_SECOND, command);
+		hs_compile_and_evaluate(command);
+		next = end ? end + 1 : NULL;
+	}
+}
+
 void network_test_update(
 	boolean main_menu_loaded,
 	real seconds)
 {
+	test_commands_update(main_menu_loaded);
 	if (!network_test.checked)
 		network_test_read_settings();
 	if (network_test.mode == _network_test_off)
