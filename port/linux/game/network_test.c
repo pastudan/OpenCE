@@ -754,6 +754,9 @@ static void test_commands_update(
 {
 	static boolean checked;
 	static char const *next;
+	/* (a map_name given: nothing more until the next map's time starts) */
+	static boolean map_changing;
+	static long map_changed_at;
 	char const *end;
 	char command[1024];
 	double at;
@@ -764,6 +767,12 @@ static void test_commands_update(
 		next = config_string("debug.test_commands");
 		if (*next)
 			platform_log("test commands: %s", next);
+	}
+	if (map_changing)
+	{
+		if (!game_in_progress() || game_time_get() >= map_changed_at)
+			return;
+		map_changing = FALSE;
 	}
 	while (next && *next && game_in_progress() && !main_menu_loaded)
 	{
@@ -782,6 +791,14 @@ static void test_commands_update(
 		platform_log("test commands: at %.1f s: %s", game_time_get() / (double)TICKS_PER_SECOND, command);
 		hs_compile_and_evaluate(command);
 		next = end ? end + 1 : NULL;
+		/* (the map changes later, in the main loop; the times after it are
+		the new map's own) */
+		if (strstr(command, "map_name"))
+		{
+			map_changing = TRUE;
+			map_changed_at = game_time_get();
+			return;
+		}
 	}
 }
 
