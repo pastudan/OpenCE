@@ -332,7 +332,8 @@ substitute.
    60 fps now, not the 4K limiter. The 200 ms first frame after a state load
    is guest work (load), a one-off.
 5. **Lifecycle**: the TV asleep refuses launches; background GPU work is
-   refused. Tooling detects both; no performance effect measured.
+   refused. Tooling detects both. Since tv/lifecycle the game stops while
+   inactive and submits nothing ("Lifecycle (A12)" below).
 
 # Shader compile stalls (A12)
 
@@ -1804,3 +1805,146 @@ Off in single view, for comparison (session 2, same TV, same scenes): bridge
 - **Still to measure:** the 30-minute thermal run on the shipping build;
   the real 4K output (Capital OFFICE), where the ceiling is 2160 and the
   numbers above with `ceiling render` are the closest stand-in.
+
+# Lifecycle (A12)
+
+Branch `tv/lifecycle`. Measured 2026-10-23 on the bedroom TV (Apple TV 4K
+2nd gen, A12, tvOS 27.0, CoreDevice `443953B8-…`) and the tvOS 27.0
+simulator on the M4. Code: `port/macos/host/host_lifecycle.{h,m}`; test
+tool: `tools/tvos_lifecycle.py`; source checks: `tools/test_tv_lifecycle.py`.
+
+## The problem
+
+The game kept rendering when the app stopped being active (the Home button,
+Control Center, the screensaver, the TV's sleep, a launch behind another
+app). tvOS refuses that work. On the base build (tv/integrate `a2e2bd44`,
+the bench's bridge state, three trips to TVSettings and back, 20 s away
+each), the run logged **1182** `Insufficient Permission (to submit GPU work
+from background)` failures (178 frames' command buffers). Each return was
+one **18.6 s frame**: the game had gone on drawing into a layer with no
+drawables, and the return's first `nextDrawable` waited for the stretch
+away (18.7 s drawable wait in one of the three).
+
+## What happens now
+
+- **Inactive** (SDL's `WILL_ENTER_BACKGROUND`, UIKit's willResignActive; an
+  event watch, not the queue). Every command-buffer commit in `host_metal.m`
+  (the frame's, hoisted passes, texture uploads, readbacks, pass-timing
+  buffers) and the present, before it takes a drawable, call
+  `host_lifecycle_gate()`. While active that is one relaxed atomic load. While
+  not, on the main thread, the game stops there:
+  1. the audio devices are paused (`SDL_PauseAudioStreamDevice`; the ones
+     this paused are resumed later);
+  2. the frames in flight and the last upload finish (`host_metal_drain`:
+     every frame slot taken and given back, hoisted buffers waited for):
+     0-25 ms on the A12;
+  3. what is cheap to remake is released: the free frame rings, the park's
+     pooled renamed targets, and the feedback copy (**130 MB** on the A12,
+     128 MB in the simulator);
+  4. UIKit's run loop runs (the game's thread is UIKit's main thread) until
+     `DID_ENTER_FOREGROUND` (didBecomeActive), or until the app's state is
+     seen to be active.
+- **Launched while not active** (behind another app, or with the TV
+  asleep). `host_metal_attach` reads `applicationState`. Every launch by
+  devicectl starts "inactive (not yet on the screen)", and the first frame
+  waits for activation (0.8-0.9 s on the A12). That wait is not counted as
+  a pause.
+- **Foreground.** The game goes on in the same frame. The drawable size is
+  read again every present, as before. The guest polls
+  `host_lifecycle_stops()` once a frame. After a stop:
+  - a game in progress opens its **pause menu**, as if player 1 had pressed
+    Start (`ui_widget.c`, `ui_check_for_pause_game`; not in cinematics or
+    menus, or when a menu is already up);
+  - that frame's seconds are clamped to one frame's (1/60 s, `main.c`, both
+    timing paths), so there is no game-time spike;
+  - the frame log's and the telemetry's wall times leave the time away out.
+- **Terminating** flushes the telemetry. **The Mac** gets none of these events
+  from SDL, so it never stops; its defaults are unchanged.
+
+## Device results (A12, 4K picture, TV in 1080p output)
+
+`tools/tvos_lifecycle.py device --cycles 3 --play 25-30 --away 20`
+(TVSettings in front, as Home does, then OpenCE again), bridge state, no
+input.
+
+| run | build | background GPU errors | GPU-failed frames | longest frame | pause menu on return | first frames after the return (ms) |
+|---|---|---|---|---|---|---|
+| before | `a2e2bd44` (tv/integrate) | **1182** | 178 | **18650 ms** (x3) | no | (the 18.6 s frame) |
+| after, 1 | `186123f8` | **0** | 0 | 47.8 ms | yes (3/3) | 7.9, 12.7, 41.1, 16.7, 16.8, 16.5 |
+| after, 2 (+ memory warning) | `c5a5febd` | **0** | 0 | 115 ms | yes (3/3) | 5.6, 11.1, 47.7, 16.7, 16.8, 16.5 |
+
+Every stop took 21.5 s for the 20 s away (the devicectl launches included).
+The third frame after a return, about 45 ms, is the pause menu's first
+frame: it loads the widget. Later frames are at 16.7 ms. The `init.txt` was
+restored and verified identical every time.
+
+## GPU waits in play (the frame log's `wait_*`, mean ms a frame)
+
+Every blocking GPU wait in the host, and when it fires:
+
+| wait | where | when | in normal play |
+|---|---|---|---|
+| `dispatch_semaphore_wait(frames_free)` | `frame_begin` | the frame `FRAMES_IN_FLIGHT` (3) before is still on the GPU | pacing only: 0.000 mean, max 0.04 ms |
+| `nextDrawable` | `host_metal_present` | the display's pacing (vsync) | 9-15 ms: this is the vsync wait, not GPU stalls |
+| `[submitted waitUntilCompleted]` | `host_metal_texture_read` | only `debug.screenshot_every` (the guest's one caller, `write_screenshot`) | never: 0.000 |
+| `[early waitUntilCompleted]` | the frame's completed handler | on Metal's completion thread, not the game's | never on the game's thread |
+| semaphore and `waitUntilCompleted` | `host_metal_drain` | only when the app resigns active | never in play |
+
+No `waitUntilScheduled` exists. Nothing was moved off the frame path: the
+audit found no blocking wait on it besides the 3-frame throttle.
+`tools/test_tv_lifecycle.py` keeps it so (no new wait site, every commit
+gated).
+
+| run (A12, all frames of play, not the 18 s ones) | frames | drawable | in flight (max) | readback |
+|---|---|---|---|---|
+| telemetry, 8 owner sessions (`tv-telemetry/443953B8`, 2026-10-23) | 147k | 9.5-10.6 | 0.000-0.041 | 0.000 |
+| before (`a2e2bd44`) | 10589 | 11.07 | 0.061 (18.6 at a return) | 0.000 |
+| after, 1 | 9328 | 12.28 | 0.000 (0.04) | 0.000 |
+| after, 2 | 10518 | 12.26 | 0.000 (0.04) | 0.000 |
+
+The "after" runs were on the `20d1333f` base, which has no dynamic
+resolution. In the bench's heavy stretches the 4K picture costs 20-23 ms
+of GPU a frame, which raises the drawable wait and makes >33 ms frames.
+Those stretches appear before the first stop as well as after the returns:
+they come from the scene and the resolution, not from the lifecycle.
+Within the runs, before vs after each stop, the in-flight wait stays at 0
+and the readback at 0.
+
+## Memory warnings
+
+- Watched: UIKit's warning (`SDL_EVENT_LOW_MEMORY`) and the kernel's
+  pressure (a `DISPATCH_SOURCE_TYPE_MEMORYPRESSURE` source, warn and
+  critical). Each is logged with the footprint and
+  `os_proc_available_memory`. At the next frame it is also a frame-log and
+  telemetry **event** of kind `memory`, with detail `warning footprint N MB
+  avail M MB`, and `trimmed X MB footprint N MB` when the trim ends.
+  `tv_telemetry.py report` lists these and the lifecycle events, with each
+  second's footprint, under "Lifecycle and memory events".
+- The trim is an emergency trim, one step a frame, never a burst on the
+  main thread. It drops what has been unused for ~60 frames: the park's
+  pooled targets, the feedback copy, and the shader cache's prepared
+  shaders that no draw has taken. Steady-state budgets (the texture cache's
+  byte budget, the frame rings) are #110's and are not changed here.
+- On the A12: devicectl's `sendMemoryWarning` fails on this TV (`ENOENT`),
+  so `HALO_MEMORY_WARNING_AFTER=<s>` (diagnostic) sends one in its place.
+  Run 2 logged `memory warning footprint 896 MB avail 1202 MB` at 75.9 s.
+  The trim took 3 frames and dropped 17 prepared shaders (0.3 MB). There
+  was no frame over 33 ms in those frames.
+- Not yet known: whether tvOS warns before the reclaim freezes seen on
+  Capital OFFICE (footprint 1267 -> 1178 MB with no frees by the app). The
+  event is now recorded, so the owner's next sessions will show it.
+
+## Simulator (tvOS 27.0 on the M4, 720 lines; not TV numbers)
+
+`tools/tvos_lifecycle.py simulator` (simctl launch of TVSettings, then of
+the game). Two cycles: 0 background GPU errors, 0 GPU failures, both stops
+16.2 s, the pause menu opened twice, the first frames after 2.9-9 ms, the
+in-flight and readback waits 0.
+
+## Not tested
+
+- The real Home button, Control Center and the screensaver. None can be
+  pressed from here. The screensaver and the TV's sleep go through the same
+  `willResignActive` and `didEnterBackground` as the TVSettings launch, so
+  the same gate covers them, but neither was seen.
+- A memory warning from the system itself.

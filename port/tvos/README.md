@@ -2,8 +2,7 @@
 
 **Development port, not ready for sideload play yet.** The initial game
 host builds for device and simulator; the menu and a10 have run through
-Metal in the tvOS simulator. Import/source-selection UI, completed lifecycle
-and sandbox integration, provisioning and physical TV checks are unfinished.
+Metal in the tvOS simulator. Import/source-selection UI and sandbox integration, provisioning and physical TV checks are unfinished.
 The separate feasibility probe app is not the game.
 
 ## Prerequisites
@@ -220,11 +219,29 @@ footprint, thermal state) and one for each frame over 50 ms, in
 
 PERFORMANCE.md's "Play telemetry" has what it records and costs.
 
+## Lifecycle
+
+The game stops while the app is not active: the Home button, Control
+Center, the screensaver, sleep, or a launch behind another app. It submits
+no GPU work then, so there are no "Insufficient Permission (to submit GPU
+work from background)" errors. Its audio is paused, the GPU's work is
+finished, and about 130 MB of buffers are released. When it is active
+again, a game in progress comes back in its pause menu, and its first
+frame is one frame's time, not the time away. Memory warnings (UIKit's and
+the kernel's pressure) are logged and recorded in the play telemetry with
+the footprint, and answered by a trim of a step a frame.
+`port/macos/host/host_lifecycle.h` has the design; PERFORMANCE.md's
+"Lifecycle (A12)" has the device results.
+
+    python3 tools/tvos_lifecycle.py device --memory-warning     # TVSettings in front and back, 3 times
+    python3 tools/tvos_lifecycle.py simulator --maps DIR
+
 ## Remaining gates
 
 - Native WebRTC-only interoperability with the existing WebTorrent seeder,
   ordinary peer tests on tvOS, and both transports sharing one store.
-- Finish the game's UIKit/SDL lifecycle, restricted WASI preopens and
+- The real Home button and screensaver seen on the TV (the lifecycle is
+  tested with app switches only), restricted WASI preopens and
   physical-device memory budgets. Initial targets and BC decoding exist,
   but are not a completed TV product.
 - Shared integration of the bounded image-source API (`import/image_source.c`
