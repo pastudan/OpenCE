@@ -1684,3 +1684,61 @@ Session 4 (`40380da8`, the fix):
   jump and a failed try need two over of eight, a GPU-late frame or one
   past 1.5 intervals.
 - cryo's 115 missed are its first 10 s (the screen convolution, above).
+
+## Device: session 5 (`22d7ea0c`), upscale cost, 30-minute thermal (A12, bedroom TV, 1080p output)
+
+B at the 2160-line ceiling. Raw: `<scratch>/tvbench-out/device-dynres5`.
+
+| run | scene | frames | fps | wall p95 | p99 | >16.7 | >33.3 | >50 | missed | GPU p50 | GPU p95 | lines mean | lines min | valid |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| b30split-B1 | b30split | 3596 | 59.9 | 16.843 | 16.946 | 1296 | 0 | 0 | 0 | 14.88 | 15.824 | 1506 | 1080 | yes |
+| split-B1 | split | 2998 | 60.0 | 16.824 | 16.911 | 1153 | 0 | 0 | 0 | 15.004 | 17.084 | 1113 | 1080 | yes |
+| bridge-B1 | bridge | 2097 | 59.9 | 16.923 | 17.062 | 869 | 1 | 0 | 0 | 14.98 | 16.473 | 1488 | 1440 | yes |
+| b30-B1 | b30 | 3596 | 59.9 | 16.847 | 16.967 | 1398 | 2 | 1 | 0 | 14.863 | 15.883 | 1564 | 1440 | yes |
+| cryo-B1 | cryo | 2885 | 57.7 | 17.029 | 33.634 | 1193 | 100 | 1 | 116 | 14.742 | 35.756 | 1492 | 1440 | yes |
+| up-with | b30 | 3596 | 59.9 | 16.822 | 16.941 | 1401 | 2 | 1 | 1 | 14.867 | 15.671 | 1620 | 1620 | yes |
+| up-without | b30 | 3596 | 59.9 | 16.861 | 16.958 | 1420 | 2 | 1 | 0 | 14.875 | 15.689 | 1620 | 1620 | yes |
+| up-sharp | b30 | 3596 | 59.9 | 16.858 | 16.975 | 1388 | 1 | 1 | 0 | 14.858 | 15.91 | 1620 | 1620 | yes |
+
+**The upscale's cost** (b30, fixed 1620 lines, 3840x2160 back buffer):
+`up-with` (bilinear) vs `up-without` (`HALO_DYNRES_NO_UPSCALE`, its draw
+left out) vs `up-sharp`: GPU p50 14.87 / 14.88 / 14.86 ms, p95 15.67 /
+15.69 / 15.91 ms, missed 1 / 0 / 0. The A12 holds 60 at 1620 either way,
+so its clock lowers to fill the interval and hides the difference in the
+means: the cost is below what this can resolve (under ~0.2 ms at p95 for
+bilinear; sharp's p95 is 0.24 ms higher). One full-screen triangle with
+one (bilinear) or five (sharp) samples a pixel at 3840x2160 is that order.
+
+**a10 split** still drifted to 1080-1152 (mean 1113): pairs of 18-28 ms
+frames at the cinematic's cuts and in the bay stepped it down, though none
+of the run's 29 such pairs was shown late. Fixed in `3516fc2d` (down on
+display-late, four over of eight, 25% hot, or one past 2.5 intervals).
+
+**Thermal: 30 minutes of b30 two-player split screen**, on (2160-line
+ceiling) then off, back to back (the frame log's ring kept each run's
+last 10 and 14.6 minutes; thermalState stayed nominal in both):
+
+| run | minutes | frames | missed | missed/min | lines mean (min) | GPU p50 | wall p99 |
+|---|---|---|---|---|---|---|---|
+| on | 21-23 | 7193 | 0 | 0 | 1513 (1260) | 14.9 | 17.0 |
+| on | 23-25 | 7193 | 0 | 0 | 1487 (1080) | 14.9 | 17.0 |
+| on | 25-27 | 7193 | 0 | 0 | 1524 (1344) | 14.9 | 17.0 |
+| on | 27-29 | 7194 | 0 | 0 | 1431 (1080) | 14.9 | 17.0 |
+| on | 29-31 | 5397 | 0 | 0 | 1524 (1260) | 14.9 | 16.9 |
+| off | 16-18 | 5979 | 1213 | 606 | 2160 (2160) | 27.9 | 35.2 |
+| off | 18-20 | 5883 | 1310 | 655 | 2160 (2160) | 30.0 | 33.6 |
+| off | 20-22 | 4431 | 2761 | 1380 | 2160 (2160) | 27.1 | 38.2 |
+| off | 22-24 | 3429 | 3763 | 1882 | 2160 (2160) | 25.8 | 38.6 |
+| off | 24-26 | 3429 | 3761 | 1880 | 2160 (2160) | 25.8 | 38.7 |
+| off | 26-28 | 5293 | 1900 | 950 | 2160 (2160) | 26.6 | 37.7 |
+| off | 28-30 | 5919 | 1274 | 637 | 2160 (2160) | 29.8 | 33.6 |
+
+- **On: 0 missed slots in every 2-minute block of minutes 21-31**, wall
+  p99 17.0 ms, the 3D view at 1430-1524 lines on average (1080-1344 at
+  the worst moments). The controller log over all 30 min: 108,603 frames
+  counted, 3 late. (It moved a step about every 12 s: the a10-split drift
+  above, fixed in `3516fc2d`, which session 6 measures.)
+- **Off: 600-1900 missed slots a minute** in minutes 16-30, worst at
+  20-26 min (1380-1880 a minute: wall p99 38.7 ms, fewer than 3500
+  frames in 2 minutes, i.e. ~28 fps), GPU p50 26-30 ms. This is the
+  owner's late-session b30 split-screen lag.
