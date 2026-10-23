@@ -2706,8 +2706,8 @@ black screen), and the project was wrapped up after it. The Mac's
 
 # Bundled shader manifest (A12)
 
-Branch `tv/shaderpack`, rebased onto tv/integrate a4d2862d (translator hash
-unchanged since 6c0bd2b9, so the same pack). Goal: no shader-compile
+Branch `tv/shaderpack`, rebased onto tv/integrate 3e4bda68 (with shadows);
+the pack was regenerated for that tree (translators 9a34e999ac450f11). Goal: no shader-compile
 stall even on the very first launch after an install, and none in a level
 the player has never visited.
 
@@ -2747,10 +2747,10 @@ the player has never visited.
    - 11 runs take about 15 min on the M4 and are cached per translator hash
      under `build/shader_pack/<hash>/`. It is a separate step, not part of
      the build.
-   - The result: 265 distinct shaders, 1081 pipeline records, **119 KiB**
-     zlib (7.6 MiB of MSL source expanded). That is the bundle size added.
-   - Regenerated on tv/integrate 6c0bd2b9 (translators 2209760db6f0fe62);
-     still current on a4d2862d.
+   - The result on 3e4bda68: 264 distinct shaders, 1074 pipeline records,
+     **117 KiB** zlib (7.6 MiB of MSL source expanded). That is the bundle
+     size added. Generated on tv/integrate 85a49369 it was 263 / 119 KiB,
+     and 265 / 119 KiB on 6c0bd2b9.
    - Not in the pack: the opt-in half-resolution transparents' MRT variants
      (`halfres_fragment`). The host derives them from the pack's text with
      its own compile, so they are not guest shader text. They compile on
@@ -2819,6 +2819,12 @@ prepared: the preparation is 490 ms on the M4 and the frame waits for it.
 That frame is part of the load (the insertion cinematic's first frame); the
 rest of the b40 window has no compile frame over 13 ms. Without the pack,
 b40 stalled 219 ms at 11 s and 113 ms at 31 s in play.
+
+Repeated on tv/integrate 3e4bda68 with its own pack: b40 nopack 704 ms worst,
+10 frames >50 ms, 1477 ms of compile → pack 297 ms (the first frame), 3,
+393 ms; b30 213 → 97 ms worst, 259 → 56 ms of compile. Per-map log: b40
+80 new texts, 77 prepared, 0 in no record; b30 81, 72 prepared, 8 in no
+record.
 
 (These are Mac numbers, not TV numbers. The M4 compiles about 3x faster than
 the A12.)
