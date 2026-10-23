@@ -11,7 +11,11 @@ host (arm64) writes them:
 
 A shader's payload is its source (no terminating zero); a pipeline's, a
 struct shader_manifest_pipeline as this build lays it out (its length is
-checked, and the indices of its shaders).
+checked, and the indices of its shaders); a map's, its name (no
+terminating zero); a use's, a shader's index (4).
+
+A pack is a manifest file, or "OCESHPZ1", the file's size (8) and the file
+compressed with zlib (tools/shader_pack.py).
 */
 
 #include "host_shader_manifest.h"
@@ -24,6 +28,7 @@ checked, and the indices of its shaders).
 #include <sys/file.h>
 #include <sys/stat.h>
 #include <unistd.h>
+#include <zlib.h>
 
 #define MAGIC "OCESHM01"
 #define MAGIC_BYTES 8
@@ -40,7 +45,11 @@ enum
 	_record_vertex_shader = 1,
 	_record_fragment_shader,
 	_record_pipeline,
+	_record_map,
+	_record_shader_use,
 };
+
+#define PACK_MAGIC "OCESHPZ1"
 
 static uint64_t checksum(uint32_t kind, uint32_t length, const void *payload)
 {
@@ -85,7 +94,8 @@ static int start_again(struct shader_manifest *manifest, const char *key, const 
 {
 	uint32_t key_length = (uint32_t)strlen(key), build_length = (uint32_t)strlen(build);
 
-	manifest->shaders = manifest->pipelines = 0;
+	manifest->shaders = manifest->pipelines = manifest->maps = 0;
+	manifest->map[0] = 0;
 	manifest->kept = 0;
 	if (ftruncate(manifest->descriptor, 0) || lseek(manifest->descriptor, 0, SEEK_SET) != 0 ||
 		!write_all(manifest->descriptor, MAGIC, MAGIC_BYTES) || !write_all(manifest->descriptor, &key_length, 4) ||
@@ -146,6 +156,29 @@ static uint64_t read_records(struct shader_manifest *manifest, const unsigned ch
 			if (reader && reader->pipeline)
 				reader->pipeline(reader->context, &pipeline);
 			manifest->pipelines++;
+		}
+		else if (kind == _record_map && length && length <= SHADER_MANIFEST_MAP_NAME_LIMIT &&
+			!memchr(payload, 0, length))
+		{
+			memcpy(manifest->map, payload, length);
+			manifest->map[length] = 0;
+			if (reader && reader->map)
+				reader->map(reader->context, manifest->map);
+			manifest->maps++;
+		}
+		else if (kind == _record_shader_use && length == 4)
+		{
+			uint32_t index;
+
+			memcpy(&index, payload, 4);
+			if (index >= manifest->shaders)
+			{
+				snprintf(manifest->discarded, sizeof(manifest->discarded),
+					"a use of a shader not recorded at byte %llu", (unsigned long long)at);
+				break;
+			}
+			if (reader && reader->shader_used)
+				reader->shader_used(reader->context, index);
 		}
 		else
 		{
@@ -308,6 +341,122 @@ int shader_manifest_add_pipeline(struct shader_manifest *manifest, const struct 
 	}
 	manifest->pipelines++;
 	return 1;
+}
+
+int shader_manifest_add_map(struct shader_manifest *manifest, const char *name)
+{
+	size_t length = strlen(name), index;
+
+	if (!length || length > SHADER_MANIFEST_MAP_NAME_LIMIT)
+		return 0;
+	for (index = 0; index < length; index++)
+	{
+		char letter = name[index];
+
+		if (!((letter >= 'a' && letter <= 'z') || (letter >= 'A' && letter <= 'Z') ||
+			(letter >= '0' && letter <= '9') || letter == '_' || letter == '-'))
+		{
+			return 0;
+		}
+	}
+	if (!append(manifest, _record_map, name, (uint32_t)length))
+		return 0;
+	memcpy(manifest->map, name, length + 1);
+	manifest->maps++;
+	return 1;
+}
+
+int shader_manifest_add_shader_use(struct shader_manifest *manifest, uint32_t index)
+{
+	return index < manifest->shaders && append(manifest, _record_shader_use, &index, 4);
+}
+
+int shader_manifest_read(const void *data, size_t size, const char *key, const char *build,
+	const struct shader_manifest_reader *reader, struct shader_manifest *info)
+{
+	const unsigned char *bytes = data;
+	uint32_t key_length = (uint32_t)strlen(key), length;
+	uint64_t at;
+
+	memset(info, 0, sizeof(*info));
+	info->descriptor = -1;
+	if ((uint64_t)size > FILE_LIMIT || size < MAGIC_BYTES + 8)
+	{
+		snprintf(info->discarded, sizeof(info->discarded), "a file of %llu bytes", (unsigned long long)size);
+		return 0;
+	}
+	if (memcmp(bytes, MAGIC, MAGIC_BYTES) || memcmp(bytes + MAGIC_BYTES, &key_length, 4) ||
+		(uint64_t)size < MAGIC_BYTES + 4 + (uint64_t)key_length + 4 || memcmp(bytes + MAGIC_BYTES + 4, key, key_length))
+	{
+		snprintf(info->discarded, sizeof(info->discarded), "a file of another device or compiler");
+		return 0;
+	}
+	at = MAGIC_BYTES + 4 + key_length;
+	memcpy(&length, bytes + at, 4);
+	at += 4;
+	if (length > size - at)
+	{
+		snprintf(info->discarded, sizeof(info->discarded), "a damaged header");
+		return 0;
+	}
+	snprintf(info->build, sizeof(info->build), "%.*s", (int)length, (const char *)bytes + at);
+	if (build && (length != strlen(build) || memcmp(bytes + at, build, length)))
+	{
+		snprintf(info->discarded, sizeof(info->discarded), "a file of another build");
+		return 0;
+	}
+	info->kept = 1;
+	info->bytes = read_records(info, bytes, size, at + length, reader);
+	return 1;
+}
+
+int shader_manifest_read_pack(const char *path, const char *key, const char *build,
+	const struct shader_manifest_reader *reader, struct shader_manifest *info)
+{
+	int descriptor = open(path, O_RDONLY | O_CLOEXEC), result = 0;
+	struct stat status;
+	unsigned char *data = NULL, *inflated = NULL;
+
+	memset(info, 0, sizeof(*info));
+	info->descriptor = -1;
+	if (descriptor < 0)
+	{
+		snprintf(info->discarded, sizeof(info->discarded), "no file");
+		return 0;
+	}
+	if (fstat(descriptor, &status) || status.st_size <= 0 || (uint64_t)status.st_size > FILE_LIMIT ||
+		!(data = read_file(descriptor, (uint64_t)status.st_size)))
+	{
+		close(descriptor);
+		snprintf(info->discarded, sizeof(info->discarded), "a file that could not be read");
+		return 0;
+	}
+	close(descriptor);
+	if ((uint64_t)status.st_size >= MAGIC_BYTES + 8 && !memcmp(data, PACK_MAGIC, MAGIC_BYTES))
+	{
+		uint64_t size;
+		uLongf inflated_size;
+
+		memcpy(&size, data + MAGIC_BYTES, 8);
+		inflated_size = (uLongf)size;
+		if (size < MAGIC_BYTES + 8 || size > FILE_LIMIT || !(inflated = malloc((size_t)size)) ||
+			uncompress(inflated, &inflated_size, data + MAGIC_BYTES + 8,
+				(uLong)((uint64_t)status.st_size - MAGIC_BYTES - 8)) != Z_OK || inflated_size != size)
+		{
+			snprintf(info->discarded, sizeof(info->discarded), "a compressed file that does not expand");
+			goto done;
+		}
+		result = shader_manifest_read(inflated, (size_t)size, key, build, reader, info);
+	}
+	else
+	{
+		result = shader_manifest_read(data, (size_t)status.st_size, key, build, reader, info);
+	}
+
+done:
+	free(inflated);
+	free(data);
+	return result;
 }
 
 void shader_manifest_close(struct shader_manifest *manifest)
