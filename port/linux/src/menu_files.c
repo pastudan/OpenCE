@@ -1031,25 +1031,47 @@ static struct
 	int failed;
 } art[MAXIMUM_ART];
 static long art_count;
+/* the art's indices by data address, open addressing (index + 1; 0 empty):
+every texture of every draw asks menu_art_texture, and most are no menu's */
+#define ART_SLOTS (MAXIMUM_ART * 2)
+static unsigned short art_slots[ART_SLOTS];
+
+static unsigned long art_slot(unsigned long data)
+{
+	return (data >> 4) * 2654435761UL % ART_SLOTS;
+}
+
+/* the art's index for data, or -1 */
+static long art_find(unsigned long data)
+{
+	unsigned long slot;
+
+	for (slot = art_slot(data); art_slots[slot]; slot = (slot + 1) % ART_SLOTS)
+	{
+		if (art[art_slots[slot] - 1].data == data)
+			return art_slots[slot] - 1;
+	}
+	return -1;
+}
 
 void halo_menus_art_register(void const *texture, char const *png)
 {
 	unsigned long data = ((const unsigned long *)texture)[1];
-	long index;
+	long index = art_find(data);
 
-	for (index = 0; index < art_count; index++)
+	if (index < 0)
 	{
-		if (art[index].data == data)
-			break;
-	}
-	if (index == art_count)
-	{
+		unsigned long slot;
+
 		if (art_count == MAXIMUM_ART)
 		{
 			platform_log("menus: more than %d bitmaps; %s is not drawn", MAXIMUM_ART, png);
 			return;
 		}
-		art_count++;
+		index = art_count++;
+		for (slot = art_slot(data); art_slots[slot]; slot = (slot + 1) % ART_SLOTS)
+			;
+		art_slots[slot] = (unsigned short)(index + 1);
 	}
 	else if (art[index].png && !strcmp(art[index].png, png))
 	{
@@ -1091,19 +1113,15 @@ void halo_menus_art_forget(void)
 		}
 	}
 	art_count = 0;
+	memset(art_slots, 0, sizeof(art_slots));
 }
 
 unsigned int menu_art_texture(unsigned long data, unsigned long *levels)
 {
-	long index;
+	long index = art_find(data);
 
-	for (index = 0; index < art_count; index++)
-	{
-		if (art[index].data == data)
-			break;
-	}
 	/* (no png: out of memory registering it) */
-	if (index == art_count || art[index].failed || !art[index].png)
+	if (index < 0 || art[index].failed || !art[index].png)
 		return 0;
 	if (!art[index].texture)
 	{
