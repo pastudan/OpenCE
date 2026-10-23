@@ -38,6 +38,9 @@ char const *pc_menus_screen(char const *name);
 /* the Custom Edition tag cache window, or NULL unless the
 game.custom_edition setting reserved it (port/linux/src/xbox_memory.c) */
 void *halo_custom_edition_tag_cache(void);
+/* how many of the texture cache's pages it uses, of the page_count it has
+(game.texture_cache_mb; port/linux/src/xbox_memory.c) */
+long halo_texture_cache_pages(long page_count, long page_size);
 /* where Halo PC keeps the channels of the pixels a Custom Edition bitmap
 just arrived at (an enum custom_edition_channel_order,
 port/linux/game/cache_file_formats.h), which the renderer then samples in
