@@ -49,6 +49,14 @@ first page of a block also records the block length */
 static DWORD page_protection[CONTIGUOUS_PAGE_COUNT];
 static unsigned long block_page_count[CONTIGUOUS_PAGE_COUNT];
 static BOOL arena_reserved = FALSE;
+#ifdef __wasm32__
+/* per page, whether a block has ever held it: one that never has is still
+the zero WebAssembly memory starts as, and is not cleared (a write would
+make the host back it: clearing the 256 MiB texture cache at load made the
+whole of it part of the app's footprint at once, the Apple TV's included,
+before the game had put anything in it) */
+static unsigned char page_used[CONTIGUOUS_PAGE_COUNT / 8];
+#endif
 static pthread_mutex_t arena_lock = PTHREAD_MUTEX_INITIALIZER;
 static void *custom_edition_tag_cache = NULL;
 
@@ -208,7 +216,24 @@ void *platform_contiguous_alloc(unsigned long size, unsigned long alignment,
 	address = (void *)(PLATFORM_CONTIGUOUS_BASE + first * PAGE_SIZE_BYTES);
 	memory_watch_forget(address, count * PAGE_SIZE_BYTES);
 #ifdef __wasm32__
-	memset(address, 0, count * PAGE_SIZE_BYTES);
+	/* (only the pages a block has held before: runs of them cleared) */
+	{
+		unsigned long run = first;
+
+		for (page = first; page <= first + count; page++)
+		{
+			BOOL used = page < first + count && (page_used[page / 8] & (1u << (page % 8)));
+
+			if (!used)
+			{
+				if (page > run)
+					memset((char *)PLATFORM_CONTIGUOUS_BASE + run * PAGE_SIZE_BYTES, 0, (page - run) * PAGE_SIZE_BYTES);
+				run = page + 1;
+			}
+			if (page < first + count)
+				page_used[page / 8] |= (unsigned char)(1u << (page % 8));
+		}
+	}
 #else
 	/* map fresh zeroed pages over the reservation */
 	if (mmap(address, count * PAGE_SIZE_BYTES, protection_to_host(protect),

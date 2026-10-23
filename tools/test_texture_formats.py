@@ -246,3 +246,33 @@ def test_texture_cache_keeps_a_budget_and_never_sweeps():
 def test_tv_texture_budget_is_a_level_and_a_margin():
     source = (ROOT / "port/linux/src/xbox_textures.c").read_text()
     assert "megabytes = host_metal_supports_bc() ? 1024 : 256;" in source
+
+
+def test_wasm_contiguous_blocks_clear_only_pages_used_before():
+    """xbox_memory.c on WebAssembly: a block's pages that no block has held
+    are left as the zero memory starts as (clearing them would make the host
+    back all 256 MiB of the texture cache at load); pages held before are
+    cleared, so every block still starts zeroed"""
+    source = (ROOT / "port/linux/src/xbox_memory.c").read_text()
+    alloc = source[source.index("void *platform_contiguous_alloc("):]
+    alloc = alloc[:alloc.index("\n}\n")]
+    wasm = alloc[alloc.index("#ifdef __wasm32__"):alloc.index("#else")]
+    assert "memset(address, 0, count * PAGE_SIZE_BYTES)" not in wasm
+    assert "page_used[page / 8] & (1u << (page % 8))" in wasm and "page_used[page / 8] |=" in wasm
+    # (the same logic, run: which pages a sequence of blocks clears)
+    used, cleared = set(), []
+
+    def allocate(first, count):
+        run = first
+        for page in range(first, first + count + 1):
+            is_used = page < first + count and page in used
+            if not is_used:
+                if page > run:
+                    cleared.extend(range(run, page))
+                run = page + 1
+            if page < first + count:
+                used.add(page)
+    allocate(10, 5)
+    assert cleared == []
+    allocate(12, 6)
+    assert cleared == [12, 13, 14]
