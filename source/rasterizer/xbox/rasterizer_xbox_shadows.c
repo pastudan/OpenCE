@@ -220,8 +220,8 @@ Only the part of the box on the far side of the near plane is drawn: the
 shadow's vertex shader keeps the frustum's clip z (rasterizer_set_frustum_z's
 transform; d3d8_metal.c's viewport undoing leaves z as it was), and the GPU
 clips what has z < 0. So the box is cut there first, which matters for the
-closest and largest shadow, the player's own, whose box (4r up toward the
-light) the camera is often inside: its corners on the far side and the
+closest and largest shadow, the player's own, whose box (reaching 4r along
+the light, past his feet) the camera is often inside: its corners on the far side and the
 points where its 12 edges cross the plane span what is drawn. FALSE (no
 bounds) when one of those has w <= 0 (cannot happen past a near plane
 in front of the camera, but then the projection would bound nothing) or
@@ -337,6 +337,45 @@ static boolean rasterizer_shadow_screen_bounds(
 	bounds[3] = (short)y1 + (y1 > (real)(short)y1 ? 1 : 0);
 
 	return TRUE;
+}
+
+/* port: the same box, as six planes (inside: n.p + d >= 0), for the Metal
+device to cut each draw's triangles to (halo_draw_bounds_box): the
+rectangle above bounds the whole box, the triangles' parts in it bound
+each draw, which for the shadow of something near the camera (a box that
+fills the view) is what saves anything */
+static void rasterizer_shadow_bounds_box(
+	void)
+{
+	real r = local_object_bounding_radius;
+	real const extents[3][2] = {
+		{ r * SHADOW_BOUNDS_MARGIN, r * SHADOW_BOUNDS_MARGIN },
+		{ r * SHADOW_BOUNDS_MARGIN, r * SHADOW_BOUNDS_MARGIN },
+		{ r * 4.0f, r * 0.5f } };
+	real_vector3d const *axes[3] = {
+		&local_shadow_matrix.forward, &local_shadow_matrix.left, &local_shadow_matrix.up };
+	float planes[6][4];
+	short axis;
+
+	if (r <= 0.0f)
+		return;
+	for (axis = 0; axis < 3; axis++)
+	{
+		real along = dot_product3d(axes[axis], (real_vector3d const *)&local_shadow_matrix.position);
+		short index;
+
+		/* along the axis: a.p <= a.position + extent, and a.p >= a.position - extent */
+		for (index = 0; index < 3; index++)
+		{
+			planes[axis * 2][index] = -axes[axis]->n[index];
+			planes[axis * 2 + 1][index] = axes[axis]->n[index];
+		}
+		planes[axis * 2][3] = along + extents[axis][0];
+		planes[axis * 2 + 1][3] = extents[axis][1] - along;
+	}
+	halo_draw_bounds_box(planes);
+
+	return;
 }
 
 /* ---------- public code */
@@ -965,10 +1004,11 @@ void _rasterizer_environment_shadow_draw(
 			{
 				short bounds[4];
 
-				if (!rasterizer_debug_options.shadow_debug_enabled &&
-					rasterizer_shadow_screen_bounds(bounds))
+				if (!rasterizer_debug_options.shadow_debug_enabled)
 				{
-					halo_draw_bounds(TRUE, bounds[0], bounds[1], bounds[2], bounds[3]);
+					if (rasterizer_shadow_screen_bounds(bounds))
+						halo_draw_bounds(TRUE, bounds[0], bounds[1], bounds[2], bounds[3]);
+					rasterizer_shadow_bounds_box();
 				}
 			}
 

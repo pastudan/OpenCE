@@ -93,6 +93,48 @@ def test_the_fade_is_one_beyond_the_box_along_up():
     assert "vertex_constants[3][0] = -(local_shadow_matrix.up.i * inverse_radius_double);" in SHADOWS
 
 
+def test_the_box_is_handed_over_and_each_draw_is_cut_to_it():
+    assert "void halo_draw_bounds_box(float const planes[6][4]);" in FIXUPS
+    assert "void halo_draw_bounds_box(float const planes[6][4])" in GL
+    box = function_body(SHADOWS, "static void rasterizer_shadow_bounds_box")
+    assert "{ r * 4.0f, r * 0.5f } };" in box and "r * SHADOW_BOUNDS_MARGIN" in box
+    assert "halo_draw_bounds_box(planes);" in box
+    triangles = function_body(METAL, "static BOOL draw_bounds_triangles")
+    # the shadow's own projection (rasterizer_set_frustum_z's c[-96]), the
+    # near plane, and slack for the vertex program's half-unit shift
+    assert "XGPU_VERTEX_CONSTANT_BIAS - 96" in triangles
+    assert "near_plane[4] = { 0.0f, 0.0f, 1.0f, 0.0f }" in triangles
+    assert "0.5f * target_scale[1]" in triangles
+    # anything it cannot read draws as it was
+    assert "position->type != D3DVSDT_FLOAT3" in triangles
+    draw = function_body(METAL, "void WINAPI D3DDevice_DrawIndexedVertices")
+    assert "primitive_type_value == D3DPT_TRIANGLELIST" in draw
+    assert draw.index("draw_bounds_triangles") < draw.index("host_metal_draw")
+    # cleared with the rectangle
+    assert "draw_bounds_box.active = FALSE;" in function_body(METAL, "void halo_draw_bounds")
+
+
+def test_polygon_cut_keeps_the_inside():
+    """polygon_cut's arithmetic, in Python: a triangle across x >= 0"""
+    def cut(polygon, plane):
+        out = []
+        for index, a in enumerate(polygon):
+            b = polygon[(index + 1) % len(polygon)]
+            da = sum(x * p for x, p in zip(a, plane))
+            db = sum(x * p for x, p in zip(b, plane))
+            if da >= 0:
+                out.append(a)
+            if (da >= 0) != (db >= 0):
+                t = da / (da - db)
+                out.append([x + t * (y - x) for x, y in zip(a, b)])
+        return out
+    triangle = [[-1.0, 0.0, 0.0, 1.0], [1.0, 0.0, 0.0, 1.0], [1.0, 1.0, 0.0, 1.0]]
+    kept = cut(triangle, [1.0, 0.0, 0.0, 0.0])
+    assert min(p[0] for p in kept) == 0.0 and len(kept) == 4
+    assert cut(triangle, [-1.0, 0.0, 0.0, -2.0]) == []
+    assert "static int polygon_cut(" in METAL
+
+
 def test_the_device_clips_the_scissor_and_can_be_switched_off():
     raster = function_body(METAL, "static void apply_raster_state")
     assert "if (draw_bounds.active)" in raster
