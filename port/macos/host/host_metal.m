@@ -276,6 +276,8 @@ static uint64_t frame_serial = 1;
 static _Atomic uint64_t completed_serial;
 /* (host_lifecycle.h's, at the end) */
 static id<MTLCommandBuffer> uploads_last;
+/* the frame that last copied into the feedback copy: the lifecycle's
+trim and host_metal_present let it go once it has not for a while */
 static uint64_t feedback_serial;
 
 /* HALO_METAL_PROFILE: command-buffer GPU time and feedback-copy bandwidth,
@@ -2981,6 +2983,8 @@ void host_metal_clear(const struct metal_clear *clear)
 
 /* ---------- draws */
 
+#define FEEDBACK_IDLE_FRAMES 600
+
 /* a copy of the colour target, for a draw that samples it as it draws into
 it (Metal's attachments cannot be read so) */
 static id<MTLTexture> feedback_copy(id<MTLTexture> target)
@@ -4349,6 +4353,12 @@ void host_metal_present(void)
 		pass_log.end_reason = _pass_end_present;
 		encoder_end();
 		frame_begin();
+		/* (the feedback copy, a whole screen target's size (33 MB at 4K),
+		let go after FEEDBACK_IDLE_FRAMES without a draw that needed it: the
+		few effects that do come and go; the command buffers that used it
+		hold it until the GPU is done) */
+		if (metal.feedback && frame_serial - feedback_serial > FEEDBACK_IDLE_FRAMES)
+			metal.feedback = nil;
 		picture = texture_object(metal.present_source);
 		if (host_telemetry_enabled)
 		{
