@@ -206,3 +206,15 @@ def test_multimap_scene_changes_maps_and_pushes_them():
     assert set(scene["maps"]) == {"b30.map", "b40.map", "c10.map"}
     source = (ROOT / "tools/tvos_bench.py").read_text()
     assert 'SCENES[run["scene"]].get("maps", ())' in source
+
+
+def test_a_device_run_without_its_own_summary_is_invalid(tmp_path):
+    """a launch that stayed inactive (the TV asleep) writes no frame log; the
+    one copied off the TV then is an earlier run's"""
+    csv = tmp_path / "f.csv"
+    csv.write_text(frame_log([(16.7 * (i + 1), 16.7, 5.0, 0, 0) for i in range(100)],
+                             [(1.0, 1, "map-open", "b30.map")]))
+    findings = {"valid": True, "invalid_reason": None, "frame_log_summary": None}
+    run = {"scene": "b30", "mode": "cold", "resolution": 2160, "repeat": 1, "salt": "x"}
+    result = bench.finish_run(run, "device", tmp_path / "f.log", csv, findings)
+    assert not result["valid"] and "earlier run" in result["invalid_reason"]

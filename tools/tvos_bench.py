@@ -507,6 +507,12 @@ def finish_run(run, target, log_path, csv_path, findings):
     if text and summary and match and int(match.group(1)) not in (summary["frames"], summary["frames"] + 1):
         result["valid"], result["invalid_reason"] = False, "the frame log copied is not this run's"
         return result
+    # (a device launch that never wrote its own frame log, as one that stayed
+    # inactive with the TV asleep and was ended by the timeout: what was
+    # copied is an earlier run's)
+    if text and target == "device" and not summary:
+        result["valid"], result["invalid_reason"] = False, "no frame-log summary in this run's log: the copied log is an earlier run's"
+        return result
     if text:
         result["analysis"] = analyze(run["scene"], text)
         if not result["analysis"]["full"]["frames"]:
