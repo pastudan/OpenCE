@@ -351,6 +351,39 @@ static void guest_memory_allocate(void)
 }
 #endif
 
+#if WASM_RT_MEMCHECK_GUARD_PAGES
+/* With guard pages a guest access out of bounds is a fault in the
+reservation. wasm2c's handler calls only SEGV_ACCERR out of bounds and
+everything else stack exhaustion, and macOS raises SIGBUS there: so this
+one, installed after it, decides by the address. A fault anywhere else is
+the host's own: the default action, a crash report naming it. */
+static void guest_fault(int signal_number, siginfo_t *info, void *context)
+{
+	uint8_t *address = info->si_addr;
+
+	(void)context;
+	if (address >= (uint8_t *)env.memory.data && address < (uint8_t *)env.memory.data_end)
+		wasm_rt_trap(WASM_RT_TRAP_OOB);
+	signal(signal_number, SIG_DFL);
+}
+
+static void guest_fault_handler_install(void)
+{
+	struct sigaction action;
+
+	memset(&action, 0, sizeof(action));
+	action.sa_sigaction = guest_fault;
+	action.sa_flags = SA_SIGINFO;
+	sigemptyset(&action.sa_mask);
+	sigaction(SIGSEGV, &action, NULL);
+	sigaction(SIGBUS, &action, NULL);
+}
+#else
+static void guest_fault_handler_install(void)
+{
+}
+#endif
+
 /* ---------- start */
 
 int host_sdl_show_simple_message_box(unsigned int flags, const char *title, const char *message);
@@ -416,6 +449,7 @@ int main(int argc, char **argv)
 	host_sdl_main_thread_set();
 	wasm_rt_init();
 	guest_memory_allocate();
+	guest_fault_handler_install();
 	host_memory_base = (uint8_t *)env.memory.data;
 	host_memory_size = env.memory.size;
 	wasm2c_halo_instantiate(&instance, &env, &wasi, &preview1);
