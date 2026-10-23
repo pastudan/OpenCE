@@ -2167,3 +2167,69 @@ cost what their texture fetches and tile blends cost. The levers left are
 the ones that remove pixels or passes: dynamic resolution (#105), half
 resolution effects (#106), the reflection-mask merge above, and the b30
 transparents.
+
+# Half resolution (tv/halfres), continued
+
+## Scope zoom (masked convolution): left at full resolution
+
+The scopes' zoom is a masked warp: inside the mask (the view through the
+scope) every pass carries the screen's own picture forward, so at half
+resolution that view loses half its sharpness. b30's pistol 2x (radius
+10.8, 4 passes, 3840x2160, frozen, `HALO_TEST_INPUT=zoom:1:30`): 42.8 dB
+over the frame, **35.1 dB in the centre** (max 73), 27.7 dB at edges.
+`display.half_res_convolution` therefore leaves masked convolutions at
+full resolution; it covers the unmasked blurs (a10's tutorial) only.
+
+## Queued transparents at half resolution (display.half_res_transparents)
+
+Design: host_metal.m, "the queued transparents at half resolution";
+d3d8_metal.c, half_run_*. Runs of affine-blended phase-22 draws accumulate
+S and M (RGBA16F, half scale each way); a composite sets dst = S + M*dst.
+
+Survey (`HALO_METAL_TRANSPARENT_SURVEY=1`, Mac 4K): every phase-22 draw on
+b30 (39 a frame), cryo (59) and bridge (21) blends affinely with the
+read-only stencil test EQUAL 0 mask 1, except 0.9 a frame on bridge (MAX
+blends, one depth writer). b30's blends: ONE/ONE 25, SRCALPHA/INVSRCALPHA
+6.4, SRCALPHA/ONE 6.0, ZERO/SRCCOLOR 2.0. Excluded (full resolution, in
+order): non-add operations, constant or destination-alpha factors, depth or
+alpha writes, stencil writes, draws sampling a render target (camouflage),
+draws into other targets.
+
+Fidelity (Mac, 3840x2160, frozen; off vs on; "touched" = pixels the
+transparents change):
+
+| scene | all PSNR | touched PSNR | touched p99.9 | max | full-res accumulation alone |
+|---|---|---|---|---|---|
+| b30 | 52.9 | 49.5 | 7 | 123 (isolated edge pixels) | 55.2 dB, max 26 |
+| cryo | 59.7 | 50.9 | 4 | 12 | 60.4 dB, max 2 |
+
+A12 (bedroom TV, picture 3840x2160, **drawable 1920x1080**; the TV was in
+its 1080p output mode), convolution on in both, ABBA, warm, one binary
+(68186890 on tv/integrate 566bb6d4); window = the scene's:
+
+| scene | run | fps | >33.3 | >50 | GPU p50 | GPU p95 |
+|---|---|---|---|---|---|---|
+| b30 | off | 59.74 | 5 | 3 | 14.71 | 16.79 |
+| b30 | on | 59.93 | 2 | 1 | 14.86 | 15.81 |
+| b30 | on | 59.93 | 2 | 1 | 14.83 | 15.86 |
+| b30 | off | 59.96 | 1 | 1 | 14.72 | 16.65 |
+| b30split | off | 59.96 | 0 | 0 | 14.70 | 15.60 |
+| b30split | on | 59.91 | 2 | 0 | 14.90 | 15.43 |
+| b30split | on | 59.92 | 1 | 0 | 14.90 | 15.45 |
+| b30split | off | 59.96 | 0 | 0 | 14.72 | 15.61 |
+| split | off | 59.96 | 0 | 0 | 15.11 | 16.89 |
+| split | on | 59.94 | 1 | 0 | 15.11 | 15.88 |
+| split | on | 59.96 | 0 | 0 | 15.12 | 15.92 |
+| split | off | 59.96 | 0 | 0 | 15.09 | 16.86 |
+
+No clear win: these scenes already hold 60 fps. The heavy-effect tail
+falls (GPU p95 -0.9 ms on b30 and split) but the median rises 0.15-0.2 ms
+(the run's fixed passes). Why, from the b30split pass log with it on: each
+view's run is a 1920x1080 pass (1.8-2.0 ms of fragment time for 21 draws)
+plus the screen's pass broken and reloaded after it (a 3840x2160 load and
+store, ~1.1 ms each view: the "lens_flares" and empty passes). The draws
+themselves got cheaper; the pass break ate most of it.
+
+**Default: off.** What would make it pay: compositing into the pass the
+game opens next instead of a pass of its own (no extra screen reload), and
+skipping a run whose draws cover little of the screen.
