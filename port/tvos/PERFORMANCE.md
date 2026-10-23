@@ -1278,3 +1278,103 @@ first ~12 s):
 
 Frames over 50 ms 28/39 -> 3/6; the blur's seconds 44.5/45.7 -> 50.5/48.5
 fps. The rest of the frame (fog room) is unchanged.
+
+## The late-level lag: measured and fixed (2026-10-23)
+
+The owner's report: late in a10, two-player co-op, quiet downtime,
+stretches of lag that built up, went smooth and came back. No new play
+session was on the TV, so the reproduction is a bench scene:
+`tools/tvos_bench.py`'s **latelag** (a10 split screen for 10 minutes: the
+opening at 8x, both players out of the cryo tubes, then both moved between
+the cryo bay (BSP 0) and the bridge (BSP 1) every 40 s, player 1 turning
+and looking about). It is scripted by `debug.test_commands`
+(`HALO_TEST_COMMANDS`, console commands at game seconds), which works on
+the TV, which has no telnet console:
+
+    python3 tools/tvos_bench.py run --target device --install --signed APP \
+        --plan latelag/2160/1 --modes warm --out OUT
+    python3 tools/tv_telemetry.py pull     # the run's per-second telemetry
+
+Each area's textures go unseen for 40 s, longer than the old 30 s idle
+time, and then come back. The A12 numbers below come from four runs
+interleaved base, fix, base, fix (base = the bench scene's commit without
+the fixes, fix = with them), TV output 1080p, rendering 3840x2160, warm.
+The columns are for the 554 s from the first return to an area (45 s after
+two views), which leaves out the shader compiles of the first visit.
+
+| A12, latelag, 554 s | base 1 | fix 1 | base 2 | fix 2 |
+|---|---|---|---|---|
+| textures dropped | 776 | **0** | 749 | **0** |
+| textures converted (DXT -> BGRA, main thread) | 417 | **0** | 419 | **0** |
+| conversion ms | 152.5 | **0** | 156.6 | **0** |
+| worst second of conversion | 14.9 ms | 0 | 16.4 ms | 0 |
+| seconds with a sweep | 24 | 0 | 20 | 0 |
+| frames over 33 ms | 21 | 17 | 20 | 17 |
+| frames over 50 ms | 8 | 8 | 9 | 7 |
+| worst frame | 67.5 ms | 60.5 | 67.1 | 61.6 |
+| missed display slots | 47 | 40 | 46 | 40 |
+| guest ms mean / p95 (per-second median) | 4.57 / 5.67 | 4.58 / 5.66 | 4.57 / 5.67 | 4.59 / 5.78 |
+| Metal allocations, peak | 476 MB | 497 MB | 476 MB | 497 MB |
+| footprint, peak | 974 MB | 1016 MB | 985 MB | 1010 MB |
+
+1. **Texture idle sweep: confirmed, fixed.** On base, every 10 s sweep
+   dropped 35 to 65 textures (the area left 30 s before). Each return to
+   an area then converted 15 to 40 of them back in its first second
+   (5 to 15 ms of main-thread conversion, frames of 60 to 67 ms) and kept
+   converting for a few seconds. That is the "buffer filling and freed".
+   With the fix, nothing is dropped and nothing converted after the first
+   visit. `xbox_textures.c` now keeps host textures up to a byte budget
+   (`debug.texture_budget_mb`: 512 MiB on the TV, 1024 MiB on a Mac with
+   BC, 512 MiB on Linux, 256 MiB on GLES). Past the budget it drops the
+   least recently drawn, at most 4 a frame and none drawn in the last 300
+   frames, and clears only that entry's `recent_textures` slot.
+   - **The budget.** A whole a10 traversal (both areas, two players) held
+     175 MiB of sampled textures on the Mac's TV path (96 MiB of it
+     converted DXT). Metal's allocations rose 21 MB on the TV (476 to
+     497 MB) and the footprint about 30 MB, with ~1.2 GB still available.
+     So 512 MiB is about three times a level's textures: in practice the
+     budget is never reached within a level, and it bounds a very long
+     session. Map changes still let the game's texture cache go
+     (`lruv_flush`), but host textures of a level left behind wait for
+     the budget. Visuals are unchanged: the same texels, kept longer.
+2. **lruv_cache_verify (asserts on in the guest): measured, not a
+   cause; left as it is.**
+   - *Cost.* Counted with temporary counters on the Mac (latelag, TV
+     texture path): ~820 verify calls a frame (mostly the cheap
+     `verify_blocks` FALSE ones, from `lruv_block_touch`/`get_address`),
+     0.019 ms a frame on average, the worst frame 0.062 ms.
+   - *Block walks.* Full walks happen only on new blocks and deletes: in
+     126 of 597 seconds, at most 6942 blocks visited in a frame.
+   - *Over time.* The cost does not grow over the run (minute by minute
+     flat after the first two).
+   - *On the A12.* Scaled ~4x it is ~0.08 ms a frame, the worst under
+     0.3 ms. Not a source of lag.
+   - *Why no change.* The asserts stay: they are the decompilation's own
+     checks, and `HALO_RELEASE` already exists for builds without them.
+3. **Page-hash watch: a real periodic spike, small; fixed.**
+   - *The spike.* Stable pages were re-hashed together every 60 frames:
+     33 pages a frame on average, but up to 1183 in one frame (0.32 ms on
+     an M4).
+   - *The fix.* `host_watch_hash.c` now re-hashes each stable page in the
+     frame of every 60 its index picks.
+   - *Effect on the A12.* The extra guest time of the worst of the 60
+     frame phases, against frames of the same tick parity, fell from
+     0.21/0.23 ms (base) to 0.07/0.06 ms (fix).
+   - *Correctness.* A write nobody announced into a stable page is still
+     seen within 60 frames (120 for a page not drawn in its frame).
+   - *Not this.* The strong guest autocorrelation at lag 60 that remains
+     is the game's 30 Hz tick at 60 fps (lags 59 and 61 are negative): a
+     two-frame alternation, not the hash.
+4. **Other guest sawtooth effects (object garbage collection and so on):
+   not found.**
+   - *Drift.* Guest ms per minute stays flat over the 10 minutes (4.53 to
+     4.63 ms, every run).
+   - *What remains.* A ~50 ms guest frame at each teleport, present in
+     base and fix alike. It is the scripted `switch_bsp`: a structure BSP
+     change. It is the bench's own move, not something the owner meets
+     in quiet play.
+   - *The first 45 s.* These hold the shader compiles of each area's first
+     visit (a ~1 s, 300 ms guest frame at the first two-view frame, and
+     compile stalls of 100 to 450 ms). Those are the first visits'
+     compiles, cached afterwards, and are another task's (the bundled
+     shader manifest).
