@@ -2442,3 +2442,54 @@ Looked at and left:
   would drop the Apple TV HD, so not made default. PGO: the profiles in
   `pgo/` are for the Linux/Windows native builds and clang 22, not for
   the wasm2c C.
+
+## #110's 30 fps stretches in b30long: the main thread got slower, not the game
+
+#110's 15-minute b30 split-screen runs with a bot (`b30long`, A12, 2160
+render into a 1080p drawable, before the TV's output went to 4K Dolby
+Vision) had stretches at ~30 fps in 3 of 4 runs (39, 28 and 127 s; both
+builds). From their telemetry and frame logs
+(`<scratch>/latelag/tvmem2/run-*-b30long-*`), stretch seconds against
+the run's 60 fps seconds:
+
+| run | guest ms/frame | host ms/frame | telemetry's own ms/s | GPU p50 | draws/frame | game ticks/s |
+|---|---|---|---|---|---|---|
+| fix 1 | 5.85 -> 23.6 (x4.0) | 2.89 -> 9.5 (x3.3) | 0.10 -> 0.24 (x2.3) | 14.5 -> 21.8 | x0.85 | 30 -> 30.6 |
+| fix 2 | 5.95 -> 21.3 (x3.6) | 2.87 -> 8.0 (x2.8) | 0.10 -> 0.24 (x2.3) | 14.5 -> 21.0 | x0.74 | 30 -> 29.8 |
+| base 2 | 6.17 -> 25.1 (x4.1) | 2.98 -> 9.6 (x3.2) | 0.10 -> 0.23 (x2.4) | 14.5 -> 22.0 | x0.87 | 30 -> 30.6 |
+
+- **It switches between two consecutive frames, both ways**, with the
+  same draw count (run 3: frame at 666.29 s 16.9 ms, guest 6.6, host 2.9;
+  next 30.3 ms, guest 20.4, host 9.8; and back at 796.69 s), mid-play,
+  no event, no texture uploads or conversions, no file reads, thermal
+  nominal, memory flat.
+- **Everything on the main thread slows by the same factor**: the
+  guest's translated code, the host's Metal encoding (Objective-C, the
+  driver) and even the telemetry's fixed per-second bookkeeping. A
+  guest code path (AI, path search, collision, sound) would raise guest
+  time only, and with the work (draws, ticks) unchanged it cannot make
+  the host's encoding 3x slower.
+- GPU command-buffer time also rises 1.5x (14.5 -> 22 ms): either the
+  GPU's clock dropped with the CPU's (a system performance state), or
+  the GPU times include waiting for a CPU-side encoder.
+
+So the main thread ran on a slower core or at a much lower clock for
+those stretches: an A12 Tempest (efficiency) core is roughly 3-4x slower
+than a Vortex core, which fits the factor. It is not a guest hot spot
+and nothing in the guest's code would show it in a Mac profile (the Mac
+was not tried: there is no slow game path to find). Why tvOS moved the
+thread is open: the game's main thread has the default QoS of a UIKit
+main thread; the TV may down-clock the whole SoC (a power or display
+state; the stretch's ends are not on 1 s boundaries).
+
+To confirm on the next device session, each telemetry second now carries
+**`probe_us`** (a fixed chain of 2^16 dependent multiply-adds on the main
+thread, ~40-60 us on a fast core; Mac M4: 111 us on a performance core,
+182 us when clamped with `taskpolicy -b`) and **`cpu`**
+(`pthread_cpu_number_np`). If `probe_us` rises ~3-4x in a stretch it is
+the CPU; `cpu` says whether it moved to another core. Possible fixes
+then, none tried: give the main thread a `QOS_CLASS_USER_INTERACTIVE`
+override and the render work an `os_workgroup` (the audio/Metal frame
+interval workgroup API) so the scheduler keeps it on performance cores,
+and tvOS's Game Mode (`GCSupportsGameMode` in Info.plist) where the TV
+honours it.
