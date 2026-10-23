@@ -668,10 +668,13 @@ void _rasterizer_screen_effect(
 		}
 
 		/* port: a blur or warp's passes between its first and last drawn at
-		half the scene's resolution (display.half_res_convolution) */
+		half the scene's resolution (display.half_res_convolution). Not a
+		masked one (the scopes' zoom): inside its mask each pass keeps the
+		pass before's picture, the screen's own, which at half resolution
+		would be half as sharp where the player looks through the scope */
 #ifdef HALO_METAL
 		half_res = parameters->convolution_type != _rasterizer_screen_effect_convolution_type_none &&
-			!parameters->video_on && pass_count >= 2 &&
+			!parameters->video_on && !parameters->convolution_mask && pass_count >= 2 &&
 			halo_half_res_convolution();
 #endif
 
