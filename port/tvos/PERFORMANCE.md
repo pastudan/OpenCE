@@ -821,10 +821,9 @@ with the evidence for their size:
 
 # Texture formats (A12)
 
-Branch `tv/textures`. **No device numbers yet**: everything below was
-measured on the Mac mini (M4) or in the tvOS simulator. It shows correctness,
-memory and fidelity, not A12 GPU time. The device A/B (guest / exact / astc,
-warm x2 and one cold each, 4K bridge and b30) is planned but has not been run.
+Branch `tv/textures`. Device results are in "A12 device" at the end; the
+sections before them were measured on the Mac mini (M4) or in the tvOS simulator (correctness,
+memory and fidelity; not A12 GPU time).
 
 ## What changed
 
@@ -961,13 +960,86 @@ Its GPU is the Mac's, so these timings cannot show A12 texture bandwidth.
 Each path's largest frame is the state-load frame: `exact` is 20-36 ms
 shorter than `guest` (one run each, indicative only).
 
-## Planned device runs (not yet run)
+## A12 device: guest vs exact vs astc (4K)
 
-    python3 tools/tvos_deploy.py sign --output <scratch>/tv-deploy-textures/OpenCETV.app
-    python3 tools/tvos_bench.py run --target device --install --signed <scratch>/tv-deploy-textures/OpenCETV.app \
-        --maps <scratch>/halo_data/maps --plan bridge/2160/2,b30/2160/2 --modes warm --env HALO_TEXTURE_FORMAT=guest --out OUT-guest
-    # likewise without --env (exact) and with HALO_TEXTURE_FORMAT=astc; then one cold launch of each
+Measured 2026-10-23 on the owner's A12 Apple TV 4K (tvOS 27.0, CoreDevice
+`443953B8-9072-5EAD-A947-95563A1C3D52`) with the integrated build
+**tv/integrate 3ed14e70** (tv/shaders + tv/bandwidth + tv/textures). It was
+already installed by #101 and the batch checked build-info before running.
+All three formats ran on the same build, selected by `HALO_TEXTURE_FORMAT`.
 
-Label the cold runs **tv/bench-salt cold**: on this branch
-`HALO_METAL_SHADER_SALT` changes only a comment, so the system's pipeline
-cache may still hit. The real salt fix is on tv/shaders.
+- **Cold is truly cold here:** the integrated salt renames the shader entry
+  points and the bench resets the shader manifest.
+- **Plan:** per format and scene, one salt with 1 cold launch then 2 warm
+  launches.
+- **Raw data:** `<scratch>/tex/device/{guest,exact,astc}`, plus the
+  ordering check in `<scratch>/tex/device-check`.
+- **Validity and restore:** all 27 runs are valid. config.toml and init.txt
+  were restored and verified byte-identical after every batch.
+
+Batch 1 ran in the order guest, then exact, then astc (bridge and b30 each;
+~21 min):
+
+| scene | format | mode | fps (whole window) | steady frames >33.3 ms | steady GPU mean ms | GPU busy % | load frame ms | sampled textures MiB | DXT conversion (whole load) |
+|---|---|---|---|---|---|---|---|---|---|
+| a10 bridge | guest | cold | 53.2 | 175 | 22.7 | 97 | 2584 | 56.7 | in guest (not timed) |
+| a10 bridge | guest | warm | 52.3 / 50.9 | 194 / 242 | 24.2 / 25.3 | 99 / 99 | 572 / 574 | 56.7 | in guest |
+| a10 bridge | exact | cold | 49.1 | 295 | 28.8 | 97 | 2583 | 56.7 (43.7 DXT) | 113 tex, 7.4 MiB blocks, 47 ms |
+| a10 bridge | exact | warm | 50.0 / 50.1 | 290 / 273 | 28.0 / 26.5 | 99 / 99 | 571 / 558 | 56.7 | 46 ms |
+| a10 bridge | astc | cold | 49.6 | 296 | 28.3 | 97 | 2716 | 24.3 (11.3 DXT) | 284 ms |
+| a10 bridge | astc | warm | 49.9 / 49.4 | 269 / 314 | 26.7 / 28.3 | 99 / 99 | 716 / 694 | 24.3 | 257 ms |
+| b30 beach | guest | cold | 47.6 | 585 | 31.4 | 98 | 3161 | 137.4 | in guest |
+| b30 beach | guest | warm | 47.5 / 46.9 | 593 / 603 | 31.6 / 32.3 | 99 / 99 | 596 / 572 | 137.3 | in guest |
+| b30 beach | exact | cold | 48.1 | 565 | 31.0 | 98 | 3217 | 137.0 (52.6 DXT) | 182 tex, 7.8 MiB, 50 ms |
+| b30 beach | exact | warm | 47.9 / 47.2 | 576 / 601 | 31.2 / 32.1 | 99 / 99 | 576 / 584 | 136.8 | 47 ms |
+| b30 beach | astc | cold | 48.3 | 575 | 31.0 | 98 | 3267 | 98.3 (14.0 DXT) | 252 ms |
+| b30 beach | astc | warm | 47.4 / 46.9 | 599 / 629 | 31.7 / 32.0 | 99 / 99 | 738 / 733 | 98.6 | 236-249 ms |
+
+Batch 2 is the ordering and storage check: a10 bridge only, in the reverse
+order exact, then exact with `HALO_METAL_TEXTURE_SHARED=1`, then guest
+(~9 min):
+
+| format | cold fps | warm fps | warm steady >33.3 ms | warm steady GPU mean ms |
+|---|---|---|---|---|
+| exact (private storage) | 54.1 | 52.6 / 52.3 | 207 / 216 | 24.0 / 25.6 |
+| exact, shared storage | 51.8 | 51.4 / 51.5 | 232 / 236 | 24.5 / 24.9 |
+| guest | 51.5 | 51.6 / 51.2 | 239 / 246 | 25.8 / 26.4 |
+
+## What the device shows
+
+- **No measurable fps or GPU-time effect from the texture format at 4K.**
+  - In both batches the format run *first* was the fastest. In batch 1 exact
+    trailed guest by 1.6 fps on the bridge; in batch 2 exact led guest by
+    1.0 fps.
+  - Run order and session drift (thermal) move bridge fps by ~2, more than
+    any format does. Every run is still GPU-bound at 97-99% busy.
+  - On b30 all three formats agree within 0.5 fps (47.1-47.5 warm).
+  - ASTC, at a quarter of the texture bytes, is no faster than BGRA8 on
+    either scene. So texture bandwidth is not what limits the A12 at 4K;
+    fill and blending (#101's area) are.
+  - Private storage, which lets the A12 compress losslessly, against shared
+    storage: +1 fps in batch 2, within the same noise.
+- **Memory:** the clear, real effect of ASTC.
+  - Sampled textures, bridge: 56.7 MiB to 24.3 MiB (-32 MiB, -57%).
+  - Sampled textures, b30: 137.3 MiB to 98.5 MiB (-39 MiB, -28%).
+  - The DXT part shrinks 4x (43.7 to 11.3 MiB and 52.6 to 14.0 MiB).
+    `exact` uses the same memory as `guest`.
+- **Load time:**
+  - `exact` converts a scene's DXT in 46-50 ms on the A12. Its load frame
+    is the same as `guest`'s within noise (558-584 ms against 572-596 ms
+    warm), so moving the decode out of the wasm2c guest did not measurably
+    shorten the load.
+  - `astc` costs 236-284 ms of encoding per scene. That adds ~140 ms to the
+    warm load frame (694-738 ms) and ~130 ms to the cold one.
+  - Cold load frames (2.6 s bridge, 3.2 s b30) are ~3 s of shader compiles
+    whatever the format: texture conversion is not part of the cold-load
+    problem.
+- **Conclusion:**
+  - The default stays `exact`: identical texels, the same speed, no decode
+    in the guest.
+  - `astc` stays opt-in. It saves 32-39 MiB of texture memory at these
+    scenes, gains no fps, costs ~0.15-0.3 s per load, and has the fidelity
+    loss measured above. It is worth enabling only if memory pressure ever
+    matters on the TV (an app-memory limit or jetsam).
+  - No on-disk transcode cache: `exact` is fast enough, and caching `astc`
+    would only win back ~0.25 s per load.
