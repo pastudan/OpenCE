@@ -2,9 +2,11 @@
 """The TV game's play telemetry (port/macos/host/host_telemetry.h), on the Mac.
 
     export DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer
-    # the new or grown sessions copied off the Apple TV (the app need not run;
-    # reads only, nothing is copied to the TV):
-    python3 tools/tv_telemetry.py pull [--archive DIR] [--device ID]
+    # the new or grown sessions copied off the Apple TV (the app need not run,
+    # and may: a session's closed parts are static; reads only, nothing is
+    # copied to the TV), and with --watch again every N seconds, printing the
+    # new hitches over 200 ms and lag stretches as they come:
+    python3 tools/tv_telemetry.py pull [--archive DIR] [--device ID] [--watch N]
     # what they say, as markdown (a session's file, or folders of them):
     python3 tools/tv_telemetry.py report [PATH ...] [--out report.md] [--last N]
     # the lines as the TV writes them, over the local network (the TV's
@@ -13,8 +15,14 @@
 
 The archive (--archive, default ~/code/halo/tv-telemetry, outside the
 repository) keeps a folder per device: <archive>/<device>/<session>.jsonl.
-The TV keeps its newest 40 sessions, at most 200 MB (host_telemetry.c), so
-pull after each play session.
+The TV writes a session in parts, <UTC start>-<pid>.p001.jsonl, .p002, ...,
+of at most 8 MB or 30 minutes, each beginning with the session's line and
+its "part" (older builds: one <UTC start>-<pid>.jsonl); the report takes a
+session's parts as one session. A part still being written can fail to copy
+(devicectl breaks off a growing file at 10 MB): the pull retries it, keeps
+the most it got, and says what it skipped. The TV keeps its newest 40
+sessions, at most 200 MB (host_telemetry.c), so pull after each play
+session.
 
 The records: one JSON object a line, "k" its kind (host_telemetry.h):
 "session", "s" (a second), "hitch" (a frame over 50 ms), "event", "end".
@@ -26,9 +34,12 @@ import json
 import math
 import os
 from pathlib import Path
+import re
 import socket
 import statistics
+import subprocess
 import sys
+import time
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import tvos_deploy as deploy  # noqa: E402
@@ -41,6 +52,14 @@ THERMAL = ("nominal", "fair", "serious", "critical")
 BUCKET = 10.0
 # a second counts as laggy with this many display slots missed (of 60)
 LAG_MISSED = 3
+# what pull --watch calls out: a hitch over this many ms, or this many
+# seconds in a row of at least this many frames over 33 ms or slots missed
+WATCH_HITCH_MS = 200.0
+WATCH_SECONDS = 2
+WATCH_BAD = 10
+# copies of a part still being written, at most
+COPY_ATTEMPTS = 4
+PART = re.compile(r"\.p(\d+)\.jsonl$")
 
 
 # ---------- reading
@@ -71,18 +90,32 @@ def session_files(paths):
     return files
 
 
+def session_of(name):
+    """a file's session (its name up to the first '.': <UTC start>-<pid>)
+    and its part (1 for a file of one part)"""
+    name = Path(name).name
+    match = PART.search(name)
+    return name.split(".", 1)[0], int(match.group(1)) if match else 1
+
+
 def load_sessions(paths, last=None):
-    """[{name, session, seconds, hitches, events, end}], oldest first"""
-    sessions = []
+    """[{name, session, seconds, hitches, events, end, parts, paths}], oldest
+    first: a session's parts (the same start and pid) one session, in order"""
+    groups = collections.defaultdict(list)
     for path in session_files(paths):
-        records = read_lines(path)
-        if not records:
-            continue
+        name, part = session_of(path)
+        groups[(str(path.parent), name)].append((part, path))
+    sessions = []
+    for (_, name), parts in groups.items():
+        parts.sort()
         kinds = collections.defaultdict(list)
-        for record in records:
-            kinds[record.get("k")].append(record)
-        sessions.append({"name": path.stem, "path": str(path),
-                         "session": (kinds["session"] or [{}])[0], "seconds": kinds["s"],
+        for _, path in parts:
+            for record in read_lines(path):
+                kinds[record.get("k")].append(record)
+        if not any(kinds.values()):
+            continue
+        sessions.append({"name": name, "path": str(parts[0][1]), "paths": [str(p) for _, p in parts],
+                         "parts": len(parts), "session": (kinds["session"] or [{}])[0], "seconds": kinds["s"],
                          "hitches": kinds["hitch"], "events": kinds["event"], "end": (kinds["end"] or [None])[-1]})
     sessions.sort(key=lambda s: s["name"])
     if last:
@@ -521,14 +554,14 @@ def report(sessions):
 # ---------- pulling
 
 def remote_sessions(device, list_json):
-    """the TV's session files: {name: size}; {} when it has none"""
-    deploy.run(["xcrun", "devicectl", "device", "info", "files", "--device", device,
-                "--domain-type", "appDataContainer", "--domain-identifier", deploy.BUNDLE,
-                "--subdirectory", REMOTE, "--no-recurse", "--json-output", list_json],
-               check=False, capture=True, timeout=180)
+    """the TV's session files: {name: size}; {} when it has none (or cannot say)"""
     try:
+        deploy.run(["xcrun", "devicectl", "device", "info", "files", "--device", device,
+                    "--domain-type", "appDataContainer", "--domain-identifier", deploy.BUNDLE,
+                    "--subdirectory", REMOTE, "--no-recurse", "--json-output", list_json],
+                   check=False, capture=True, timeout=180)
         files = json.loads(Path(list_json).read_text())["result"]["files"]
-    except (OSError, ValueError, KeyError):
+    except (OSError, ValueError, KeyError, TypeError, subprocess.SubprocessError):
         return {}
     return {entry["name"]: entry.get("metadata", {}).get("size", 0) for entry in files
             if entry.get("name", "").endswith(".jsonl") and not entry.get("resources", {}).get("isDirectory")}
@@ -544,17 +577,148 @@ def to_pull(remote, archive):
     return names
 
 
-def pull(device, archive):
+def newest_parts(names):
+    """each session's newest part: the one that may still be growing"""
+    newest = {}
+    for name in names:
+        session, part = session_of(name)
+        if session not in newest or part > session_of(newest[session])[1]:
+            newest[session] = name
+    return set(newest.values())
+
+
+def copy_one(device, name, archive, attempts):
+    """a file copied off the TV to archive/name, never raising: "copied",
+    "partial" (a broken-off copy, the largest of the attempts, kept when it
+    is more than the archive had) or "skipped" """
+    best, best_size = None, -1
+    for attempt in range(attempts):
+        partial = archive / f"{name}.{attempt}.part"
+        partial.unlink(missing_ok=True)
+        try:
+            deploy.run(deploy.copy_args("from", device, f"{REMOTE}/{name}", partial), timeout=600)
+            ok = partial.is_file()
+        except (OSError, subprocess.SubprocessError) as error:
+            print(f"  copy of {name} failed (attempt {attempt + 1} of {attempts}): {str(error)[:200]}", flush=True)
+            ok = False
+        size = partial.stat().st_size if partial.is_file() else -1
+        if ok:
+            if best:
+                best.unlink(missing_ok=True)
+            partial.replace(archive / name)
+            return "copied"
+        if size > best_size:
+            if best:
+                best.unlink(missing_ok=True)
+            best, best_size = partial, size
+        else:
+            partial.unlink(missing_ok=True)
+    local = archive / name
+    have = local.stat().st_size if local.is_file() else 0
+    if best and best_size > have:
+        best.replace(local)
+        return "partial"
+    if best:
+        best.unlink(missing_ok=True)
+    return "skipped"
+
+
+def clean_parts(archive):
+    for leftover in Path(archive).glob("*.part"):
+        leftover.unlink(missing_ok=True)
+
+
+def pull(device, archive, quiet=False):
+    """(the device's folder, [names copied or partly copied], [names skipped]);
+    never raises for the TV's sake"""
     archive = Path(archive) / device[:8]
     archive.mkdir(parents=True, exist_ok=True)
+    clean_parts(archive)
     remote = remote_sessions(device, archive / ".remote.json")
     names = to_pull(remote, archive)
-    print(f"{len(remote)} sessions on the TV, {len(names)} new or grown", flush=True)
-    for name in names:
-        partial = archive / (name + ".part")
-        deploy.run(deploy.copy_args("from", device, f"{REMOTE}/{name}", partial), timeout=600)
-        partial.replace(archive / name)
-    return archive, names
+    growing = newest_parts(remote)
+    sessions = {session_of(name)[0] for name in remote}
+    if not quiet or names:
+        print(f"{len(remote)} files ({len(sessions)} sessions) on the TV, {len(names)} new or grown", flush=True)
+    pulled, skipped = [], []
+    try:
+        for name in names:
+            # (a closed part is static: a failure is the link's; the newest
+            # may be growing, which devicectl can break off at 10 MB)
+            result = copy_one(device, name, archive, COPY_ATTEMPTS if name in growing else 2)
+            if result == "skipped":
+                skipped.append(name)
+                print(f"warning: skipped {name} (it did not copy; the next pull tries again)", flush=True)
+            else:
+                pulled.append(name)
+                if result == "partial":
+                    print(f"warning: {name}: kept a partial copy "
+                          f"({(archive / name).stat().st_size} of {remote[name]} bytes)", flush=True)
+    finally:
+        clean_parts(archive)
+    if skipped:
+        print(f"skipped {len(skipped)}: {', '.join(skipped)}", flush=True)
+    return archive, pulled, skipped
+
+
+# ---------- watching
+
+def watch_alerts(sessions, seen):
+    """the lines worth calling out that seen (a set, updated) has not had:
+    hitches over WATCH_HITCH_MS, and WATCH_SECONDS or more seconds in a row
+    of WATCH_BAD frames over 33 ms or slots missed"""
+    lines = []
+    for session in sessions:
+        name = session["name"]
+        for hitch in session["hitches"]:
+            key = (name, "hitch", hitch.get("t"))
+            if hitch.get("wall_ms", 0) > WATCH_HITCH_MS and key not in seen:
+                seen.add(key)
+                cause, ms = hitch_cause(hitch)
+                lines.append(f"{name} t={hitch.get('t', 0) / 60.0:.2f} min HITCH {hitch.get('wall_ms', 0):.0f} ms "
+                             f"{hitch.get('map')} bsp {hitch.get('bsp')} {hitch.get('views')}v: {cause} "
+                             f"({ms:.0f} ms) {hitch.get('event') or ''}".rstrip())
+        run = []
+        for second in session["seconds"] + [None]:
+            if second is not None and (second.get("over33", 0) >= WATCH_BAD or second.get("missed", 0) >= WATCH_BAD):
+                run.append(second)
+                continue
+            if len(run) >= WATCH_SECONDS:
+                key = (name, "lag", run[0].get("t"))
+                # (a stretch still going when it was first seen is told again when it ends)
+                ended = second is not None
+                if key not in seen or (ended and (name, "lag-ended", run[0].get("t")) not in seen):
+                    if ended:
+                        seen.add((name, "lag-ended", run[0].get("t")))
+                    seen.add(key)
+                    lines.append(f"{name} t={run[0].get('t', 0) / 60.0:.2f} min LAG {len(run)} s"
+                                 f"{'' if ended else ' (so far)'} {run[-1].get('map')} bsp {run[-1].get('bsp')} "
+                                 f"{run[-1].get('views')}v: fps {mean(s.get('fps') for s in run):.1f}, "
+                                 f"missed {sum(s.get('missed', 0) for s in run)}, over 33 ms "
+                                 f"{sum(s.get('over33', 0) for s in run)}, GPU p95 "
+                                 f"{mean(s.get('gpu_p95') for s in run):.1f}, guest "
+                                 f"{mean(s.get('guest_ms') for s in run):.1f} ms")
+            run = []
+    return lines
+
+
+def watch(device, archive, interval):
+    seen, first = set(), True
+    try:
+        while True:
+            folder, _, _ = pull(device, archive, quiet=not first)
+            sessions = load_sessions([folder], last=1)
+            alerts = watch_alerts(sessions, seen)
+            if first:
+                print(f"watching {sessions[0]['name'] if sessions else '(no session yet)'} every {interval} s: "
+                      f"{len(alerts)} hitches and lag stretches so far (Ctrl-C ends)", flush=True)
+                first = False
+            else:
+                for line in alerts:
+                    print(line, flush=True)
+            time.sleep(interval)
+    except KeyboardInterrupt:
+        pass
 
 
 # ---------- live
@@ -596,6 +760,7 @@ def main(argv=None):
     p.add_argument("--device", default=deploy.DEVICE)
     p.add_argument("--archive", default=str(ARCHIVE))
     p.add_argument("--report", action="store_true", help="then report the newest session")
+    p.add_argument("--watch", type=float, metavar="N", help="pull again every N seconds, printing new trouble")
     p = sub.add_parser("report")
     p.add_argument("paths", nargs="*", help=f"sessions or folders (default: {ARCHIVE})")
     p.add_argument("--last", type=int, help="only the newest N sessions")
@@ -605,7 +770,10 @@ def main(argv=None):
     p.add_argument("--archive", default=str(ARCHIVE))
     args = parser.parse_args(argv)
     if args.command == "pull":
-        folder, names = pull(args.device, args.archive)
+        if args.watch:
+            watch(args.device, args.archive, max(5.0, args.watch))
+            return 0
+        folder, names, skipped = pull(args.device, args.archive)
         print(f"archive: {folder}")
         if args.report and (names or list(folder.glob("*.jsonl"))):
             print(report(load_sessions([folder], last=1)))

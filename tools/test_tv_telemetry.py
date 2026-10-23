@@ -103,6 +103,131 @@ def test_pull_copies_new_and_grown_files_only(tmp_path):
     assert tele.to_pull({"old.jsonl": 10, "grown.jsonl": 20, "new.jsonl": 5}, tmp_path) == ["grown.jsonl", "new.jsonl"]
 
 
+def write_parts(folder, stem, seconds, part_seconds, hitch_at=()):
+    """a session of seconds written as parts of part_seconds each, as the
+    recorder does: each part begins with the session's line and its part"""
+    folder.mkdir(parents=True, exist_ok=True)
+    head = {"k": "session", "v": 1, "t": 0, "start": stem.split("-")[0], "device": "AppleTV11,1, test",
+            "refresh_hz": 60.0, "pid": int(stem.split("-")[1])}
+    paths = []
+    for number, first in enumerate(range(0, seconds, part_seconds), 1):
+        lines = [dict(head, part=number)]
+        for t in range(first, min(seconds, first + part_seconds)):
+            lines.append(second(t))
+            if t in hitch_at:
+                lines.append({"k": "hitch", "t": t + 0.5, "wall_ms": 250.0, "compile_ms": 230.0, "map": "a10"})
+        path = folder / f"{stem}.p{number:03d}.jsonl"
+        path.write_text("\n".join(json.dumps(line) for line in lines) + "\n")
+        paths.append(path)
+    return paths
+
+
+def test_report_takes_a_sessions_parts_as_one_session(tmp_path):
+    write_parts(tmp_path, "20261023T020000Z-7", 250, 100, hitch_at={30, 220})
+    write_parts(tmp_path, "20261024T020000Z-8", 120, 50)
+    # an older build's session of one file sorts with them
+    (tmp_path / "20261022T020000Z-6.jsonl").write_text(json.dumps(second(0)) + "\n")
+    sessions = tele.load_sessions([tmp_path])
+    assert [s["name"] for s in sessions] == ["20261022T020000Z-6", "20261023T020000Z-7", "20261024T020000Z-8"]
+    first = sessions[1]
+    assert first["parts"] == 3 and [s["t"] for s in first["seconds"]] == [float(t) for t in range(250)]
+    assert len(first["hitches"]) == 2 and first["session"]["part"] == 1
+    # --last 1: the newest session, all of its parts
+    last = tele.load_sessions([tmp_path], last=1)
+    assert len(last) == 1 and last[0]["name"] == "20261024T020000Z-8" and len(last[0]["seconds"]) == 120
+    text = tele.report(last)
+    assert "| 20261024T020000Z-8 |" in text and "p00" not in text
+    assert tele.session_of("20261023T020000Z-7.p012.jsonl") == ("20261023T020000Z-7", 12)
+    assert tele.session_of("20261022T020000Z-6.jsonl") == ("20261022T020000Z-6", 1)
+    assert tele.newest_parts(["a-1.p001.jsonl", "a-1.p002.jsonl", "b-2.jsonl", "c-3.p009.jsonl",
+                              "c-3.p010.jsonl"]) == {"a-1.p002.jsonl", "b-2.jsonl", "c-3.p010.jsonl"}
+
+
+class FakeTV:
+    """devicectl, mocked: the TV's files, and copies that break off"""
+
+    def __init__(self, files, failures):
+        self.files, self.failures, self.copies = files, failures, []
+
+    def run(self, command, check=True, capture=False, timeout=None, **extra):
+        command = [str(part) for part in command]
+        if "info" in command:
+            listing = [{"name": name, "metadata": {"size": len(data)}, "resources": {"isDirectory": False}}
+                       for name, data in self.files.items()]
+            Path(command[command.index("--json-output") + 1]).write_text(json.dumps({"result": {"files": listing}}))
+            return subprocess.CompletedProcess(command, 0)
+        name = command[command.index("--source") + 1].rsplit("/", 1)[1]
+        destination = Path(command[command.index("--destination") + 1])
+        self.copies.append(name)
+        data = self.files[name]
+        broken = self.failures.get(name, [])
+        if broken:
+            # (devicectl leaves what it got, then fails)
+            got = broken.pop(0)
+            destination.write_bytes(data[:got])
+            raise subprocess.CalledProcessError(1, command, "socket closed unexpectedly")
+        destination.write_bytes(data)
+        return subprocess.CompletedProcess(command, 0)
+
+
+def test_pull_copies_closed_parts_once_and_never_crashes_on_the_growing_one(tmp_path, monkeypatch):
+    lines = lambda n: "".join(json.dumps(second(t)) + "\n" for t in range(n)).encode()
+    tv = FakeTV({"20261023T020000Z-7.p001.jsonl": lines(40), "20261023T020000Z-7.p002.jsonl": lines(40),
+                 "20261023T020000Z-7.p003.jsonl": lines(30)},
+                {"20261023T020000Z-7.p003.jsonl": [1000, 3000, 2000, 500]})
+    monkeypatch.setattr(tele.deploy, "run", tv.run)
+    folder, pulled, skipped = tele.pull("443953B8-TEST", tmp_path)
+    # the growing part: four tries, the largest partial kept
+    assert tv.copies.count("20261023T020000Z-7.p003.jsonl") == tele.COPY_ATTEMPTS
+    assert (folder / "20261023T020000Z-7.p003.jsonl").stat().st_size == 3000
+    assert sorted(pulled) == sorted(tv.files) and skipped == []
+    assert not list(folder.glob("*.part"))
+    # again: the closed parts are not copied again; the growing one is, and now copies whole
+    tv.copies.clear()
+    folder, pulled, skipped = tele.pull("443953B8-TEST", tmp_path)
+    assert tv.copies == ["20261023T020000Z-7.p003.jsonl"]
+    assert (folder / "20261023T020000Z-7.p003.jsonl").read_bytes() == tv.files["20261023T020000Z-7.p003.jsonl"]
+    sessions = tele.load_sessions([folder])
+    assert len(sessions) == 1 and len(sessions[0]["seconds"]) == 110
+    # a part that gives nothing at all: skipped with a warning, the others still copied, no crash
+    tv.files["20261023T020000Z-7.p004.jsonl"] = lines(5)
+    tv.files["20261024T020000Z-8.p001.jsonl"] = lines(5)
+    tv.failures["20261024T020000Z-8.p001.jsonl"] = [0, 0, 0, 0]
+    (folder / "stale.jsonl.0.part").write_text("x")
+    folder, pulled, skipped = tele.pull("443953B8-TEST", tmp_path)
+    assert skipped == ["20261024T020000Z-8.p001.jsonl"] and "20261023T020000Z-7.p004.jsonl" in pulled
+    assert not (folder / "20261024T020000Z-8.p001.jsonl").exists()
+    assert not list(folder.glob("*.part"))
+
+
+def test_pull_survives_a_tv_that_cannot_list(tmp_path, monkeypatch):
+    def broken(command, **extra):
+        raise subprocess.TimeoutExpired(command, 180)
+    monkeypatch.setattr(tele.deploy, "run", broken)
+    folder, pulled, skipped = tele.pull("443953B8-TEST", tmp_path)
+    assert pulled == [] and skipped == []
+
+
+def test_watch_calls_out_new_hitches_and_lag_once(tmp_path):
+    seconds = [second(t) for t in range(20)]
+    seconds[5]["missed"] = seconds[6]["missed"] = 12  # a stretch of two
+    seconds[9]["over33"] = 15  # one second only: not a stretch
+    session = {"name": "s", "seconds": seconds, "hitches": [{"t": 3.2, "wall_ms": 250.0, "compile_ms": 230.0},
+                                                            {"t": 4.0, "wall_ms": 120.0}]}
+    seen = set()
+    alerts = tele.watch_alerts([session], seen)
+    assert len(alerts) == 2 and "HITCH 250 ms" in alerts[0] and "shader compile" in alerts[0]
+    assert "LAG 2 s" in alerts[1] and "(so far)" not in alerts[1]
+    assert tele.watch_alerts([session], seen) == []
+    # a stretch still going at the end is told, then told again when it ends
+    session["seconds"] += [second(20, missed=10), second(21, missed=11)]
+    assert ["(so far)" in line for line in tele.watch_alerts([session], seen)] == [True]
+    session["seconds"] += [second(22)]
+    again = tele.watch_alerts([session], seen)
+    assert len(again) == 1 and "LAG 2 s" in again[0] and "(so far)" not in again[0]
+    assert tele.watch_alerts([session], seen) == []
+
+
 def test_pull_reads_from_the_app_container_only():
     source = (ROOT / "tools/tv_telemetry.py").read_text()
     assert 'copy_args("from"' in source and 'copy_args("to"' not in source
@@ -255,10 +380,12 @@ def test_recorder_writes_a_session_in_self_describing_parts(tmp_path):
         assert records[0]["start"] == stem.split("-")[0]
         # (a part ends at a whole line, and stays under its size but for one second's lines)
         assert part.read_text().endswith("\n") and part.stat().st_size < 4096 + 8192
-    records = [json.loads(line) for part in parts for line in part.read_text().splitlines()]
-    times = [r["t"] for r in records if r["k"] == "s"]
+    # the report sees one session of all the seconds, in order
+    sessions = tele.load_sessions([folder])
+    assert len(sessions) == 1 and sessions[0]["parts"] == len(parts)
+    times = [s["t"] for s in sessions[0]["seconds"]]
     assert times == sorted(times) and len(times) >= 18
-    assert records[-1]["k"] == "end" and sum(r["k"] == "hitch" for r in records) == 4
+    assert sessions[0]["end"] is not None and len(sessions[0]["hitches"]) == 4
 
 
 def test_recorder_never_syncs_or_writes_on_the_render_thread():
