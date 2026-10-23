@@ -2642,7 +2642,52 @@ phase fragment ms a frame (includes the split's 4K load+store):
 CPU cost: a few hundred triangles a frame clipped on the guest (the apply
 draws are small index ranges); not visible in the Mac's frame times.
 
-A12 before/after: **not measured yet** (see "What remains").
+### A12 (bedroom TV, 2026-10-23)
+
+One signed binary, `3a4a603a` (tv/shadows on tv/integrate `9b8dcc0a`:
+dynres on by default). A = `HALO_SHADOW_BOUNDS=0`, B = default. Warm,
+`HALO_RESOLUTION_SCALING=2160`, pass log on in every run, order A B B A.
+
+**Output mode: 1920x1080** for r1-A, r2-B and r3-B (bridge, b30). The owner
+switched the TV to 4K Dolby Vision during r3-B, ~20:25 UTC: r3-B's
+b30split ran at 3840x2160 (dynres 75% of 2160 lines, not comparable), and
+r3-B's split did not reach two views. The 1080p pairs are complete for
+bridge and b30 (A, B, B); r4-A was not run.
+
+At 1080p output dynres holds the scene at its floor, 50% of 2160 lines
+(1080 lines), and the frame at ~60 fps either way, so fps and frame-time
+counts cannot show the change; the screen pass's fragment time can:
+
+| scene (1080p output, 1080 lines) | run | fps | >33.3 | >50 | GPU ms/frame | screen pass fragment ms | shadow-map passes ms |
+|---|---|---|---|---|---|---|---|
+| bridge | r1-A | 59.67 | 1 | 1 | 14.71 | 13.36 | 0.11 |
+| bridge | r2-B | 59.99 | 0 | 0 | 14.74 | 13.28 | 0.12 |
+| bridge | r3-B | 59.92 | 1 | 0 | 14.77 | 13.28 | 0.12 |
+| b30 | r1-A | 59.95 | 1 | 1 | 14.65 | 12.35 | 0.13 |
+| b30 | r2-B | 59.95 | 1 | 1 | 14.63 | 12.26 | 0.14 |
+| b30 | r3-B | 59.95 | 1 | 1 | 14.65 | 12.31 | 0.14 |
+| split (a10) | r1-A | 59.96 | 0 | 0 | 14.81 | 12.92 | 0.17 |
+| split (a10) | r2-B | 59.94 | 0 | 0 | 14.88 | 12.78 | 0.20 |
+| b30split | r1-A | 59.96 | 0 | 0 | 14.69 | 12.43 | 0.16 |
+| b30split | r2-B | 59.96 | 0 | 0 | 14.69 | 13.08 (p50 12.42) | 0.19 |
+
+(GPU ms is the frame's span, which dynres steers to ~14.7 ms; the screen
+pass holds the apply.) With the clip the screen pass is 0.05-0.14 ms
+cheaper (bridge -0.08, b30 -0.04/-0.09, split -0.14; b30split's mean is
+pulled by one hitch, its p50 equal). At 1080 lines the apply covers a
+quarter of the 4K pixels, so this is the small end of the gain; at 1080p
+output the A12 already holds 60 with dynres at its floor, so the saving
+there buys headroom, not frames.
+
+**4K output: not measured.** The rerun at 3840x2160 (same binary) stopped
+at its first pass: 3 of 4 cold launches came up inactive and stopped
+(`lifecycle: launched inactive`, `stopped: GPU idle`; the saved state or
+the split views never reached), the one that ran (b30, cold) is not an
+A/B. Not retried (the coordinator's rule for a TV in a mode prompt or
+black screen), and the project was wrapped up after it. The Mac's
+4K numbers above are the evidence for 4K; an A12 4K ABBA (and the b30
+`HALO_DYNRES=0` pair) is what remains.
+
 
 ### Not done, and why
 
