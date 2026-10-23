@@ -2342,7 +2342,10 @@ code, its runtime, the host files that include it), built both ways:
 | split (2 views) | 1.38, 1.40 | 1.53, 1.57 | +0.16 ms (+12%) | 1.83 -> 1.91 |
 
 So explicit checks are 12-34% of the guest's main-thread time (the
-upper bound guard pages could give back). The A12 is ~3-4x slower per
+upper bound guard pages could give back). They are also code: the TV
+executable's `__text` is 8.85 MB with checks, 6.52 MB with guard pages
+(-26%; one translated file, `halo_5.c`, 375 KB -> 200 KB), less for the
+A12's instruction cache and branch predictors to hold. The A12 is ~3-4x slower per
 frame than the M4 here (guest 4.6-7 ms there), so on the TV the same
 share is roughly 0.5-1.5 ms a frame. Host ms and draws were the same
 in both builds.
