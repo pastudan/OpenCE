@@ -173,6 +173,13 @@ static const struct config_setting config_settings[] =
 		"draw their passes between the first and the last at half the\n"
 		"resolution, a quarter of the pixels: faster on a 4K screen, a\n"
 		"little softer. false draws them all at full resolution." },
+	{ "display.half_precision_shading", _config_boolean, "false", "HALO_HALF_PRECISION_SHADING", _environment_value,
+		_platform_desktop,
+		"Metal builds: the pixel shaders' combiner arithmetic and texture\n"
+		"samples in half precision, and alpha tests that leave a blended\n"
+		"pixel as it was instead of discarding it, which Apple's GPUs run\n"
+		"faster: a 4K screen draws sooner, and some pixels come out a level or\n"
+		"a few of 255 apart. false draws them as before." },
 	{ "display.menus", _config_string, "\"pc\"", "HALO_MENUS", _environment_value, _platform_all,
 		"The menus: \"pc\" for the PC version's main menu (port/assets/menus,\n"
 		"and a menus folder here for your own), \"xbox\" for the Xbox's." },

@@ -252,7 +252,28 @@ struct nv2a_pixel_shader_key
 	blend of a constant color factor with a constant alpha one, as the
 	meters' (shader_transparent_meter) */
 	unsigned char source_blend;
+	/* Metal: how the program is written (XGPU_SHADING_*), 0 as it always
+	was; d3d8_metal.c shading_flags */
+	unsigned char shading;
+	/* with XGPU_SHADING_ZERO_BIAS: the stages whose LOD bias is not 0 */
+	unsigned char lod_bias_stages;
 };
+
+/* nv2a_pixel_shader_key's shading (Metal; port/tvos/PERFORMANCE.md
+"Shading (A12)"):
+None is bit-identical to the old text (a few levels on some pixels), so
+all are display.half_precision_shading's (an opt-in), 0 by default:
+- HALF_COMBINERS: the register combiners and the final combiner in half
+  precision (the texture stages, fog and alpha test stay float);
+- HALF_SAMPLES: textures sampled as half and widened to float;
+- ZERO_ALPHA_TEST: an alpha test that fails gives the color 0 instead of
+  discarding, where the draw's blend makes 0 leave the target as it was
+  (set only then: d3d8_metal.c);
+- ZERO_BIAS: no bias() argument for a stage whose LOD bias is 0. */
+#define XGPU_SHADING_HALF_COMBINERS 1
+#define XGPU_SHADING_HALF_SAMPLES 2
+#define XGPU_SHADING_ZERO_ALPHA_TEST 4
+#define XGPU_SHADING_ZERO_BIAS 8
 
 char *nv2a_pixel_shader_to_glsl(const struct nv2a_pixel_shader_key *key);
 
