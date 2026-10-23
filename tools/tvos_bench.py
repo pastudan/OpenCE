@@ -458,12 +458,13 @@ def run_environment(run, frame_log="1", extra=None):
                    # (the play telemetry, on by default on the TV, off in a
                    # benchmark's runs unless --env asks: host_telemetry.h)
                    "HALO_TELEMETRY": "off"}
-    # (nopack: a cold launch without the bundled shader pack, as a build
-    # before it had: tools/shader_pack.py)
-    if run["mode"] == "nopack":
-        environment["HALO_METAL_SHADER_PACK"] = "0"
     environment.update(SCENES.get(run["scene"], {}).get("env", {}))
     environment.update(extra or {})
+    # (nopack: a cold launch without the bundled shader pack, as a build
+    # before it had: tools/shader_pack.py; over --env's pack, which a Mac
+    # run, with no bundle, names)
+    if run["mode"] == "nopack":
+        environment["HALO_METAL_SHADER_PACK"] = "0"
     return environment
 
 

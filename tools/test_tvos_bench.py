@@ -158,6 +158,10 @@ def test_nopack_runs_are_cold_without_the_bundled_pack():
     environments = [bench.run_environment(run) for run in (cold, nopack)]
     assert [e["HALO_METAL_SHADER_CACHE_RESET"] for e in environments] == ["1", "1"]
     assert "HALO_METAL_SHADER_PACK" not in environments[0] and environments[1]["HALO_METAL_SHADER_PACK"] == "0"
+    # (a pack named for every run, as on the Mac, is left out of nopack's)
+    extra = {"HALO_METAL_SHADER_PACK": "/x/metal_shaders.pack"}
+    assert bench.run_environment(cold, extra=extra)["HALO_METAL_SHADER_PACK"] == "/x/metal_shaders.pack"
+    assert bench.run_environment(nopack, extra=extra)["HALO_METAL_SHADER_PACK"] == "0"
 
 
 def test_split_scene_starts_at_two_views_that_hold():
