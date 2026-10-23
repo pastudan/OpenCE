@@ -492,11 +492,128 @@ bridge, b30 and cryo all ran their windows with no GPU errors; passes
 7.4 / 12.0 / 9.6 a frame (as the Mac); the simulator cannot sample at stage
 boundaries, so no per-pass times there. Its frame times are the Mac GPU's.
 
-## Device: pending
+## Device results (A12, 2026-10-22)
 
-Batch prepared (`<scratch>/bw/device-session.sh`): one install of the
-private signed copy (`<scratch>/tv-deploy-bandwidth/OpenCETV.app`, commit
-c3ad3460), then on the same binary: hoisting off vs on vs on + depth
-discard, warm, bridge/b30/cryo at 3840x2160, two repeats in alternating
-order, plus the pass log (phase split, and hoisted) for the A12 per-phase
-table. Waiting for the owner.
+One session on the owner's Apple TV 4K (A12, tvOS 27.0), integrated build
+**tv/integrate `3ed14e70`** (tv/shaders + tv/bandwidth + tv/textures,
+`HALO_TEXTURE_FORMAT` at its default `exact`), installed once from
+`<scratch>/tv-deploy-integrate`; before/after are environment switches on
+that one binary (`HALO_METAL_HOIST=0` = before). 3840x2160, high-res HUD,
+steady window (scene minus its first 5 s), all warm except the first
+before-run of each scene. Order: r1-before (cold, warm), r1-hoist,
+r1-hoist+discard, r2-hoist+discard, r2-hoist, r2-before, pass-split,
+pass-hoist (~32 min of runs). config.toml/init.txt restored and verified
+identical after every batch (16/16). Raw: `<scratch>/tvbench-out/device-bandwidth`.
+The A12 **does** sample timestamps at stage boundaries (`stage 1`), so the
+pass log has real per-pass GPU times on the TV.
+
+| run | scene | fps | p50 | p95 | p99 | >33.3 | >50 | GPU busy % | passes |
+|---|---|---|---|---|---|---|---|---|---|
+| r1 before (cold) | bridge | 54.3 | 16.7 | 33.5 | 33.7 | 140 | 2 | 95.7 | 9.8 |
+| r1 before | bridge | 54.8 | 16.7 | 33.5 | 33.7 | 150 | 0 | 96.4 | 9.8 |
+| r1 hoist | bridge | 56.0 | 16.7 | 33.5 | 33.6 | 114 | 0 | 99.9 | 7.3 |
+| r1 hoist+discard | bridge | 55.0 | 16.7 | 33.5 | 33.7 | 145 | 0 | 99.9 | 7.2 |
+| r2 hoist+discard | bridge | 54.3 | 16.7 | 33.5 | 33.7 | 158 | 0 | 99.9 | 7.3 |
+| r2 hoist | bridge | 52.0 | 16.7 | 33.6 | 33.7 | 221 | 0 | 99.9 | 7.3 |
+| r2 before | bridge | 50.7 | 16.7 | 33.6 | 33.8 | 259 | 0 | 97.5 | 9.8 |
+| r1 before (cold) | b30 | 49.6 | 16.7 | 33.5 | 33.6 | 437 | 0 | 100 | 18.0 |
+| r1 before | b30 | 49.4 | 16.7 | 33.5 | 33.6 | 449 | 0 | 100 | 18.0 |
+| r1 hoist | b30 | 53.8 | 16.7 | 33.5 | 33.6 | 287 | 0 | 100 | 12.0 |
+| r1 hoist+discard | b30 | 53.7 | 16.7 | 33.5 | 33.6 | 290 | 0 | 100 | 12.0 |
+| r2 hoist+discard | b30 | 51.1 | 16.7 | 33.5 | 33.6 | 394 | 0 | 100 | 12.0 |
+| r2 hoist | b30 | 47.7 | 16.7 | 33.6 | 33.6 | 581 | 0 | 100 | 12.0 |
+| r2 before | b30 | 41.5 | 16.8 | 33.6 | 33.6 | 802 | 0 | 100 | 18.0 |
+| r1 before (cold) | cryo | 57.8 | 16.7 | 16.9 | 33.6 | 69 | 21 | 91.9 | 13.2 |
+| r1 before | cryo | 57.7 | 16.7 | 16.9 | 50.0 | 60 | 32 | 92.0 | 13.1 |
+| r1 hoist | cryo | 58.3 | 16.7 | 17.0 | 33.4 | 52 | 11 | 100 | 9.2 |
+| r1 hoist+discard | cryo | 57.7 | 16.7 | 17.0 | 50.0 | 56 | 31 | 100 | 9.1 |
+| r2 hoist+discard | cryo | 57.9 | 16.7 | 16.9 | 50.0 | 51 | 31 | 100 | 9.1 |
+| r2 hoist | cryo | 57.9 | 16.7 | 16.9 | 50.1 | 49 | 30 | 100 | 9.1 |
+| r2 before | cryo | 57.0 | 16.7 | 17.0 | 50.0 | 86 | 34 | 97.9 | 13.1 |
+
+(p95 is pinned at 33.5 ms whenever more than 5% of frames miss a vsync, so
+it cannot show these gains; the >33.3 count and fps can. GPU busy rises to
+100% with hoisting because more frames are drawn in the same time.)
+
+Reading it, with care for a drift through the session (below): compare
+runs that were adjacent in time. r1-before -> r1-hoist (consecutive):
+b30 49.4 -> 53.8 fps (+9%), frames over 33 ms 449 -> 287; bridge
+54.8 -> 56.0 (+2%), 150 -> 114. r2-hoist -> r2-before (consecutive):
+b30 47.7 vs 41.5 (+15%), 581 vs 802; bridge 52.0 vs 50.7 (+3%), 221 vs
+259. Cryo: fps the same (57-58: it holds 60 except the first ~10 s, the
+tutorial's convolution), frames over 33 ms 60/86 -> 52/49; frames over
+50 ms not reliably better (32/34 -> 11/30). **Hoisting helps b30 by ~10-15%
+and bridge by ~2-3% on the A12, but no scene reaches 60 fps at 4K.**
+
+**Depth discard** (`HALO_METAL_DEPTH_DISCARD=present`): no gain beyond the
+noise (r1 b30 53.7 vs 53.8; r2 runs favour whichever ran earlier). 0 loads
+after a discard. Leave it off.
+
+### Why: the A12 is shading-bound, not attachment-bound
+
+The hoisted pass log on the TV shows the frame is now one 4K pass plus tiny
+ones, with attachment traffic down to ~75-90 MB a frame (b30 before: the
+split run moved 1.4 + 1.5 GB). That one pass's fragment stage takes:
+
+| scene | the screen pass's fragment time (A12, hoisted) | budget |
+|---|---|---|
+| a10 bridge | 17.9 ms | 16.7 |
+| b30 beach | 19.9 ms | 16.7 |
+| cryo bay (after the blur) | 13.5 ms | 16.7 |
+
+Each extra 4K load+store pass cost 0.4-0.6 ms on the A12 (from the split
+run: 15-19 more 4K passes added 6.7-9.6 ms), so the 3-6 reloads hoisting
+removed were worth ~1.5-3.5 ms: real, but the remainder is shading and
+blending of the scene itself.
+
+### Per-phase GPU time (A12, pass per phase, diagnostic)
+
+Fragment ms a frame with `HALO_METAL_PASS_SPLIT=phase`, hoisting off.
+Each phase pass carries a 4K load+store (~0.4-0.6 ms) the real frame does
+not, so subtract roughly that from each line; the ranking holds.
+
+| scene | phases, fragment ms/frame (A12) | sum |
+|---|---|---|
+| bridge | diffuse lights 4.03, reflections 3.66, textures 3.04, queued transparents 2.90, specular 2.19, lightmaps 2.06, sky 2.01, fog planes 1.99, reflection masks 1.98, shadows (screen) 1.95, models 1.09 | 27.8 |
+| b30 | **queued transparents 10.06**, shadows 3.55, textures 3.06, fog planes 2.36, lightmaps 2.00, sky 1.98, models 1.85, HUD 1.06 | 27.1 |
+| cryo | reflections 4.10, textures 3.28, shadows 2.93, fog planes 2.38, reflection masks 2.17, lightmaps 2.06, models 1.51, transparents 1.36, screen effect 0.40 | 20.7 |
+
+The b30 transparents (the firefight's particles, plasma and effects) are
+the single biggest cost anywhere; the a10 fog planes are ~2-2.4 ms in both
+a10 scenes (less 0.5 ms of split overhead: ~1.5-1.9 ms), not the limiter.
+
+### Drift and the owner's "lag that builds up"
+
+- Within a run (10 s buckets, `<scratch>/bw/device-drift.txt`): no steady
+  drift; b30 is flat (e.g. r2-before 43.0, 39.8, 41.9, 41.6, 42.4, 41.9
+  fps). The bridge's third 10 s is slow in every run (scene content).
+- **Across the session, yes:** the same configuration got slower the
+  longer the TV had been at 100% GPU: b30 before 49.4 fps (~0-5 min in)
+  -> 41.5 (~25 min in); b30 hoisted 53.8 -> 47.7 -> 47.7 (end of
+  session). That is a ~12-15% loss over ~25-30 min of sustained full GPU
+  load, which looks like thermal throttling (not measured: thermalState is
+  not in the frame log, and no code was added for it). It fits the
+  owner's report of late-a10 slowdowns, and it means the A12 needs margin
+  below 16.7 ms, not just to reach it. Logging
+  `NSProcessInfo.thermalState` per interval would confirm it.
+
+## What remains for 4K60 on the A12
+
+Bandwidth work is largely done (one 4K pass a frame). The remaining gap is
+fragment work: bridge needs ~1-2 ms less, b30 ~3-4 ms less, *plus*
+headroom for thermal throttling (~15%). That requires a quality trade-off
+or a resolution change; none is implemented (owner's decision). Options,
+with the evidence for their size:
+
+1. **Dynamic resolution / a lower 4K render scale** (e.g. 1800p or 1872p
+   upscaled to 2160p): fragment time scales roughly with pixels; 1800p is
+   69% of 4K's pixels, ~-5 to -6 ms on b30. Simplest, covers every scene,
+   costs sharpness. 1080p already holds 58-60 fps.
+2. **Transparents at half resolution** (render queued transparents into
+   a half-res target and composite): b30 ~10 ms -> ~3-4 ms (A12 split
+   numbers); softer particles/effects. A real feature, not a switch.
+3. **Screen convolution at half resolution** (cryo's tutorial blur and
+   scopes): removes the cryo bay's first-10 s dip (convolution frames run
+   ~41-45 fps); a blur loses little at half res.
+4. **ASTC/compressed textures** (#103's `HALO_TEXTURE_FORMAT=astc`):
+   texture sampling bandwidth, measured separately by #103.
