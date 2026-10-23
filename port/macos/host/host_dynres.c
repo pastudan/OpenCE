@@ -15,21 +15,23 @@ frames were late; a late frame whose GPU time was short was late for the
 CPU's sake (a load, a shader compile), which no resolution helps.
 
 So the controller
-- goes down when the GPU is the reason frames are late: a frame shown late
-  whose GPU time was hot (not a load's), a frame past 1.1 intervals (one
-  step; the model's jump only once confirmed: two such of the last eight,
-  or one late), 16 hot
-  frames in the last 64 (25%: at a step the GPU holds, 3-7% of frames are
-  hot from the clock's own regulation), or any frame past 1.5 intervals
-  (split screen's 4-5x spikes): at once, as far as a model of the cost says
-  when the frame's time is the real cost (past the interval: a fixed part,
-  fixed_share, and a part in proportion to the pixels), else one step;
-- goes up only by trying: a step, after up_frames frames in a row none of
-  them late or over, at most 10% hot, and hold_ms since the last step down
-  (four times as long while the device is hot: thermalState serious); if
-  within probe_frames the step shows a GPU-late frame, two frames over of
-  eight, or 25% hot, it goes back and waits twice as long before trying that step
-  again (8, 16, 32 ... s, at most hold_most_ms), and a step that held
+- goes down when the GPU is the reason frames are late: a frame the display
+  showed late whose GPU time was hot (not a load's, not a compile's), half
+  of the last eight frames past 1.1 intervals (a few such frames are
+  absorbed by the drawables queued ahead: on device none of 29 pairs of
+  18-28 ms frames was shown late), 16 hot frames of the last 64 (25%: at a
+  step the GPU holds, 3-7% of frames are hot from the clock's own
+  regulation), or one frame past 2.5 intervals (split screen's fights): at
+  once, as far as a model of the cost says when the frame's time is the
+  real cost (past the interval: a fixed part, fixed_share, and a part in
+  proportion to the pixels), else one step;
+- goes up only by trying: a step, after up_frames frames in a row with none
+  late for the GPU's sake nor two over together, at most 10% hot, and
+  hold_ms since the last step down (four times as long while the device is
+  hot: thermalState serious); if within probe_frames the step shows a
+  GPU-late frame, three frames over of eight, or 25% hot, it goes back and
+  waits twice as long before trying that step again (8, 16, 32 ... s, at
+  most hold_most_ms), and a step that held
   stable_ms resets its wait. A failed try costs at most a frame late, a
   handful in the first minutes and then one in minutes; never shimmer;
 - keeps the ceiling at the display's lines (a 2160-line picture shown on a
@@ -74,8 +76,9 @@ const struct host_dynres_parameters host_dynres_defaults =
 2160 lines (56% of the pixels: two views of b30 at 2160 took ~26 ms of GPU
 a frame on the A12, measured in play, PERFORMANCE.md) */
 #define SPLIT_FIRST_STEP 5
-/* a frame's GPU time past this many display intervals steps down at once */
-#define VERY_HOT 1.5
+/* a frame's GPU time past this many display intervals steps down at once
+(split screen's fights: 80-109 ms frames for seconds, Capital OFFICE) */
+#define VERY_HOT 2.5
 /* a frame past this many intervals is over whatever else it shows */
 #define OVER 1.1
 /* hot frames of the last 64 that step down (25%: device frames at a step
@@ -261,9 +264,11 @@ static void frame_counted(double gpu_ms, int late, double slot_ms, uint32_t lowe
 	dynres.recent_hot = dynres.recent_hot << 1 | (uint64_t)hot;
 	dynres.recent_over = (dynres.recent_over << 1 | (uint32_t)over) & 0xff;
 	over_count = (uint32_t)__builtin_popcount(dynres.recent_over);
-	/* (a frame over by itself may be a one-off: a texture's upload, the
-	first frame of a view; two of the last eight are the load's) */
-	confirmed = gpu_late || over_count >= 2 || gpu_ms > VERY_HOT * slot_ms;
+	/* (frames over the interval are absorbed by the drawables queued ahead
+	while they are few: on device 29 pairs of 18-28 ms frames in a row
+	showed none late. Late on the display for the GPU's sake, half of the
+	last eight over, or one past VERY_HOT intervals is the load's) */
+	confirmed = gpu_late || over_count >= 4 || gpu_ms > VERY_HOT * slot_ms;
 	hot_count = (uint32_t)__builtin_popcountll(dynres.recent_hot &
 		(dynres.frames_at_step >= 64 ? ~0ull : (1ull << dynres.frames_at_step) - 1));
 	if (late)
@@ -279,13 +284,13 @@ static void frame_counted(double gpu_ms, int late, double slot_ms, uint32_t lowe
 		/* (a step being tried: its first frame late for the GPU's sake,
 		over the interval, or a hot rate past HOT_RATE_PROBE, and it goes
 		back) */
-		down = confirmed || (dynres.probe_frames >= 64 && hot_count >= HOT_RATE_PROBE);
+		down = confirmed || over_count >= 3 || (dynres.probe_frames >= 64 && hot_count >= HOT_RATE_PROBE);
 	}
 	else
 	{
 		/* (a frame of more than VERY_HOT intervals: at once, whatever came
 		before it: split screen's 4-5x spikes in combat) */
-		down = gpu_ms > VERY_HOT * slot_ms || (dynres.frames_at_step >= p->down_frames && (gpu_late || over)) ||
+		down = (dynres.frames_at_step >= p->down_frames && confirmed) ||
 			(dynres.frames_at_step >= 64 && hot_count >= HOT_RATE_DOWN);
 	}
 	if (down && dynres.step < lowest)
@@ -325,8 +330,9 @@ static void frame_counted(double gpu_ms, int late, double slot_ms, uint32_t lowe
 		dynres.hold[dynres.step] = p->hold_ms;
 		dynres.probing = 0;
 	}
-	/* up: up_frames in a row with none late or over, and few hot */
-	if (!late && !over)
+	/* up: up_frames in a row with none late for the GPU's sake nor two over
+	together, and few hot */
+	if (!gpu_late && over_count < 2)
 	{
 		dynres.clear_frames++;
 		dynres.clear_hot += hot;
