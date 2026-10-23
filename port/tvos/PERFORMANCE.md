@@ -1634,3 +1634,53 @@ restored and verified identical after each (40/40 files). Raw:
   `43a9726d` (down on a GPU-late frame, a frame past 1.1 intervals, 16 hot
   of 64, or any past 1.5 intervals; up after a run with none late or over
   and at most 10% hot); session 3 measures it.
+
+## Device: sessions 3 and 4, the controller's measuring (A12, bedroom TV, 1080p output)
+
+Same harness as session 2; B at the 2160-line ceiling (the 4K output's
+load) unless marked. Raw: `<scratch>/tvbench-out/device-dynres3`, `-4`.
+
+Session 3 (`1508b94d`: "16 hot of 64" instead of "3 hot of 8"):
+
+| run | scene | frames | fps | wall p95 | p99 | >16.7 | >33.3 | >50 | missed | GPU p50 | GPU p95 | lines mean | lines min | valid |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| b30split-A1 | b30split | 3346 | 55.8 | 33.416 | 33.559 | 1261 | 236 | 0 | 250 | 25.301 | 32.59 | 2160 | 2160 | yes |
+| b30split-B1 | b30split | 3597 | 60.0 | 16.836 | 16.928 | 1260 | 0 | 0 | 0 | 14.719 | 15.695 | 1143 | 1080 | yes |
+| b30split-B2 | b30split | 3597 | 60.0 | 16.818 | 16.91 | 1242 | 0 | 0 | 0 | 14.756 | 15.617 | 1143 | 1080 | yes |
+| b30split-A2 | b30split | 3218 | 53.7 | 33.488 | 33.591 | 1239 | 348 | 0 | 379 | 26.824 | 34.405 | 2160 | 2160 | yes |
+| split-B1 | split | 2998 | 60.0 | 16.813 | 16.898 | 1142 | 0 | 0 | 0 | 15.106 | 15.668 | 1711 | 1620 | yes |
+| bridge-B1 | bridge | 2096 | 59.9 | 16.929 | 17.1 | 902 | 1 | 0 | 0 | 15.024 | 16.223 | 1441 | 1440 | yes |
+| b30-B1 | b30 | 3596 | 59.9 | 16.847 | 16.966 | 1376 | 3 | 1 | 0 | 14.847 | 15.647 | 1440 | 1440 | yes |
+| cryo-B1 | cryo | 2889 | 57.8 | 17.027 | 33.624 | 1205 | 104 | 1 | 113 | 14.799 | 36.533 | 1479 | 1440 | yes |
+| b30split-D (display ceiling) | b30split | 3597 | 60.0 | 16.82 | 16.911 | 1309 | 0 | 0 | 0 | 14.725 | 15.615 | 1080 | 1080 | yes |
+
+It stopped after its first moves: b30 split held 1152 lines for the whole
+run, a10 split 1728, single view 1440. The log showed why: "485 frames
+counted" from frame 3000 to the end. The guest hands each frame's fraction
+back as a float and the controller matched it against its double steps
+within 1e-9, so frames at any step but 1.0 and 0.5 were never counted
+again. Fixed in `c8228cf6` (1e-5; the model test now hands floats back
+and requires the controller to keep moving).
+
+Session 4 (`40380da8`, the fix):
+
+| run | scene | frames | fps | wall p95 | p99 | >16.7 | >33.3 | >50 | missed | GPU p50 | GPU p95 | lines mean | lines min | valid |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| b30split-B1 | b30split | 3596 | 60.0 | 16.849 | 16.946 | 1333 | 0 | 0 | 0 | 14.869 | 15.854 | 1528 | 1080 | yes |
+| b30split-B2 | b30split | 3597 | 60.0 | 16.833 | 16.922 | 1291 | 0 | 0 | 0 | 14.74 | 15.777 | 1338 | 1080 | yes |
+| b30split-A | b30split | 3223 | 53.7 | 33.517 | 33.605 | 1265 | 344 | 0 | 374 | 26.752 | 34.191 | 2160 | 2160 | yes |
+| split-B1 | split | 2998 | 60.0 | 16.801 | 16.879 | 1108 | 0 | 0 | 0 | 15.072 | 17.029 | 1101 | 1080 | yes |
+| bridge-B1 | bridge | 2096 | 59.9 | 16.93 | 17.115 | 865 | 0 | 0 | 0 | 15.036 | 16.163 | 1524 | 1440 | yes |
+| b30-B1 | b30 | 3595 | 59.9 | 16.871 | 16.983 | 1430 | 2 | 1 | 0 | 14.877 | 15.89 | 1579 | 1440 | yes |
+| cryo-B1 | cryo | 2885 | 57.7 | 17.015 | 33.624 | 1217 | 99 | 1 | 115 | 14.85 | 36.684 | 1586 | 1440 | yes |
+
+- Now it moves and the misses stay at 0: b30 split mean 1528 / 1338
+  lines (1080-1800) with 0 missed against 374 off; bridge 1524, b30 1579
+  (0 missed each, against 176-452 off in session 2).
+- a10 split mean only 1101: one frame past the interval as the views
+  changed (the cinematic's cut to two views, 233 s) sent it from 1620 to
+  1080 with the model's jump, and single over-frames failed its tries up.
+  Fixed in `83ead8a9`: a lone frame over steps down one step; the model's
+  jump and a failed try need two over of eight, a GPU-late frame or one
+  past 1.5 intervals.
+- cryo's 115 missed are its first 10 s (the screen convolution, above).
