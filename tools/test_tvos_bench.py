@@ -174,3 +174,14 @@ def test_latelag_scene_moves_both_players_between_two_areas():
     assert 'config_string("debug.test_commands")' in game and "hs_compile_and_evaluate(command)" in game
     config = (ROOT / "port/linux/src/port_config.c").read_text()
     assert '{ "debug.test_commands", _config_string, "\\"\\"", "HALO_TEST_COMMANDS"' in config
+
+
+def test_multimap_scene_changes_maps_and_pushes_them():
+    scene = bench.SCENES["multimap"]
+    commands = scene["env"]["HALO_TEST_COMMANDS"].split(";")
+    assert [c for c in commands if "map_name" in c] == [
+        "300 (map_name levels\\b30\\b30)", "300 (map_name levels\\b40\\b40)", "300 (map_name levels\\c10\\c10)",
+        "300 (map_name levels\\b30\\b30)"]
+    assert set(scene["maps"]) == {"b30.map", "b40.map", "c10.map"}
+    source = (ROOT / "tools/tvos_bench.py").read_text()
+    assert 'SCENES[run["scene"]].get("maps", ())' in source
