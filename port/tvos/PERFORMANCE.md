@@ -1742,3 +1742,65 @@ last 10 and 14.6 minutes; thermalState stayed nominal in both):
   20-26 min (1380-1880 a minute: wall p99 38.7 ms, fewer than 3500
   frames in 2 minutes, i.e. ~28 fps), GPU p50 26-30 ms. This is the
   owner's late-session b30 split-screen lag.
+
+## Device: session 6, the controller as it ships (`781db209`, A12, bedroom TV, 1080p output)
+
+The build installed on the TV at the end. B at the 2160-line ceiling (the
+4K output's load); A off at 2160. Raw: `<scratch>/tvbench-out/device-dynres6`;
+config.toml/init.txt restored and verified identical after each run (16/16).
+
+| run | scene | frames | fps | wall p95 | p99 | >16.7 | >33.3 | >50 | missed | GPU p50 | GPU p95 | lines mean | lines min | valid |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| b30split-A1 | b30split | 3278 | 54.6 | 33.454 | 33.577 | 1282 | 305 | 0 | 318 | 26.089 | 33.408 | 2160 | 2160 | yes |
+| b30split-B1 | b30split | 3597 | 60.0 | 16.851 | 16.953 | 1283 | 0 | 0 | 0 | 14.884 | 15.911 | 1627 | 1512 | yes |
+| split-B1 | split | 2998 | 60.0 | 16.823 | 16.913 | 1159 | 0 | 0 | 0 | 15.129 | 15.691 | 1972 | 1620 | yes |
+| b30split-B2 | b30split | 3597 | 60.0 | 16.848 | 16.966 | 1324 | 0 | 0 | 0 | 14.931 | 15.913 | 1631 | 1512 | yes |
+| split-A1 | split | 2998 | 60.0 | 16.829 | 16.914 | 1182 | 0 | 0 | 0 | 15.105 | 15.704 | 2160 | 2160 | yes |
+| bridge-B1 | bridge | 2095 | 59.9 | 16.911 | 17.066 | 878 | 2 | 0 | 1 | 15.186 | 18.966 | 1838 | 1728 | yes |
+| b30-B1 | b30 | 3595 | 59.9 | 16.872 | 16.968 | 1422 | 3 | 1 | 1 | 14.93 | 16.724 | 1760 | 1620 | yes |
+| cryo-B1 | cryo | 2876 | 57.5 | 17.08 | 33.605 | 1248 | 95 | 1 | 124 | 15.063 | 37.511 | 1917 | 1440 | yes |
+
+Off in single view, for comparison (session 2, same TV, same scenes): bridge
+177/176 missed, b30 452/427, cryo 174/168.
+
+- **b30 two-player split: 318 missed in 60 s off → 0 and 0 on**, the 3D view
+  at 1627/1631 lines on average, never below 1512 (sessions 1-5 on this
+  scene: 124-486 off, 0 on in every run).
+- **a10 split: 0 missed either way, and now at 1972 lines on average** (it
+  holds 60 at 2160 most of the time; the controller steps down only for
+  the heavy moments, never below 1620).
+- **Single view: bridge 1 missed (1838 lines mean), b30 1 (1760), against
+  176-452 off.** cryo's 124 are all in its first 12 s (the tutorial's
+  screen convolution, after the upscale, at full resolution; 0 after), as
+  off (168-174): dynamic resolution does not touch it. That needs the
+  half-resolution convolution (tv/halfres, opt-in), not this.
+- The script ended before its 30-minute thermal run on this build (a
+  script error after cryo); the 30-minute A/B is session 5's, on the
+  controller before `3516fc2d` (0 missed for 10 minutes of the last 10 on,
+  600-1900 a minute off).
+
+## Conclusions (dynamic resolution)
+
+- **Default: on for the Apple TV** (`display.dynamic_resolution = "auto"`;
+  off on a Mac). It removes the missed display slots in every gameplay
+  scene measured, b30 split screen's included (the owner's 30 Hz case),
+  keeps single view at 1440 or more (1620-1840 on average), and costs
+  nothing measurable where the A12 already holds 60 (the upscale's draw is
+  below what the device's own timing resolves). Scale 1.0 is byte-identical
+  to the old path.
+- **Ceiling: the display's lines.** This TV's output was 1080p in every
+  session here: the default draws the 3D view at 1080 lines on it, the
+  same as a 2160-line render scaled down by the display would show, at a
+  quarter of the work. A 4K output (Capital OFFICE) gets up to 2160.
+  `display.dynamic_resolution_ceiling = "render"` keeps the old behaviour
+  (render resolution_scaling's lines, scaled down).
+- **Floors:** 1440 lines one view, 1080 split screen. The split floor was
+  reached only in the controller's earlier, wrong versions; the shipping
+  one stays at 1512 or above on b30 split.
+- **Upscale:** bilinear by default; `"sharp"` (CAS-lite) is available and
+  costs ~0.2 ms at p95. MetalFX is not used (A12 support unverified).
+- **What it does not fix:** CPU-side hitches (loads, compiles) and the
+  full-resolution screen convolution after the scene (cryo's first 10 s).
+- **Still to measure:** the 30-minute thermal run on the shipping build;
+  the real 4K output (Capital OFFICE), where the ceiling is 2160 and the
+  numbers above with `ceiling render` are the closest stand-in.
