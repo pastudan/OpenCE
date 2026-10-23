@@ -130,6 +130,7 @@ Without the secrets it uploads the app signed ad hoc, as before.
 | `HALO_METAL_DEBUG=<bits>` | 1 no culling, 2 no depth test, 4 white, 8 the first texture, 16 the diffuse colour, 32 the uniforms |
 | `HALO_METAL_NO_BC=1` | DXT textures converted as on a GPU without BC formats (the Apple TV), per `display.texture_format` |
 | `HALO_METAL_TEXTURE_SHARED=1` | the converted DXT textures in shared memory, written by the CPU, instead of the GPU's own (which it may compress losslessly) |
+| `HALO_TELEMETRY=on` | the play telemetry (`host_telemetry.h`; on by default only on the TV): `HALO_TELEMETRY_DIR`, `HALO_TELEMETRY_HITCH_MS` (50), `HALO_TELEMETRY_KEEP` (40 sessions), `HALO_TELEMETRY_MAX_MB` (200) |
 | `MTL_DEBUG_LAYER=1` | Metal's validation |
 
 ## Not yet

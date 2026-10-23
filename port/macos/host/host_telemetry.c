@@ -423,7 +423,7 @@ static const char *thermal_name(int thermal)
 
 void host_telemetry_start(void)
 {
-	char description[256], stamp[32];
+	char description[400], stamp[32];
 	struct tm utc;
 	const char *value;
 

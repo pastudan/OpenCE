@@ -111,7 +111,20 @@ void host_telemetry_platform_describe(char *text, unsigned int size)
 		length = sizeof(model);
 		sysctlbyname("hw.model", model, &length, NULL, 0);
 	}
+#if TARGET_OS_TV || TARGET_OS_IOS
+	{
+		/* (the screen's own pixels and scale: whether a 1920x1080 drawable
+		is the TV's output mode or a layer drawn at 1x) */
+		UIScreen *screen = [UIScreen mainScreen];
+
+		snprintf(text, size, "%s, %s, screen %.0fx%.0f points, native %.0fx%.0f at %.1fx, mode %.0fx%.0f", model,
+			system.UTF8String ? system.UTF8String : "", screen.bounds.size.width, screen.bounds.size.height,
+			screen.nativeBounds.size.width, screen.nativeBounds.size.height, screen.nativeScale,
+			screen.currentMode.size.width, screen.currentMode.size.height);
+	}
+#else
 	snprintf(text, size, "%s, %s", model, system.UTF8String ? system.UTF8String : "");
+#endif
 	/* (a JSON string: no quotes) */
 	for (char *c = text; *c; c++)
 	{
