@@ -108,7 +108,7 @@ SCENES = {
     # two-player split screen on b30's beach, from a fresh launch (the
     # insertion cinematic is one view; the beach's firefight, two): the
     # owner's 30 Hz case (PERFORMANCE.md, "Dynamic resolution (A12)")
-    "b30split": {"init": ["player_spawn_count 2", "map_name levels\\b30\\b30"], "seconds": 150,
+    "b30split": {"init": ["player_spawn_count 2", "map_name levels\\b30\\b30"], "seconds": 180,
                  "window_seconds": 60.0, "map": "b30.map"},
 }
 
