@@ -167,6 +167,12 @@ static const struct config_setting config_settings[] =
 		"ASTC, a quarter of the memory, with some texels a little off (a\n"
 		"transparent edge's colours, an alpha's steps). \"guest\" decodes them in\n"
 		"the game as before (for comparisons)." },
+	{ "display.half_res_convolution", _config_boolean, "false", "HALO_HALF_RES_CONVOLUTION", _environment_value,
+		_platform_desktop,
+		"Metal builds: the full-screen blurs (a cinematic's, the scopes' zoom)\n"
+		"draw their passes between the first and the last at half the\n"
+		"resolution, a quarter of the pixels: faster on a 4K screen, a\n"
+		"little softer. false draws them all at full resolution." },
 	{ "display.menus", _config_string, "\"pc\"", "HALO_MENUS", _environment_value, _platform_all,
 		"The menus: \"pc\" for the PC version's main menu (port/assets/menus,\n"
 		"and a menus folder here for your own), \"xbox\" for the Xbox's." },

@@ -111,6 +111,11 @@ symbols in this file:
 #ifdef HALO_METAL
 /* port: opt-in screen-effect diagnostics, port/macos/guest/guest_metal.c */
 void metal_device_screen_effect(int type, int passes, float radius, int video);
+/* port: display.half_res_convolution (port/macos/guest/d3d8_metal.c):
+whether this frame's convolution draws its middle passes at half the
+scene's resolution, and the pair of targets they draw into */
+int halo_half_res_convolution(void);
+void halo_half_res_target(int index, D3DSurface **surface, D3DBaseTexture **texture);
 #endif
 
 /* ---------- constants */
@@ -504,6 +509,104 @@ static real rasterizer_screen_effect_pass_radius(
 	return radius;
 }
 
+/* port: a convolution's pass's target drawn at half resolution
+(display.half_res_convolution): the pass's own target (the screen or its
+copy, as the loop below picks them) or the half-resolution pair's, NONE
+for the pass's own. The copy's part is played by the pair's 0, the
+screen's by its 1, except where the screen must be: the first pass reads
+it, the last draws into it. Each pass draws and reads exactly as the
+Xbox's, in the game's units, only fewer pixels. */
+#ifdef HALO_METAL
+static short rasterizer_screen_effect_half_target(
+	short target,
+	boolean destination,
+	short pass,
+	short pass_count)
+{
+	if (target == _rasterizer_target_screen_effect)
+		return 0;
+	if (target != _rasterizer_target_render_primary || pass_count < 2 ||
+		(destination ? pass == pass_count - 1 : pass == 0))
+	{
+		return NONE;
+	}
+	return 1;
+}
+#endif
+
+/* port: a pass's source bound to a texture stage, the half-resolution
+pair's in its place when half_res (rasterizer_screen_effect_half_target) */
+static void rasterizer_screen_effect_set_source(
+	boolean half_res,
+	short pass,
+	short pass_count,
+	short stage,
+	short target,
+	short max_mipmap)
+{
+#ifdef HALO_METAL
+	short half = half_res ?
+		rasterizer_screen_effect_half_target(target, FALSE, pass, pass_count) :
+		NONE;
+
+	if (half != NONE)
+	{
+		D3DSurface *surface;
+		D3DBaseTexture *texture;
+
+		halo_half_res_target(half, &surface, &texture);
+		IDirect3DDevice8_SetTexture(global_d3d_device, stage, (IDirect3DBaseTexture8 *)texture);
+		return;
+	}
+#else
+	(void)half_res;
+	(void)pass;
+	(void)pass_count;
+#endif
+	rasterizer_set_target_as_texture(stage, target, max_mipmap);
+}
+
+/* port: a pass's destination, the half-resolution pair's in its place when
+half_res: the whole target, as rasterizer_set_target sets a target other
+than the screen */
+static void rasterizer_screen_effect_set_destination(
+	boolean half_res,
+	short pass,
+	short pass_count,
+	short target)
+{
+#ifdef HALO_METAL
+	short half = half_res ?
+		rasterizer_screen_effect_half_target(target, TRUE, pass, pass_count) :
+		NONE;
+
+	if (half != NONE)
+	{
+		D3DSurface *surface;
+		D3DBaseTexture *texture;
+		D3DSURFACE_DESC description;
+		D3DVIEWPORT8 viewport;
+
+		halo_half_res_target(half, &surface, &texture);
+		IDirect3DDevice8_SetRenderTarget(global_d3d_device, surface, NULL);
+		IDirect3DSurface8_GetDesc(surface, &description);
+		viewport.X = 0;
+		viewport.Y = 0;
+		viewport.Width = description.Width;
+		viewport.Height = description.Height;
+		viewport.MinZ = 0.0f;
+		viewport.MaxZ = 1.0f;
+		IDirect3DDevice8_SetViewport(global_d3d_device, &viewport);
+		return;
+	}
+#else
+	(void)half_res;
+	(void)pass;
+	(void)pass_count;
+#endif
+	rasterizer_set_target(target, FALSE, FALSE, FALSE, FALSE);
+}
+
 /* ---------- public code */
 
 void _rasterizer_screen_effect(
@@ -540,6 +643,7 @@ void _rasterizer_screen_effect(
 		unsigned long light_enhancement_input;
 		unsigned long desaturation_input;
 		struct rasterizer_cinematic_screen_effect_parameters scaled_parameters;
+		boolean half_res = FALSE;
 
 		/* port: the native builds draw the screen at several pixels to the
 		Xbox's one (halo_screen_scale): a convolution's few copies of the
@@ -562,6 +666,14 @@ void _rasterizer_screen_effect(
 				pass_count += refinement_passes;
 			}
 		}
+
+		/* port: a blur or warp's passes between its first and last drawn at
+		half the scene's resolution (display.half_res_convolution) */
+#ifdef HALO_METAL
+		half_res = parameters->convolution_type != _rasterizer_screen_effect_convolution_type_none &&
+			!parameters->video_on && pass_count >= 2 &&
+			halo_half_res_convolution();
+#endif
 
 #ifdef HALO_METAL
 		/* port: report actual cinematic/weapon parameters, not an assumed
@@ -645,7 +757,7 @@ void _rasterizer_screen_effect(
 					334,
 					pass==1);
 
-				rasterizer_set_target_as_texture(0, source_target, FALSE);
+				rasterizer_screen_effect_set_source(half_res, pass, pass_count, 0, source_target, FALSE);
 				IDirect3DDevice8_SetTextureStageState(global_d3d_device, 0, D3DTSS_ADDRESSU, D3DTADDRESS_CLAMP);
 				IDirect3DDevice8_SetTextureStageState(global_d3d_device, 0, D3DTSS_ADDRESSV, D3DTADDRESS_CLAMP);
 				IDirect3DDevice8_SetTextureStageState(global_d3d_device, 0, D3DTSS_MAGFILTER, D3DTEXF_POINT);
@@ -693,7 +805,7 @@ void _rasterizer_screen_effect(
 						else if (pass == 0)
 						{
 							if (stage == 0)
-								rasterizer_set_target_as_texture(0, source_target, FALSE);
+								rasterizer_screen_effect_set_source(half_res, pass, pass_count, 0, source_target, FALSE);
 							else
 								continue;
 						}
@@ -704,13 +816,13 @@ void _rasterizer_screen_effect(
 								if (stage == 0)
 									rasterizer_set_texture_bitmap_data(0, parameters->convolution_mask);
 								else if (stage == 1)
-									rasterizer_set_target_as_texture(1, source_target, FALSE);
+									rasterizer_screen_effect_set_source(half_res, pass, pass_count, 1, source_target, FALSE);
 								else
 									continue;
 							}
 							else if (stage == 0)
 							{
-								rasterizer_set_target_as_texture(0, source_target, FALSE);
+								rasterizer_screen_effect_set_source(half_res, pass, pass_count, 0, source_target, FALSE);
 							}
 							else
 							{
@@ -731,24 +843,24 @@ void _rasterizer_screen_effect(
 						if (stage == 0)
 							rasterizer_set_texture_bitmap_data(0, parameters->convolution_mask);
 						else if (stage == 1)
-							rasterizer_set_target_as_texture(1, source_target, FALSE);
+							rasterizer_screen_effect_set_source(half_res, pass, pass_count, 1, source_target, FALSE);
 						else if (stage == 2)
-							rasterizer_set_target_as_texture(2, source_target, FALSE);
+							rasterizer_screen_effect_set_source(half_res, pass, pass_count, 2, source_target, FALSE);
 						else if (stage == 3)
-							rasterizer_set_target_as_texture(3, source_target, FALSE);
+							rasterizer_screen_effect_set_source(half_res, pass, pass_count, 3, source_target, FALSE);
 						else
 							continue;
 					}
 					else
 					{
 						if (stage == 0)
-							rasterizer_set_target_as_texture(0, source_target, FALSE);
+							rasterizer_screen_effect_set_source(half_res, pass, pass_count, 0, source_target, FALSE);
 						else if (stage == 1)
-							rasterizer_set_target_as_texture(1, source_target, FALSE);
+							rasterizer_screen_effect_set_source(half_res, pass, pass_count, 1, source_target, FALSE);
 						else if (stage == 2)
-							rasterizer_set_target_as_texture(2, source_target, FALSE);
+							rasterizer_screen_effect_set_source(half_res, pass, pass_count, 2, source_target, FALSE);
 						else if (stage == 3)
-							rasterizer_set_target_as_texture(3, source_target, FALSE);
+							rasterizer_screen_effect_set_source(half_res, pass, pass_count, 3, source_target, FALSE);
 						else
 							continue;
 					}
@@ -799,7 +911,7 @@ void _rasterizer_screen_effect(
 			rasterizer_screen_effect_set_texture_transforms(parameters, pass, pass_count);
 
 			if (destination_target != NONE)
-				rasterizer_set_target(destination_target, FALSE, FALSE, FALSE, FALSE);
+				rasterizer_screen_effect_set_destination(half_res, pass, pass_count, destination_target);
 
 			if (parameters->video_on)
 			{

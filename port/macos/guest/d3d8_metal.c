@@ -380,6 +380,9 @@ enum render_target_kind
 	_render_target_screen,
 	/* a shadow map: halo_shadow_map_scale's */
 	_render_target_shadow_map,
+	/* a half-resolution target (half_res, below): a fraction of the
+	scene's scale */
+	_render_target_half,
 };
 
 struct render_target_entry
@@ -393,6 +396,8 @@ struct render_target_entry
 	multisampled with multisampling (render_target_multisample) */
 	BOOL screen_buffer;
 	enum render_target_kind kind;
+	/* a half-resolution target's: the scene's scale it was made for */
+	float scene_scale[2];
 };
 
 /* every draw looks up its targets and whether its textures are render
@@ -752,6 +757,131 @@ static BOOL surface_is_shadow_map(const D3DSurface *surface)
 #define SECONDARY_TARGET_WIDTH 320
 #define SECONDARY_TARGET_HEIGHT 240
 
+/* ---------- half resolution (display.half_res_convolution)
+
+Opt-in: the screen convolution's passes between its first and its last
+(rasterizer_xbox_screen_effect.c) are drawn into a pair of targets at half
+the scene's resolution each way, a quarter of its pixels. They keep the
+screen's size in the game's units (its width and 480 lines), so the game's
+viewports, quads and texture coordinates are unchanged; only their pixels
+per unit are halved (render_target_get). The first pass reads the screen
+at full resolution, the last writes it, sampling the half-resolution
+result with bilinear filtering: a blur loses little.
+
+halfres_scene_scale is the one place that knows the scene's resolution
+(the screen's targets' pixels per unit, screen_scale): a renderer that
+draws the scene at another size than the display (dynamic resolution)
+changes it there. HALO_HALF_RES_CYCLE=N (diagnostic) turns the feature on
+and off in alternate blocks of N frames, whatever the settings, to compare
+the two in one run (tools/halfres_compare.py). */
+
+#define HALF_RES_TARGETS 2
+
+static struct
+{
+	D3DSurface surface;
+	D3DBaseTexture texture;
+} half_res_targets[HALF_RES_TARGETS];
+
+/* the setting (config_changes when read), and the diagnostic cycle's
+frames a block (0: none) */
+static int half_res_convolution_setting = -1;
+static unsigned long half_res_read_at;
+static long half_res_cycle = -1;
+
+/* the scene's pixels per unit of the game's screen, each way: the
+adapter for a renderer whose scene is drawn at another size than the
+screen's targets (dynamic resolution) */
+static void halfres_scene_scale(float scale[2])
+{
+	scale[0] = screen_scale[0];
+	scale[1] = screen_scale[1];
+}
+
+/* the half-resolution targets' pixels per unit */
+static void half_res_scale(float scale[2])
+{
+	halfres_scene_scale(scale);
+	scale[0] *= 0.5f;
+	scale[1] *= 0.5f;
+}
+
+/* which half-resolution target a surface or texture's data is: -1 none */
+static int half_res_index(DWORD data)
+{
+	int index;
+
+	for (index = 0; index < HALF_RES_TARGETS; index++)
+	{
+		if (data && half_res_targets[index].surface.Data == data)
+			return index;
+	}
+	return -1;
+}
+
+/* the diagnostic cycle's block this frame is in (0, 1, ...), of count;
+-1 without HALO_HALF_RES_CYCLE */
+static long half_res_cycle_block(long count)
+{
+	if (half_res_cycle < 0)
+	{
+		const char *setting = getenv("HALO_HALF_RES_CYCLE");
+
+		half_res_cycle = setting && atol(setting) > 0 ? atol(setting) : 0;
+		if (half_res_cycle)
+			platform_log("half resolution: HALO_HALF_RES_CYCLE=%ld (diagnostic): on and off in blocks of %ld frames",
+				half_res_cycle, half_res_cycle);
+	}
+	if (!half_res_cycle)
+		return -1;
+	return (long)((device.frame / (unsigned long)half_res_cycle) % (unsigned long)count);
+}
+
+/* the convolution's middle passes at half resolution, this frame: the
+setting, or the diagnostic cycle (even blocks off, odd on). (No radius
+below which it is left at full resolution: a scope's warp and a blur of a
+radius of half an Xbox pixel to ten measured 44-51 dB PSNR against full
+resolution at 2160 lines, port/tvos/PERFORMANCE.md.) */
+int halo_half_res_convolution(void)
+{
+	long block;
+
+	if (half_res_convolution_setting < 0 || half_res_read_at != config_changes())
+	{
+		half_res_read_at = config_changes();
+		half_res_convolution_setting = config_boolean("display.half_res_convolution") != 0;
+		platform_log("half resolution: screen convolution %s", half_res_convolution_setting ? "on" : "off");
+	}
+	block = half_res_cycle_block(2);
+	if (block >= 0)
+		return block == 1;
+	return half_res_convolution_setting;
+}
+
+/* a half-resolution target's surface (to draw into) and texture (to
+sample), index 0 or 1: the screen's size in the game's units */
+void halo_half_res_target(int index, D3DSurface **surface, D3DBaseTexture **texture)
+{
+	if (!half_res_targets[index].surface.Data)
+	{
+		void *memory = platform_contiguous_alloc(D3DTEXTURE_ALIGNMENT, D3DTEXTURE_ALIGNMENT,
+			PLATFORM_ANY_PHYSICAL_ADDRESS, PAGE_READWRITE);
+
+		/* (the address names the target; its memory holds no pixels) */
+		half_res_targets[index].surface.Common = D3DCOMMON_TYPE_SURFACE | 1;
+		half_res_targets[index].surface.Data = memory ? PLATFORM_VIRTUAL_TO_PHYSICAL(memory) : 0;
+		half_res_targets[index].texture.Common = D3DCOMMON_TYPE_TEXTURE | 1;
+		half_res_targets[index].texture.Data = half_res_targets[index].surface.Data;
+	}
+	/* the back buffer's format and size, as the screen's copy target's */
+	half_res_targets[index].surface.Format = device.back_buffer.Format;
+	half_res_targets[index].surface.Size = device.back_buffer.Size;
+	half_res_targets[index].texture.Format = device.back_buffer.Format | (1 << D3DFORMAT_MIPMAP_SHIFT);
+	half_res_targets[index].texture.Size = device.back_buffer.Size;
+	*surface = &half_res_targets[index].surface;
+	*texture = &half_res_targets[index].texture;
+}
+
 /* the targets render_target_get found last, by what it found them from:
 each draw asks again for the same two (bind_targets) */
 #define RECENT_RENDER_TARGET_COUNT 4
@@ -805,6 +935,23 @@ static struct render_target_entry *render_target_get(const D3DSurface *surface)
 		}
 	}
 	surface_dimensions(surface, &width, &height, &depth);
+	/* a half-resolution target: half the scene's scale (half_res_scale),
+	not remembered above, whose key is the screen's scale alone */
+	if (half_res_index(surface->Data) >= 0)
+	{
+		half_res_scale(scale);
+		kind = _render_target_half;
+		for (entry = *render_target_bucket(surface->Data); entry; entry = entry->next_in_bucket)
+		{
+			if (entry->target.data == surface->Data && entry->target.width == width &&
+				entry->target.height == height && !entry->target.depth &&
+				entry->target.scale[0] == scale[0] && entry->target.scale[1] == scale[1])
+			{
+				return entry;
+			}
+		}
+		goto make;
+	}
 	/* the screen's targets are drawn at the screen's scale, and so is the
 	secondary target (the reflections' and active camouflage's: its size is
 	rasterizer_xbox.c's), which keeps the game's 320x240 units, that its
@@ -832,6 +979,7 @@ static struct render_target_entry *render_target_get(const D3DSurface *surface)
 			return render_target_remember(surface, screen, entry);
 		}
 	}
+make:
 	entry = calloc(1, sizeof(*entry));
 	entry->target.data = surface->Data;
 	entry->target.width = width;
@@ -1940,6 +2088,14 @@ static BOOL render_target_stale(const struct render_target_entry *entry)
 			(entry->target.height == SCREEN_HEIGHT && entry->target.width != (unsigned long)halo_screen_width());
 	case _render_target_shadow_map:
 		return entry->target.scale[0] != (float)halo_shadow_map_scale();
+	case _render_target_half:
+	{
+		float scale[2];
+
+		half_res_scale(scale);
+		return entry->target.scale[0] != scale[0] || entry->target.scale[1] != scale[1] ||
+			entry->target.width != (unsigned long)halo_screen_width();
+	}
 	default:
 		return FALSE;
 	}
