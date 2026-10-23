@@ -435,3 +435,9 @@ def test_seconds_record_who_owns_metal_memory():
         assert f'\\"{key}\\"' in recorder
     assert "void host_metal_memory(struct host_metal_memory *memory)" in metal
     assert "target_account(handle, nil);" in metal and "cache_objects++;" in metal
+
+
+def test_tv_ring_is_smaller_and_overflow_is_kept():
+    metal = (ROOT / "port/macos/host/host_metal.m").read_text()
+    assert "#ifdef HALO_TVOS\n#define RING_BYTES (24u << 20)\n#else\n#define RING_BYTES (64u << 20)" in metal
+    assert "host_frame_acc.ring_overflows++;" in metal

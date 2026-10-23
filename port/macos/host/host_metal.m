@@ -51,7 +51,16 @@ indices keeps its latest count (host_metal_visibility_result).
 SDL_Window *host_sdl_window(unsigned int window);
 
 #define FRAMES_IN_FLIGHT 3
+/* each frame's ring (vertices, constants, texture staging): on the Apple TV
+24 MiB, where a frame streams at most ~16 MB (a10 and b30 split screen,
+the play telemetry's stream_frame_max_mb) and the three rings are memory
+the app keeps for good (64 MiB each was 192 MiB of its ~1.4 GB); a frame
+past it takes overflow buffers of its own (ring_allocate, ring_overflows) */
+#ifdef HALO_TVOS
+#define RING_BYTES (24u << 20)
+#else
 #define RING_BYTES (64u << 20)
+#endif
 #define HANDLE_COUNT 65536
 /* a frame's visibility tests, and its counters (a test's in each pass) */
 #define VISIBILITY_TESTS 4096
