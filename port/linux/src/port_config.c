@@ -192,10 +192,10 @@ static const struct config_setting config_settings[] =
 		"the game as before (for comparisons)." },
 	{ "display.half_res_convolution", _config_boolean, "false", "HALO_HALF_RES_CONVOLUTION", _environment_value,
 		_platform_desktop,
-		"Metal builds: the full-screen blurs (a cinematic's, the scopes' zoom)\n"
-		"draw their passes between the first and the last at half the\n"
-		"resolution, a quarter of the pixels: faster on a 4K screen, a\n"
-		"little softer. false draws them all at full resolution." },
+		"Metal builds: the full-screen blurs (a cinematic's; not the scopes',\n"
+		"whose view must stay sharp) draw their passes between the first and\n"
+		"the last at half the resolution, a quarter of the pixels: faster on a\n"
+		"4K screen, a little softer. false draws them all at full resolution." },
 	{ "display.half_precision_shading", _config_boolean, "false", "HALO_HALF_PRECISION_SHADING", _environment_value,
 		_platform_desktop,
 		"Metal builds: the pixel shaders' combiner arithmetic and texture\n"
@@ -604,7 +604,9 @@ static const struct config_setting config_settings[] =
 	{ "debug.test_input", _config_string, "\"\"", "HALO_TEST_INPUT", _environment_value, _platform_all,
 		"\"bot:<seed>\" plays controller 1 with a scripted pattern (automated\n"
 		"network tests); \"look:<seed>\" stands still, only turning and looking\n"
-		"up and down; empty for none." },
+		"up and down; \"zoom:<switches>:<start>\" skips the cinematic until\n"
+		"<start> seconds, switches weapons <switches> times and then clicks\n"
+		"the zoom every six seconds (the scopes); empty for none." },
 	{ "debug.test_commands", _config_string, "\"\"", "HALO_TEST_COMMANDS", _environment_value, _platform_all,
 		"\"<seconds> <command>;...\": console commands run once the game's time\n"
 		"passes each one's seconds (benchmarks' scripted play); empty for none." },
